@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>tg-aria2-bot 管理后台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<div id="login-view" class="view">
+  <form id="login-form" class="login-box">
+    <h1>tg-aria2-bot</h1>
+    <input type="password" id="login-password" placeholder="管理密码" autocomplete="current-password" required>
+    <button type="submit">登录</button>
+    <p id="login-error" class="error"></p>
+  </form>
+</div>
+
+<div id="dashboard-view" class="view" hidden>
+  <header>
+    <h1>tg-aria2-bot 管理后台</h1>
+    <button id="logout-btn" class="secondary">退出</button>
+  </header>
+
+  <section class="card stats-bar">
+    <div class="stat"><span id="stat-active">-</span><label>活动</label></div>
+    <div class="stat"><span id="stat-waiting">-</span><label>等待</label></div>
+    <div class="stat"><span id="stat-stopped">-</span><label>已停</label></div>
+    <div class="stat"><span id="stat-dlspeed">-</span><label>下载速度</label></div>
+    <div class="stat"><span id="stat-upspeed">-</span><label>上传速度</label></div>
+    <div class="stat"><span id="stat-disk">-</span><label>剩余空间</label></div>
+    <form id="limit-form">
+      <input id="limit-input" placeholder="全局限速，如 2M，0 不限" size="10">
+      <button type="submit">设置限速</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>任务</h2>
+    <div class="toolbar">
+      <select id="tasks-status-filter">
+        <option value="">全部状态</option>
+        <option value="PENDING">排队中</option>
+        <option value="ACTIVE">下载中</option>
+        <option value="PAUSED">已暂停</option>
+        <option value="COMPLETED">已完成</option>
+        <option value="FAILED">失败</option>
+        <option value="CANCELLED">已取消</option>
+      </select>
+      <span class="spacer"></span>
+      <button id="tasks-prev" class="secondary" type="button">‹ 上一页</button>
+      <span id="tasks-page-info" class="hint"></span>
+      <button id="tasks-next" class="secondary" type="button">下一页 ›</button>
+    </div>
+    <div class="table-wrap">
+      <table id="tasks-table">
+        <thead>
+          <tr><th>ID</th><th>状态</th><th>进度</th><th>类型</th><th>文件名</th><th>路径</th><th>操作</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>rclone 网盘上传</h2>
+    <p class="hint">
+      只做文件配置，不做 rclone 安装或网盘授权（OAuth 授权无法自动化，需要 SSH 进服务器手动跑
+      <code>rclone config</code>）。保存后需要重启 aria2 才生效：docker 模式 <code>docker compose restart aria2</code>，
+      裸机模式 <code>systemctl restart tg-aria2-bot-aria2</code>。
+    </p>
+    <form id="rclone-form">
+      <label><input type="checkbox" id="rclone-enabled"> 启用下载完成后自动上传</label>
+      <select id="rclone-drive-name"></select>
+      <input id="rclone-drive-dir" placeholder="网盘目标目录，留空为根目录">
+      <button type="submit">保存</button>
+      <button type="button" id="rclone-restart-btn" class="secondary" hidden>立即重启 aria2</button>
+      <span id="rclone-saved" class="hint"></span>
+    </form>
+    <p id="rclone-no-remotes" class="hint" hidden>
+      没检测到任何已配置的 rclone remote，先 SSH 进服务器跑 <code>rclone config</code> 配一个
+      （docker 模式：<code>docker compose exec -it aria2 rclone config</code>）。
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>GoFile 上传</h2>
+    <p class="hint">
+      下载完成后（可选）压缩、上传到 <a href="https://gofile.io" target="_blank" rel="noopener">gofile.io</a>、
+      再（可选）删除本地文件，全部在机器人进程内完成，不依赖 rclone。不填 token 是匿名上传，文件会过期；
+      去 gofile.io 个人资料里拿 token 填这里可以让文件归到你账号名下。保存后需要重启机器人才生效：
+      docker 模式 <code>docker compose restart bot</code>，裸机模式 <code>systemctl restart tg-aria2-bot</code>。
+    </p>
+    <form id="gofile-form">
+      <label><input type="checkbox" id="gofile-enabled"> 启用下载完成后自动上传</label>
+      <label><input type="checkbox" id="gofile-compress"> 上传前压缩为 zip</label>
+      <label><input type="checkbox" id="gofile-delete-local"> 上传成功后删除本地文件</label>
+      <input id="gofile-token" placeholder="gofile.io API token（可选）" style="min-width:260px">
+      <button type="submit">保存</button>
+      <button type="button" id="gofile-restart-btn" class="secondary" hidden>立即重启机器人</button>
+      <span id="gofile-saved" class="hint"></span>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>白名单用户</h2>
+    <form id="add-user-form">
+      <input id="add-user-id" placeholder="Telegram user id" type="number" required>
+      <input id="add-user-note" placeholder="备注（可选）">
+      <button type="submit">添加</button>
+    </form>
+    <div class="table-wrap">
+      <table id="users-table">
+        <thead>
+          <tr><th>User ID</th><th>备注</th><th>来源</th><th>操作</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>修改管理密码</h2>
+    <form id="password-form">
+      <input type="password" id="password-current" placeholder="当前密码" autocomplete="current-password" required>
+      <input type="password" id="password-new" placeholder="新密码（至少 8 位）" autocomplete="new-password" required minlength="8">
+      <button type="submit">修改</button>
+      <span id="password-saved" class="hint"></span>
+    </form>
+  </section>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

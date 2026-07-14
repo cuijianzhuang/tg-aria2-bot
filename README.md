@@ -1,0 +1,172 @@
+# tg-aria2-bot
+
+Telegram 下载机器人：转发媒体消息 / 发送 http(s) 链接 / 磁力链接 / .torrent 文件，
+机器人调度 aria2 下载到服务器，并回报进度。详细设计见对话中的设计文档。
+
+## 一键安装
+
+```bash
+git clone <your-repo-url> tg-aria2-bot
+cd tg-aria2-bot
+sudo ./install.sh
+```
+
+不带参数运行会交互式询问部署方式和凭据；也可以全部用参数一次性跑完，方便无人值守部署：
+
+```bash
+sudo ./install.sh \
+  --mode docker \
+  --token 123456:ABC-xxx \
+  --api-id 12345 \
+  --api-hash 0123456789abcdef0123456789abcdef \
+  --allowed-ids 111111,222222
+```
+
+`--mode` 支持 `docker` 或 `bare`，其余参数(`--token` `--api-id` `--api-hash` `--allowed-ids` `--download-dir`)缺省会交互式询问。
+`API_ID` / `API_HASH` 在 https://my.telegram.org 申请。
+加 `--with-rclone` 可选安装 rclone（网盘上传，V3 功能，默认不装，见下方“可选：rclone”一节）。
+Web 管理后台默认启用，`--admin-password <PW>` 指定密码，不指定则自动生成并在安装结束时打印一次；`--no-web` 完全跳过（见下方“Web 管理后台”一节）。
+
+## 两种部署方式的差异
+
+| | docker | bare |
+|---|---|---|
+| aria2 | 容器 `p3terx/aria2-pro` | 宿主机，`aria2.sh` 一键安装（P3TERX 完美配置） |
+| telegram-bot-api | 容器 `aiogram/telegram-bot-api` | 默认仍用一个独立容器（混合模式）；`--build-botapi-from-source` 可从源码编译成宿主机二进制，彻底摆脱 Docker |
+| bot 进程 | 容器 | Python venv + systemd 服务 |
+| 适用场景 | 全新机器、喜欢容器化管理 | 已有 aria2.sh 环境、不想装 Docker、资源受限的小机器 |
+
+### docker 模式
+
+```bash
+sudo ./install.sh --mode docker ...
+```
+
+内部执行 `scripts/install_docker.sh`：检测/安装 Docker + compose 插件，`docker compose up -d --build`。
+
+常用命令：
+```bash
+docker compose logs -f bot       # 机器人日志
+docker compose logs -f aria2     # aria2 / 钩子脚本日志
+docker compose restart bot
+docker compose down
+```
+
+### bare 模式
+
+```bash
+sudo ./install.sh --mode bare ...
+```
+
+内部执行 `scripts/install_bare.sh`：
+
+1. 用官方 [`aria2.sh`](https://github.com/P3TERX/aria2.sh) 在宿主机安装 aria2 + 完美配置（含 tracker 自动更新、下载完成/停止钩子），配置在 `/root/.aria2c/`。
+   脚本本体逐字复刻在 [`vendor/aria2.sh/aria2.sh`](vendor/aria2.sh/aria2.sh)（离线可用、可审计，不受上游后续改动影响；仓库里没有才会回退联网拉取）。
+   `aria2.sh` 是纯交互式菜单脚本（没有非交互 flag），我们的脚本用 `printf '1\n' | bash aria2.sh` 自动选中菜单里的“1. 安装 Aria2”。
+   注意：`aria2.sh` 内部安装 aria2 二进制和完美配置这两步本身仍然需要联网（从 GitHub Releases / CDN 镜像下载），只有“安装脚本本体”这一层是离线的。
+   安装流程本身全自动（装依赖 → 下载静态二进制 → 下载完美配置 → 注册 init.d 服务），**但它会自动修改并持久化 iptables 规则**，放行 RPC(6800)/BT(51413)/DHT(51413) 端口
+   （Debian 写 `/etc/iptables.up.rules` + `if-pre-up.d` 钩子，CentOS 用 `service iptables save`）。如果你用 ufw/firewalld/云安全组管理防火墙，装完后检查一下有没有冲突或冗余规则。
+   RPC 密钥由 aria2.sh 安装时自动随机生成，写在 `/root/.aria2c/aria2.conf` 里，我们的脚本会读出来同步进 `.env`。
+2. telegram-bot-api：
+   - 默认：仅用 `docker run` 起一个独立容器（不依赖 compose，其余服务都是裸机），端口只绑定 `127.0.0.1:8081`。
+   - 加 `--build-botapi-from-source`：从源码编译 tdlib + telegram-bot-api 装到 `/usr/local/bin`，走 systemd 管理，彻底不用 Docker（耗时 20-40 分钟，需要 2GB+ 内存）：
+     ```bash
+     sudo ./install.sh --mode bare --token ... --api-id ... --api-hash ... --allowed-ids ...
+     # 若已生成 .env，可单独重跑：
+     sudo bash scripts/install_bare.sh --build-botapi-from-source
+     ```
+3. 机器人：创建 `.venv`，装依赖，注册为 `tg-aria2-bot.service`。
+
+常用命令：
+```bash
+systemctl status tg-aria2-bot
+journalctl -u tg-aria2-bot -f
+systemctl status aria2
+```
+
+## Web 管理后台
+
+默认启用两个 Web 界面（都只监听 `127.0.0.1`，不映射公网端口；远程访问用 SSH 隧道 `ssh -L 8080:localhost:8080 -L 6880:localhost:6880 user@server`，或自己套一层带 TLS+认证的反向代理）：
+
+| | 地址 | 作用 | 认证 |
+|---|---|---|---|
+| **自建管理后台** | http://127.0.0.1:8080 | 机器人自己的业务数据：任务列表（暂停/恢复/取消）、全局限速、白名单用户管理 | 单一管理密码（`ADMIN_PASSWORD`），登录后签发 HMAC 签名的 cookie，7 天有效 |
+| **AriaNg** | http://127.0.0.1:6880 | 现成的 aria2 可视化面板：完整任务详情、BT 分享率、连接数等 aria2 原生信息 | 无内建认证，靠只监听 127.0.0.1 这一层挡住外部访问；首次打开在设置页填 RPC 地址 `http://127.0.0.1:6800/jsonrpc` 和密钥（`.env` 里的 `ARIA2_SECRET`），之后记在浏览器 localStorage |
+
+两者分工不重叠：AriaNg 只管 aria2 层面的任务，看不到 Telegram 用户、白名单这些机器人自己的数据；自建后台反过来不重复 AriaNg 已经做得很好的 aria2 任务详情展示。
+
+### 白名单管理
+
+`ALLOWED_USER_IDS`（`.env`）是**种子名单**，改它需要重新跑一次安装或手动改 `.env` 重启；自建后台里新增/删除的用户存在 SQLite 的 `allowed_users` 表里，**不需要重启就能生效**，机器人下次收到消息时直接查库。两者是并集关系——种子名单里的用户在后台看得到但删不掉（会提示去改 `.env`），后台加的用户可以随时删。
+
+如果 `.env` 里 `ALLOWED_USER_IDS` 留空，白名单机制整体关闭（机器人对所有人开放），这时候后台加人也不会有实际效果。
+
+### 关闭 Web 管理后台
+
+```bash
+sudo ./install.sh --no-web ...
+```
+
+docker 模式下 `web`/`ariang` 两个服务标了 compose profile `web`，不传 `--profile web` 就不会启动，`docker compose ps` 也看不到它们，没有额外的镜像/端口占用。bare 模式下直接不注册对应的 systemd 服务。之后想重新开启，`ADMIN_PASSWORD` 不为空时重新跑一次 `docker compose --profile web up -d`（docker）或重新跑 `install_bare.sh`（bare）即可，不用整个重装。
+
+## 可选：rclone（网盘自动上传，V3 功能，默认不装）
+
+`p3terx/aria2-pro` 镜像**本身不带 rclone**（已翻过其 Dockerfile 和 rootfs，确认没有）；bare 模式下 `aria2.sh` 装的完美配置里虽然有 `rclone.env` 模板，但 rclone 二进制同样得自己装。装了也不会自动生效——因为 `upload.sh` 默认没接入 `on-download-complete` 钩子（见上一节）。
+
+```bash
+sudo ./install.sh --mode docker --with-rclone ...   # 或 --mode bare --with-rclone ...
+```
+
+两种模式都通过 [`scripts/install_rclone.sh`](scripts/install_rclone.sh) 把 rclone **装在宿主机**（跑官方 `curl https://rclone.org/install.sh | bash`，二进制落在 `/usr/bin/rclone`），而不是塞进某个容器镜像里：
+- **docker 模式**：装完宿主机的 rclone 后，生成 `docker-compose.override.yml`，把宿主机的 `/usr/bin/rclone` 只读挂载进 `aria2` 容器同一路径，不用重新 build 镜像。rclone 官方 Linux 二进制是纯静态链接的 Go 可执行文件（已用 `file`/`ldd` 验证，无 glibc 依赖），挂进 `p3terx/aria2-pro` 用的 Alpine(musl) 容器不会有兼容性问题。升级 rclone 只需要在宿主机重新跑一次安装脚本，容器里立刻就是新版本。
+- **bare 模式**：aria2 本来就跑在宿主机，rclone 装在宿主机后直接就能被 `upload.sh` 调用，无需额外处理。
+
+两种模式装完都只是有了宿主机上的 `rclone` 命令，**配置网盘 remote 需要交互式 OAuth 授权，没法自动化**：
+```bash
+docker compose exec -it aria2 rclone config     # docker 模式（容器内看到的是同一份宿主机二进制/配置）
+rclone config                                    # bare 模式
+```
+配好 remote 后，如果要真正启用自动上传，把 `aria2.conf`（docker: `aria2-config/aria2.conf`；bare: `/root/.aria2c/aria2.conf`）里的
+`on-download-complete=/config/clean.sh` 改成指向 `upload.sh`（或改成先后调用两者的包装脚本），再重启 aria2。
+
+## 部署后必查
+
+- `.env` 中的 `ARIA2_SECRET`：脚本会自动生成或从 aria2.sh 已生成的配置里同步，不要用默认值。
+- `.env` 中的 `ADMIN_PASSWORD`：安装时没指定会自动生成并只打印一次，确认已经记下来了；忘记了就直接改 `.env` 重启 `tg-aria2-web`（bare）或 `docker compose restart web`（docker）。
+- 两种模式下 `telegram-bot-api`、`aria2`、web 管理后台、AriaNg 的端口都只监听内网或 `127.0.0.1`，不要映射到公网；要远程访问用 SSH 隧道或自己套反向代理+TLS。
+- `move.sh` / `upload.sh`：这两个脚本**默认没有接入任何 aria2 钩子**（`aria2.conf` 里 `on-download-complete` 只指向 `clean.sh`，`clean.sh` 只做 `.aria2`/`.torrent`/空目录清理，不会移动或上传文件），不需要手动关闭。如果 V3 阶段要接网盘自动上传，把 `on-download-complete` 改成指向 `upload.sh` 或 `move.sh` 再启用。
+
+## 目录结构
+
+```
+tg-aria2-bot/
+├── install.sh                  # 一键安装入口
+├── scripts/
+│   ├── install_docker.sh
+│   ├── install_bare.sh
+│   └── install_rclone.sh         # 两种模式共用：把 rclone 装在宿主机（--with-rclone 时调用）
+├── systemd/                    # bare 模式用的 unit 模板（含 tg-aria2-web、tg-ariang）
+├── docker-compose.yml
+├── Dockerfile
+├── Dockerfile.ariang            # nginx + 官方 AriaNg 静态构建产物（docker 模式）
+├── requirements.txt
+├── .env.example
+├── aria2-config/                # 预置的 P3TERX/aria2.conf 文件，路径已适配本项目（docker 模式用）
+│   ├── aria2.conf                # dir=/downloads, rpc-secret 由 install.sh 自动写入
+│   ├── script.conf
+│   ├── rclone.env                 # 默认未接入钩子，见“可选：rclone”一节
+│   └── script/upload.sh           # 必须放在这里，见下方说明
+├── vendor/                      # 上游文件的逐字 1:1 复刻，路径未做任何改动，仅供离线安装/审计对照
+│   ├── aria2.sh/aria2.sh          # https://github.com/P3TERX/aria2.sh
+│   └── aria2.conf/                # https://github.com/P3TERX/aria2.conf（原始 /root/Download、/root/.aria2 路径）
+└── bot/                        # 机器人源码
+    └── web/                      # 自建管理后台：FastAPI + 纯静态 HTML/JS 前端，无构建步骤
+        ├── app.py
+        ├── auth.py                 # 单密码 + HMAC 签名 cookie，不依赖数据库存 session
+        └── static/                 # index.html / app.js / style.css
+```
+
+`aria2-config/` 里的文件取自 https://github.com/P3TERX/aria2.conf (MIT License)，调整了路径（`/root/Download` → `/downloads`，`/root/.aria2` → `/config`）以适配本项目的 docker 部署，容器首次启动直接使用这份配置，不需要联网去 GitHub 拉取。
+`vendor/` 里的文件是**未经任何修改**的原始副本（路径仍是上游默认的 `/root/...`），存在这里只是为了离线安装（`scripts/install_bare.sh` 会优先用 `vendor/aria2.sh/aria2.sh`）和审计对照，不会被本项目直接引用运行。
+
+**重要**：`aria2-config/` 里不再放 `core`/`clean.sh`/`delete.sh`/`tracker.sh`——实测 `p3terx/aria2-pro` 镜像首次启动会用它自己的这几个文件覆盖到容器内的 `/config/script/`（它的 `core` 把 `ARIA2_CONF_DIR` 写死为 `/config`，不依赖脚本物理路径，比我们原来 vendor 的 `$(dirname $0)` 写法更健壮，所以直接用镜像自带的更省心），放在仓库顶层也会被起容器时清掉，纯属误导。`upload.sh` 是镜像不自带的额外功能，必须放在 `aria2-config/script/upload.sh`（对应容器内 `/config/script/upload.sh`）才能和镜像自己的 `core` 配套工作；`aria2.conf` 里的 `on-download-complete`/`on-download-stop` 也相应指向 `/config/script/*.sh`，不能是 `/config/` 顶层。

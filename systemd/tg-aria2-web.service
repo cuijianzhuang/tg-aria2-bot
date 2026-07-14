@@ -1,0 +1,16 @@
+[Unit]
+Description=tg-aria2-bot web admin
+After=network-online.target aria2.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={{WORKDIR}}
+EnvironmentFile={{WORKDIR}}/.env
+ExecStart={{WORKDIR}}/.venv/bin/python -m uvicorn bot.web.app:app --host 127.0.0.1 --port {{WEB_PORT}}
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,18 @@
+# Serves AriaNg (https://github.com/mayswind/AriaNg, MIT License) as a static
+# site via nginx. AriaNg talks directly to aria2's JSON-RPC from the browser —
+# no backend of its own, you just fill in host/port/secret once in its settings
+# page (it remembers via localStorage).
+FROM nginx:alpine
+
+RUN apk add --no-cache curl unzip && \
+    TAG=$(curl -fsSL https://api.github.com/repos/mayswind/AriaNg/releases/latest | grep -m1 '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/') && \
+    curl -fsSL -o /tmp/ariang.zip "https://github.com/mayswind/AriaNg/releases/download/${TAG}/AriaNg-${TAG}-AllInOne.zip" && \
+    rm -rf /usr/share/nginx/html/* && \
+    unzip -q /tmp/ariang.zip -d /usr/share/nginx/html && \
+    rm /tmp/ariang.zip && \
+    apk del curl unzip
+
+# Proxies /jsonrpc to the aria2 container over the internal docker network, so
+# the RPC port itself never needs to be published to whatever network this
+# container's port 80 is exposed on.
+COPY ariang-nginx.conf /etc/nginx/conf.d/default.conf

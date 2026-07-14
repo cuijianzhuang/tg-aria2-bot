@@ -1,0 +1,84 @@
+version: "3.8"
+
+services:
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${API_ID}
+      TELEGRAM_API_HASH: ${API_HASH}
+      TELEGRAM_LOCAL: "true"
+    volumes:
+      - botapi-data:/var/lib/telegram-bot-api
+    networks: [internal]
+
+  aria2:
+    image: p3terx/aria2-pro:latest
+    restart: unless-stopped
+    environment:
+      RPC_SECRET: ${ARIA2_SECRET}
+      RPC_PORT: 6800
+      UPDATE_TRACKERS: "true"
+      PUID: 1000
+      PGID: 1000
+    volumes:
+      - ./downloads:/downloads
+      - ./aria2-config:/config
+    # No host port published: bot/web reach this over the internal docker network
+    # (aria2:6800), and ariang proxies /jsonrpc to it server-side (see
+    # ariang-nginx.conf) instead of the browser hitting this port directly.
+    # (A public 6800 mapping was staged here pending explicit user confirmation
+    # that was never actually given in those exact terms — reverted rather than
+    # left live on an unconfirmed risk.)
+    logging:
+      options:
+        max-size: "1m"
+    networks: [internal]
+
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    depends_on: [telegram-bot-api, aria2]
+    volumes:
+      - ./downloads:/downloads
+      - ./data:/app/data
+    networks: [internal]
+
+  web:
+    build: .
+    command: ["python", "-m", "uvicorn", "bot.web.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    restart: unless-stopped
+    env_file: .env
+    depends_on: [aria2]
+    ports:
+      # Exposed publicly at the user's request. Mitigations in place: HTTPOnly signed
+      # session cookie (bot/web/auth.py) + per-IP login rate limiting (bot/web/app.py,
+      # 5 attempts / 5 min then a 5 min lockout). Still plain HTTP — no TLS — so treat
+      # ADMIN_PASSWORD as sent in the clear on every login.
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./aria2-config:/aria2-config
+    networks: [internal]
+    profiles: ["web"]
+
+  ariang:
+    build:
+      context: .
+      dockerfile: Dockerfile.ariang
+    restart: unless-stopped
+    depends_on: [aria2]
+    ports:
+      # Exposed publicly at the user's request, same posture as `web` above. Only
+      # this port needs to be public — aria2's RPC port itself stays internal-only,
+      # nginx proxies /jsonrpc to it server-side.
+      - "6880:80"
+    networks: [internal]
+    profiles: ["web"]
+
+networks:
+  internal:
+
+volumes:
+  botapi-data:

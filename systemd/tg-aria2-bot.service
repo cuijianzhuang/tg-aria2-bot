@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram aria2 download bot
+After=network-online.target aria2.service telegram-bot-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={{WORKDIR}}
+EnvironmentFile={{WORKDIR}}/.env
+ExecStart={{WORKDIR}}/.venv/bin/python -m bot.main
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

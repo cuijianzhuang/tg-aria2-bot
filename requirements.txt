@@ -1,0 +1,7 @@
+aiogram==3.13.1
+aria2p==0.12.1
+aiosqlite==0.20.0
+pydantic-settings==2.5.2
+fastapi==0.115.0
+uvicorn==0.30.6
+aiohttp==3.10.11
