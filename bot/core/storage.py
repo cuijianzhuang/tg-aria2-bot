@@ -28,9 +28,14 @@ def url_hash(url: str) -> str:
     return hashlib.sha256(url.strip().lower().encode()).hexdigest()[:16]
 
 
+# torrent/magnet sizes are unknown before download starts, so the size-based
+# check alone lets them through on a nearly-full disk — keep a hard floor too
+MIN_FREE_BYTES = 1 * 1024**3
+
+
 def has_enough_space(download_dir: str, required_bytes: int, safety_factor: float = 1.2) -> bool:
     usage = shutil.disk_usage(download_dir)
-    return usage.free > required_bytes * safety_factor
+    return usage.free > max(required_bytes * safety_factor, MIN_FREE_BYTES)
 
 
 def _human_size(n: int) -> str:

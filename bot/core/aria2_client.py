@@ -52,12 +52,11 @@ class Aria2Client:
         return await self._run(self._api.get_download, gid)
 
     async def pause(self, gid: str):
-        download = await self.get_status(gid)
-        await self._run(download.pause)
+        # gid-direct RPC: one roundtrip instead of get_status + pause
+        await self._run(self._api.client.pause, gid)
 
     async def resume(self, gid: str):
-        download = await self.get_status(gid)
-        await self._run(download.resume)
+        await self._run(self._api.client.unpause, gid)
 
     async def remove(self, gid: str, *, files: bool = False):
         download = await self.get_status(gid)

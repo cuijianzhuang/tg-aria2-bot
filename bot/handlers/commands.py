@@ -73,8 +73,5 @@ async def _resolve_gid(command: CommandObject, repo) -> str | None:
         task_id = int(command.args.strip())
     except ValueError:
         return None
-    rows = await repo.list_recent(100)
-    for row in rows:
-        if row["id"] == task_id:
-            return row["gid"]
-    return None
+    row = await repo.get_by_id(task_id)
+    return row["gid"] if row else None

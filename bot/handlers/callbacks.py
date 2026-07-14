@@ -1,6 +1,8 @@
 import logging
+import os
 
 from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery
 
 from bot.config import settings
@@ -17,7 +19,7 @@ from bot.core.keyboards import (
     task_keyboard,
 )
 from bot.core.list_view import render_task_list, render_task_overview
-from bot.core.pending_tasks import delete_pending, get_pending, pop_pending
+from bot.core.pending_tasks import delete_pending, get_pending
 
 log = logging.getLogger(__name__)
 router = Router(name="callbacks")
@@ -88,6 +90,23 @@ async def list_filter(query: CallbackQuery, repo, aria2):
     await _edit(query, text, reply_markup=markup, parse_mode="HTML")
 
 
+async def _add_source(aria2, kind: str, payload: str, file_name: str | None) -> str:
+    """Add a download to aria2 from its original source; returns the new gid.
+    Shared by pending:start and task:retry so both stay in sync."""
+    if kind in {"url", "tg_media"}:
+        subdir = storage.build_subdir(settings.download_dir, file_name or payload)
+        return await aria2.add_uri(
+            payload,
+            out=file_name if kind == "tg_media" else None,
+            download_dir=subdir,
+        )
+    if kind == "magnet":
+        return await aria2.add_magnet(payload, download_dir=settings.download_dir)
+    if kind == "torrent":
+        return await aria2.add_torrent(payload, download_dir=settings.download_dir)
+    raise ValueError(f"unknown source kind: {kind}")
+
+
 @router.callback_query(F.data.startswith("pending:"))
 async def handle_pending(query: CallbackQuery, aria2, repo):
     _, action, token = query.data.split(":", 2)
@@ -107,26 +126,21 @@ async def handle_pending(query: CallbackQuery, aria2, repo):
         await query.answer("未知操作", show_alert=True)
         return
 
-    pending = pop_pending(token)
+    if not storage.has_enough_space(settings.download_dir, pending.file_size or 0):
+        await query.answer("⛔ 服务器磁盘空间不足，已拒绝该任务。", show_alert=True)
+        return
+
     try:
-        if pending.kind in {"url", "tg_media"}:
-            subdir = storage.build_subdir(settings.download_dir, pending.file_name or pending.payload)
-            gid = await aria2.add_uri(
-                pending.payload,
-                out=pending.file_name if pending.kind == "tg_media" else None,
-                download_dir=subdir,
-            )
-        elif pending.kind == "magnet":
-            gid = await aria2.add_magnet(pending.payload, download_dir=settings.download_dir)
-        elif pending.kind == "torrent":
-            gid = await aria2.add_torrent(pending.payload, download_dir=settings.download_dir)
-        else:
-            await query.answer("未知任务类型", show_alert=True)
-            return
+        gid = await _add_source(aria2, pending.kind, pending.payload, pending.file_name)
+    except ValueError:
+        await query.answer("未知任务类型", show_alert=True)
+        return
     except Exception:
+        # keep the pending entry so the button still works on the next tap
         log.exception("failed to start pending task")
         await query.answer("添加任务失败，请稍后重试。", show_alert=True)
         return
+    delete_pending(token)
 
     task_id = await repo.create_task(
         gid=gid,
@@ -137,6 +151,7 @@ async def handle_pending(query: CallbackQuery, aria2, repo):
         source_ref=pending.source_ref,
         file_name=pending.file_name,
         file_size=pending.file_size,
+        payload=pending.payload,
     )
     row = await repo.get_by_id(task_id)
     await _edit(query, render_task_card(row, status="PENDING"), reply_markup=task_keyboard(gid, "PENDING"), parse_mode="HTML")
@@ -154,6 +169,25 @@ async def handle_task_action(query: CallbackQuery, aria2, repo):
         download = await _download_or_none(aria2, gid)
         status = _mapped_status(download, row["status"])
         await _edit(query, render_task_card(row, download, status=status), reply_markup=task_keyboard(gid, status), parse_mode="HTML")
+        return
+
+    if action == "retry":
+        payload = row["payload"]
+        if not payload or (row["source_type"] == "torrent" and not os.path.exists(payload)):
+            await query.answer("缺少原始下载来源，无法重试。请重新发送链接或文件。", show_alert=True)
+            return
+        try:
+            new_gid = await _add_source(aria2, row["source_type"], payload, row["file_name"])
+        except Exception:
+            log.exception("retry failed for task %s", row["id"])
+            await query.answer("重试失败，请稍后再试。", show_alert=True)
+            return
+        await repo.retry_task(
+            row["id"], new_gid,
+            reply_message_id=query.message.message_id if query.message else None,
+        )
+        row = await repo.get_by_id(row["id"])
+        await _edit(query, render_task_card(row, status="PENDING"), reply_markup=task_keyboard(new_gid, "PENDING"), parse_mode="HTML")
         return
 
     if action == "cancel":
@@ -300,6 +334,11 @@ async def _edit(query: CallbackQuery, text: str, answer_text: str | None = None,
         return
     try:
         await query.message.edit_text(text, **kwargs)
+    except TelegramBadRequest as e:
+        # "message is not modified" = user tapped the same button twice;
+        # a silent toast is correct there, a duplicate message is not
+        if "message is not modified" not in str(e):
+            await query.message.answer(text, **kwargs)
     except Exception:
         await query.message.answer(text, **kwargs)
     await query.answer(answer_text)

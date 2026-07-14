@@ -77,7 +77,7 @@ def _action_buttons(gid: str, status: str, prefix: str, label_prefix: str = "") 
         ]
     elif status == "FAILED":
         rows = [
-            [("🔄 重试", "resume"), ("ℹ️ 查看原因", "detail")],
+            [("🔄 重试", "retry"), ("ℹ️ 查看原因", "detail")],
             [("🗑 删除记录", "delete")],
         ]
     elif status == "CANCELLED":
@@ -103,6 +103,15 @@ def task_keyboard(gid: str, status: str) -> InlineKeyboardMarkup | None:
 def task_open_button(index: int, gid: str, name: str) -> list[InlineKeyboardButton]:
     text = f"{index}. {name[:30]}"
     return [InlineKeyboardButton(text=text, callback_data=f"task:detail:{gid}")]
+
+
+def redownload_keyboard(gid: str | None) -> InlineKeyboardMarkup | None:
+    """Offered on the '已下载过' dedup reply so it isn't a dead end."""
+    if not gid:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🔄 重新下载", callback_data=f"task:retry:{gid}")]]
+    )
 
 
 def task_cancel_confirm_keyboard(gid: str, *, destructive: bool = False) -> InlineKeyboardMarkup:

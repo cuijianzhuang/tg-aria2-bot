@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     save_path         TEXT,
     error             TEXT,
     gofile_link       TEXT,
+    payload           TEXT,               -- original source (url/magnet/file uri/torrent path) for retry
+
     created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     finished_at       TIMESTAMP
 );
@@ -33,6 +35,7 @@ CREATE TABLE IF NOT EXISTS allowed_users (
 # swallows the "duplicate column" error SQLite raises on a repeat.
 MIGRATIONS = [
     "ALTER TABLE tasks ADD COLUMN gofile_link TEXT",
+    "ALTER TABLE tasks ADD COLUMN payload TEXT",
 ]
 
 # Valid status values, kept here as the single source of truth for the state machine.

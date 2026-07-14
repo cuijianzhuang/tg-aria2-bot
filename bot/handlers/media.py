@@ -6,7 +6,7 @@ from aiogram.types import Message
 from bot.config import settings
 from bot.core import storage
 from bot.core.cards import render_pending_card
-from bot.core.keyboards import pending_task_keyboard
+from bot.core.keyboards import pending_task_keyboard, redownload_keyboard
 from bot.core.pending_tasks import create_pending
 from bot.core.telegram_files import to_download_uri
 
@@ -47,7 +47,10 @@ async def handle_media(message: Message, aria2, repo):
 
     existing = await repo.get_completed_by_source("tg_media", file_unique_id)
     if existing:
-        await message.reply(f"ℹ️ 该文件已下载过：{existing['save_path']}")
+        await message.reply(
+            f"ℹ️ 该文件已下载过：{existing['save_path']}",
+            reply_markup=redownload_keyboard(existing["gid"]),
+        )
         return
 
     if not storage.has_enough_space(settings.download_dir, file_size or 0):

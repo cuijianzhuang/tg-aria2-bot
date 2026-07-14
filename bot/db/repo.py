@@ -38,17 +38,32 @@ class TaskRepo:
         source_ref: str | None,
         file_name: str | None,
         file_size: int | None,
+        payload: str | None = None,
     ) -> int:
         cur = await self._conn.execute(
             """
             INSERT INTO tasks (gid, user_id, chat_id, reply_message_id,
-                                source_type, source_ref, file_name, file_size, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
+                                source_type, source_ref, file_name, file_size, payload, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
             """,
-            (gid, user_id, chat_id, reply_message_id, source_type, source_ref, file_name, file_size),
+            (gid, user_id, chat_id, reply_message_id, source_type, source_ref, file_name, file_size, payload),
         )
         await self._conn.commit()
         return cur.lastrowid
+
+    async def retry_task(self, task_id: int, new_gid: str, *, reply_message_id: int | None = None):
+        """Re-arm a failed/cancelled/completed task with a freshly-added aria2 gid.
+        reply_message_id repoints progress edits at the message the retry came from."""
+        await self._conn.execute(
+            """
+            UPDATE tasks
+            SET gid = ?, status = 'PENDING', error = NULL, finished_at = NULL,
+                reply_message_id = COALESCE(?, reply_message_id)
+            WHERE id = ?
+            """,
+            (new_gid, reply_message_id, task_id),
+        )
+        await self._conn.commit()
 
     async def get_by_gid(self, gid: str) -> aiosqlite.Row | None:
         cur = await self._conn.execute("SELECT * FROM tasks WHERE gid = ?", (gid,))

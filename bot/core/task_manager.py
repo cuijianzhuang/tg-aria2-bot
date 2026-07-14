@@ -54,8 +54,13 @@ class TaskManager:
             try:
                 download = await self._aria2.get_status(gid)
             except Exception:
+                # aria2 no longer knows this gid — usually a real loss (restart
+                # without session file), but can also be a completed task purged
+                # by the cleanup hook between polls, which we can't distinguish
                 log.warning("gid %s not found in aria2, marking FAILED", gid)
-                await self._repo.update_status(gid, "FAILED", error="task missing from aria2")
+                await self._repo.update_status(
+                    gid, "FAILED", error="任务在 aria2 中丢失（服务重启或已被清理）；若文件已在磁盘上则实际已完成"
+                )
                 continue
 
             await self._handle_download_state(row, download)
@@ -72,7 +77,9 @@ class TaskManager:
             await self._repo.update_status(gid, "COMPLETED", save_path=target_path or save_path)
 
             if settings.gofile_enabled and target_path and os.path.exists(target_path):
-                await self._run_gofile_pipeline(row, gid, target_path)
+                # background task: a multi-GB compress+upload must not stall the
+                # poll loop (it would freeze progress edits for every other task)
+                asyncio.create_task(self._run_gofile_pipeline(row, gid, target_path))
             else:
                 await self._notify(
                     row, render_task_card(row, download, status="COMPLETED"),
