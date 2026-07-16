@@ -22,7 +22,6 @@ from bot.core.keyboards import (
     task_keyboard,
 )
 from bot.core.list_view import render_task_list
-from bot.core.pending_tasks import delete_pending, get_pending
 
 log = logging.getLogger(__name__)
 router = Router(name="callbacks")
@@ -144,13 +143,13 @@ async def _add_source(aria2, kind: str, payload: str, file_name: str | None) -> 
 @router.callback_query(F.data.startswith("pending:"))
 async def handle_pending(query: CallbackQuery, aria2, repo):
     _, action, token = query.data.split(":", 2)
-    pending = get_pending(token)
+    pending = await repo.get_pending(token)
     if pending is None:
         await query.answer("这个待确认任务已过期，请重新发送。", show_alert=True)
         return
 
     if action == "cancel":
-        delete_pending(token)
+        await repo.delete_pending(token)
         await _edit(query, "已取消添加任务。", reply_markup=main_inline_keyboard(await repo.count_by_status()))
         return
     if action in {"dir", "files", "settings"}:
@@ -174,7 +173,7 @@ async def handle_pending(query: CallbackQuery, aria2, repo):
         log.exception("failed to start pending task")
         await query.answer("添加任务失败，请稍后重试。", show_alert=True)
         return
-    delete_pending(token)
+    await repo.delete_pending(token)
 
     task_id = await repo.create_task(
         gid=gid,

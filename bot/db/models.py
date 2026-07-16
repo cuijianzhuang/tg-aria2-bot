@@ -28,6 +28,21 @@ CREATE TABLE IF NOT EXISTS allowed_users (
     note        TEXT,
     added_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Unconfirmed "开始下载" cards. Used to be an in-memory dict, which meant a bot
+-- restart silently expired every pending confirmation; persisting it lets a
+-- restart mid-confirmation still resolve correctly.
+CREATE TABLE IF NOT EXISTS pending_tasks (
+    token       TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    user_id     INTEGER NOT NULL,
+    chat_id     INTEGER NOT NULL,
+    source_ref  TEXT,
+    file_name   TEXT,
+    file_size   INTEGER,
+    payload     TEXT NOT NULL,
+    created_at  REAL NOT NULL
+);
 """
 
 # CREATE TABLE IF NOT EXISTS above only takes effect on a brand-new database — an
