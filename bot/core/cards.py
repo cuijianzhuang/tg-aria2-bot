@@ -177,6 +177,19 @@ def render_settings(limit_raw: str | None = None) -> str:
     )
 
 
+def render_file_selection(download) -> str:
+    files = [f for f in download.files if not f.is_metadata]
+    selected_n = sum(1 for f in files if f.selected)
+    lines = [
+        "🗂 <b>选择要下载的文件</b>",
+        DIVIDER,
+        f"已选 {selected_n}/{len(files)} 个文件",
+        "",
+        "点击文件切换选中/取消，即点即生效（会短暂暂停任务）。",
+    ]
+    return "\n".join(lines)
+
+
 def render_limit_chooser(limit_raw: str | None = None) -> str:
     current = _fmt_limit(limit_raw) if limit_raw is not None else "未知"
     return (

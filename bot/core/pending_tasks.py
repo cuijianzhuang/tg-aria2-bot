@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from time import time
-from uuid import uuid4
+
+TTL_SECONDS = 30 * 60
 
 
 @dataclass
 class PendingTask:
+    token: str
     kind: str
     user_id: int
     chat_id: int
@@ -16,52 +17,16 @@ class PendingTask:
     payload: str
     created_at: float
 
-
-_TASKS: dict[str, PendingTask] = {}
-TTL_SECONDS = 30 * 60
-
-
-def create_pending(
-    *,
-    kind: str,
-    user_id: int,
-    chat_id: int,
-    source_ref: str | None,
-    file_name: str | None,
-    file_size: int | None,
-    payload: str,
-) -> str:
-    cleanup_expired()
-    token = uuid4().hex[:12]
-    _TASKS[token] = PendingTask(
-        kind=kind,
-        user_id=user_id,
-        chat_id=chat_id,
-        source_ref=source_ref,
-        file_name=file_name,
-        file_size=file_size,
-        payload=payload,
-        created_at=time(),
-    )
-    return token
-
-
-def pop_pending(token: str) -> PendingTask | None:
-    cleanup_expired()
-    return _TASKS.pop(token, None)
-
-
-def get_pending(token: str) -> PendingTask | None:
-    cleanup_expired()
-    return _TASKS.get(token)
-
-
-def delete_pending(token: str):
-    _TASKS.pop(token, None)
-
-
-def cleanup_expired():
-    now = time()
-    expired = [token for token, task in _TASKS.items() if now - task.created_at > TTL_SECONDS]
-    for token in expired:
-        _TASKS.pop(token, None)
+    @classmethod
+    def from_row(cls, row) -> "PendingTask":
+        return cls(
+            token=row["token"],
+            kind=row["kind"],
+            user_id=row["user_id"],
+            chat_id=row["chat_id"],
+            source_ref=row["source_ref"],
+            file_name=row["file_name"],
+            file_size=row["file_size"],
+            payload=row["payload"],
+            created_at=row["created_at"],
+        )

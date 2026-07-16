@@ -1,8 +1,11 @@
 import sqlite3
+from time import time
+from uuid import uuid4
 
 import aiosqlite
 from datetime import datetime, timezone
 
+from bot.core.pending_tasks import TTL_SECONDS, PendingTask
 from bot.db.models import MIGRATIONS, SCHEMA
 
 
@@ -159,3 +162,51 @@ class TaskRepo:
     async def is_user_allowed(self, user_id: int) -> bool:
         cur = await self._conn.execute("SELECT 1 FROM allowed_users WHERE user_id = ?", (user_id,))
         return await cur.fetchone() is not None
+
+    # ---- pending_tasks: unconfirmed "开始下载" cards, persisted so a bot restart
+    # mid-confirmation doesn't just silently expire them ----
+
+    async def create_pending(
+        self,
+        *,
+        kind: str,
+        user_id: int,
+        chat_id: int,
+        source_ref: str | None,
+        file_name: str | None,
+        file_size: int | None,
+        payload: str,
+    ) -> str:
+        await self._cleanup_expired_pending()
+        token = uuid4().hex[:12]
+        await self._conn.execute(
+            """
+            INSERT INTO pending_tasks (token, kind, user_id, chat_id, source_ref, file_name, file_size, payload, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (token, kind, user_id, chat_id, source_ref, file_name, file_size, payload, time()),
+        )
+        await self._conn.commit()
+        return token
+
+    async def get_pending(self, token: str) -> PendingTask | None:
+        await self._cleanup_expired_pending()
+        cur = await self._conn.execute("SELECT * FROM pending_tasks WHERE token = ?", (token,))
+        row = await cur.fetchone()
+        return PendingTask.from_row(row) if row else None
+
+    async def pop_pending(self, token: str) -> PendingTask | None:
+        pending = await self.get_pending(token)
+        if pending:
+            await self.delete_pending(token)
+        return pending
+
+    async def delete_pending(self, token: str):
+        await self._conn.execute("DELETE FROM pending_tasks WHERE token = ?", (token,))
+        await self._conn.commit()
+
+    async def _cleanup_expired_pending(self):
+        await self._conn.execute(
+            "DELETE FROM pending_tasks WHERE created_at < ?", (time() - TTL_SECONDS,)
+        )
+        await self._conn.commit()

@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery
 from bot.config import settings
 from bot.core import storage
 from bot.core.cards import (
+    render_file_selection,
     render_home,
     render_limit_chooser,
     render_settings,
@@ -15,6 +16,7 @@ from bot.core.cards import (
 )
 from bot.core.keyboards import (
     cleanup_confirm_keyboard,
+    file_selection_keyboard,
     limit_chooser_keyboard,
     main_inline_keyboard,
     settings_keyboard,
@@ -22,7 +24,6 @@ from bot.core.keyboards import (
     task_keyboard,
 )
 from bot.core.list_view import render_task_list
-from bot.core.pending_tasks import delete_pending, get_pending
 
 log = logging.getLogger(__name__)
 router = Router(name="callbacks")
@@ -144,13 +145,13 @@ async def _add_source(aria2, kind: str, payload: str, file_name: str | None) -> 
 @router.callback_query(F.data.startswith("pending:"))
 async def handle_pending(query: CallbackQuery, aria2, repo):
     _, action, token = query.data.split(":", 2)
-    pending = get_pending(token)
+    pending = await repo.get_pending(token)
     if pending is None:
         await query.answer("这个待确认任务已过期，请重新发送。", show_alert=True)
         return
 
     if action == "cancel":
-        delete_pending(token)
+        await repo.delete_pending(token)
         await _edit(query, "已取消添加任务。", reply_markup=main_inline_keyboard(await repo.count_by_status()))
         return
     if action in {"dir", "files", "settings"}:
@@ -174,7 +175,7 @@ async def handle_pending(query: CallbackQuery, aria2, repo):
         log.exception("failed to start pending task")
         await query.answer("添加任务失败，请稍后重试。", show_alert=True)
         return
-    delete_pending(token)
+    await repo.delete_pending(token)
 
     task_id = await repo.create_task(
         gid=gid,
@@ -244,9 +245,24 @@ async def handle_task_action(query: CallbackQuery, aria2, repo):
         return
 
     if action == "files":
-        path = row["save_path"] or settings.download_dir
-        link = row["gofile_link"] or "暂无下载链接"
-        await query.answer(f"保存位置：{path}\n链接：{link}", show_alert=True)
+        if row["status"] == "COMPLETED":
+            path = row["save_path"] or settings.download_dir
+            link = row["gofile_link"] or "暂无下载链接"
+            await query.answer(f"保存位置：{path}\n链接：{link}", show_alert=True)
+            return
+
+        download = await _download_or_none(aria2, gid)
+        real_files = [f for f in download.files if not f.is_metadata] if download else []
+        if not download or len(real_files) < 2:
+            await query.answer(
+                "单文件任务或元数据尚未就绪，无法选择文件。" if download else "任务信息暂不可用。",
+                show_alert=True,
+            )
+            return
+        await _edit(
+            query, render_file_selection(download),
+            reply_markup=file_selection_keyboard(gid, download), parse_mode="HTML",
+        )
         return
 
     if action == "settings":
@@ -278,6 +294,47 @@ async def handle_task_action(query: CallbackQuery, aria2, repo):
             )
     except Exception:
         pass
+
+
+@router.callback_query(F.data.startswith("filesel:"))
+async def toggle_file_selection(query: CallbackQuery, aria2, repo):
+    _, gid, index_raw = query.data.split(":", 2)
+    row = await repo.get_by_gid(gid)
+    if row is None:
+        await query.answer("任务不存在", show_alert=True)
+        return
+
+    download = await _download_or_none(aria2, gid)
+    real_files = [f for f in download.files if not f.is_metadata] if download else []
+    try:
+        index = int(index_raw)
+        target = next(f for f in real_files if f.index == index)
+    except (ValueError, StopIteration):
+        await query.answer("文件不存在", show_alert=True)
+        return
+
+    currently_selected = [f.index for f in real_files if f.selected]
+    if target.selected and len(currently_selected) <= 1:
+        await query.answer("至少要保留一个文件被选中", show_alert=True)
+        return
+
+    new_selection = (
+        [i for i in currently_selected if i != index]
+        if target.selected
+        else currently_selected + [index]
+    )
+    try:
+        await aria2.set_selected_files(gid, new_selection)
+    except Exception:
+        log.exception("failed to change file selection for gid %s", gid)
+        await query.answer("切换失败，请稍后再试", show_alert=True)
+        return
+
+    download = await _download_or_none(aria2, gid)
+    await _edit(
+        query, render_file_selection(download),
+        reply_markup=file_selection_keyboard(gid, download), parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data.startswith("bulk:"))

@@ -10,7 +10,6 @@ from bot.config import settings
 from bot.core import storage
 from bot.core.cards import render_pending_card
 from bot.core.keyboards import pending_task_keyboard, redownload_keyboard
-from bot.core.pending_tasks import create_pending
 from bot.core.telegram_files import to_local_path
 
 router = Router(name="links")
@@ -49,7 +48,7 @@ async def handle_url(message: Message, aria2, repo):
         )
         return
 
-    token = create_pending(
+    token = await repo.create_pending(
         kind="url",
         user_id=message.from_user.id,
         chat_id=message.chat.id,
@@ -78,7 +77,7 @@ async def handle_magnet(message: Message, aria2, repo):
         )
         return
 
-    token = create_pending(
+    token = await repo.create_pending(
         kind="magnet",
         user_id=message.from_user.id,
         chat_id=message.chat.id,
@@ -108,7 +107,7 @@ async def handle_torrent(message: Message, aria2, repo):
         else:
             await message.bot.download_file(tg_file.file_path, destination=torrent_path)
 
-    token = create_pending(
+    token = await repo.create_pending(
         kind="torrent",
         user_id=message.from_user.id,
         chat_id=message.chat.id,

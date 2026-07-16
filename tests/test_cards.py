@@ -4,8 +4,16 @@
 """
 import unittest
 
-from bot.core.cards import _eta, _fmt_limit, _fmt_size, render_home, render_pending_card, render_task_card
-from bot.core.keyboards import list_tab_row, settings_keyboard, task_keyboard, text_progress_bar
+from bot.core.cards import (
+    _eta,
+    _fmt_limit,
+    _fmt_size,
+    render_file_selection,
+    render_home,
+    render_pending_card,
+    render_task_card,
+)
+from bot.core.keyboards import file_selection_keyboard, list_tab_row, settings_keyboard, task_keyboard, text_progress_bar
 
 
 class FakeDownload:
@@ -46,6 +54,51 @@ def fake_row(**overrides):
     }
     row.update(overrides)
     return row
+
+
+class FakeFile:
+    def __init__(self, index, name, length, selected, is_metadata=False):
+        self.index = index
+        self.path = __import__("pathlib").Path(name)
+        self._length = length
+        self.selected = selected
+        self.is_metadata = is_metadata
+
+    def length_string(self):
+        return f"{self._length} B"
+
+
+class FakeMultiFileDownload:
+    def __init__(self, files):
+        self.files = files
+
+
+class TestFileSelection(unittest.TestCase):
+    def _download(self):
+        return FakeMultiFileDownload([
+            FakeFile(1, "movie.mkv", 100, True),
+            FakeFile(2, "sample.mkv", 10, False),
+            FakeFile(3, "readme.txt", 1, True),
+        ])
+
+    def test_render_counts_selected(self):
+        text = render_file_selection(self._download())
+        self.assertIn("已选 2/3", text)
+
+    def test_keyboard_shows_checkbox_state(self):
+        kb = file_selection_keyboard("g1", self._download())
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+        self.assertTrue(any(l.startswith("☑️") and "movie.mkv" in l for l in labels))
+        self.assertTrue(any(l.startswith("⬜") and "sample.mkv" in l for l in labels))
+
+    def test_keyboard_excludes_metadata_files(self):
+        download = FakeMultiFileDownload([
+            FakeFile(1, "movie.mkv", 100, True),
+            FakeFile(2, "[METADATA]torrent", 1, True, is_metadata=True),
+        ])
+        kb = file_selection_keyboard("g1", download)
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
+        self.assertNotIn("filesel:g1:2", callbacks)
 
 
 class TestProgressBar(unittest.TestCase):

@@ -7,7 +7,6 @@ from bot.config import settings
 from bot.core import storage
 from bot.core.cards import render_pending_card
 from bot.core.keyboards import pending_task_keyboard, redownload_keyboard
-from bot.core.pending_tasks import create_pending
 from bot.core.telegram_files import to_download_uri
 
 log = logging.getLogger(__name__)
@@ -60,7 +59,7 @@ async def handle_media(message: Message, aria2, repo):
     tg_file = await message.bot.get_file(file_id)
     source_uri = to_download_uri(tg_file.file_path)
 
-    token = create_pending(
+    token = await repo.create_pending(
         kind="tg_media",
         user_id=message.from_user.id,
         chat_id=message.chat.id,
