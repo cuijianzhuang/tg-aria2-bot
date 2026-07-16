@@ -6,30 +6,36 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.config import settings
+from bot.core.cards import render_settings
 from bot.core.conf_editor import aria2_conf_path, read_kv, script_conf_path, write_kv
-from bot.core.storage import disk_usage_summary
+from bot.core.keyboards import settings_keyboard
 
 log = logging.getLogger(__name__)
 router = Router(name="admin")
 
-
-def _main_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 白名单管理", callback_data="admin:users")],
-        [InlineKeyboardButton(text="☁️ GoFile 设置", callback_data="admin:gofile")],
-        [InlineKeyboardButton(text="📁 rclone 设置", callback_data="admin:rclone")],
-        [InlineKeyboardButton(text="🔄 重启服务", callback_data="admin:restart")],
-    ])
+BACK_TO_SETTINGS = InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")
 
 
-@router.message(Command("admin"))
-async def cmd_admin(message: Message):
-    await message.reply("⚙️ 管理菜单", reply_markup=_main_menu())
+async def _settings_view(aria2) -> tuple[str, InlineKeyboardMarkup]:
+    try:
+        limit_raw = await aria2.get_global_limit()
+    except Exception:
+        limit_raw = None
+    return render_settings(limit_raw), settings_keyboard()
+
+
+@router.message(Command("settings"))
+@router.message(Command("admin"))  # legacy shortcut — admin menu merged into ⚙️ 设置
+async def cmd_admin(message: Message, aria2):
+    text, kb = await _settings_view(aria2)
+    await message.reply(text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "admin:menu")
-async def show_menu(query: CallbackQuery):
-    await query.message.edit_text("⚙️ 管理菜单", reply_markup=_main_menu())
+async def show_menu(query: CallbackQuery, aria2):
+    """Legacy alias for buttons on old messages — routes to the merged settings hub."""
+    text, kb = await _settings_view(aria2)
+    await query.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await query.answer()
 
 
@@ -57,7 +63,7 @@ async def _render_users(repo) -> tuple[str, InlineKeyboardMarkup]:
     lines.append("")
     lines.append("用 <code>/adduser 数字ID 备注（可选）</code> 添加")
 
-    kb.append([InlineKeyboardButton(text="‹ 返回", callback_data="admin:menu")])
+    kb.append([BACK_TO_SETTINGS])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -131,7 +137,7 @@ def _gofile_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=label("启用", settings.gofile_enabled), callback_data="admin:gofile:t:enabled")],
         [InlineKeyboardButton(text=label("压缩", settings.gofile_compress), callback_data="admin:gofile:t:compress")],
         [InlineKeyboardButton(text=label("删本地", settings.gofile_delete_local), callback_data="admin:gofile:t:delete_local")],
-        [InlineKeyboardButton(text="‹ 返回", callback_data="admin:menu")],
+        [BACK_TO_SETTINGS],
     ])
 
 
@@ -174,7 +180,7 @@ def _rclone_menu() -> InlineKeyboardMarkup:
     enabled = _rclone_enabled()
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="关闭自动上传" if enabled else "启用自动上传", callback_data="admin:rclone:toggle")],
-        [InlineKeyboardButton(text="‹ 返回", callback_data="admin:menu")],
+        [BACK_TO_SETTINGS],
     ])
 
 
@@ -199,7 +205,7 @@ async def show_restart(query: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 重启 aria2", callback_data="admin:restart:aria2")],
         [InlineKeyboardButton(text="🔄 重启机器人", callback_data="admin:restart:bot")],
-        [InlineKeyboardButton(text="‹ 返回", callback_data="admin:menu")],
+        [BACK_TO_SETTINGS],
     ])
     await query.message.edit_text("🔄 <b>重启服务</b>", reply_markup=kb, parse_mode="HTML")
     await query.answer()

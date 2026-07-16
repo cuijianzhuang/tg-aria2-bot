@@ -159,9 +159,18 @@ def cleanup_confirm_keyboard() -> InlineKeyboardMarkup:
 
 
 def settings_keyboard() -> InlineKeyboardMarkup:
+    """Single hub: download tuning on top, admin features (formerly /admin) below."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🚀 调整限速", callback_data="settings:limit")],
+            [
+                InlineKeyboardButton(text="👥 白名单", callback_data="admin:users"),
+                InlineKeyboardButton(text="☁️ GoFile", callback_data="admin:gofile"),
+            ],
+            [
+                InlineKeyboardButton(text="📁 rclone", callback_data="admin:rclone"),
+                InlineKeyboardButton(text="🔄 重启服务", callback_data="admin:restart"),
+            ],
             [InlineKeyboardButton(text="⬅️ 返回主菜单", callback_data="nav:start")],
         ]
     )

@@ -17,8 +17,7 @@ from bot.handlers import admin, callbacks, commands, links, media
 BOT_COMMANDS = [
     BotCommand(command="start", description="主菜单（状态总览）"),
     BotCommand(command="list", description="任务列表"),
-    BotCommand(command="limit", description="设置全局限速，如 /limit 2M"),
-    BotCommand(command="admin", description="管理菜单（白名单/rclone/GoFile/重启）"),
+    BotCommand(command="settings", description="设置与管理"),
 ]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")

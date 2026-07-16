@@ -5,7 +5,7 @@
 import unittest
 
 from bot.core.cards import _eta, _fmt_limit, _fmt_size, render_home, render_pending_card, render_task_card
-from bot.core.keyboards import list_tab_row, task_keyboard, text_progress_bar
+from bot.core.keyboards import list_tab_row, settings_keyboard, task_keyboard, text_progress_bar
 
 
 class FakeDownload:
@@ -113,6 +113,12 @@ class TestKeyboards(unittest.TestCase):
         kb = task_keyboard("g1", "ACTIVE", with_back=True)
         callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
         self.assertIn("list:ALL:0", callbacks)
+
+    def test_settings_keyboard_includes_admin_entries(self):
+        kb = settings_keyboard()
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
+        for expected in ("settings:limit", "admin:users", "admin:gofile", "admin:rclone", "admin:restart"):
+            self.assertIn(expected, callbacks)
 
     def test_tab_row_marks_selected(self):
         row = list_tab_row("ACTIVE", {"ACTIVE": 2, "COMPLETED": 5})
