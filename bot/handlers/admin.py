@@ -9,9 +9,15 @@ from bot.config import settings
 from bot.core.cards import render_settings
 from bot.core.conf_editor import aria2_conf_path, read_kv, script_conf_path, write_kv
 from bot.core.keyboards import settings_keyboard
+from bot.middlewares.auth import AdminMiddleware
 
 log = logging.getLogger(__name__)
 router = Router(name="admin")
+
+# Everything in this router is admin-level (whitelist management, service
+# restarts, gofile/rclone config) — gate the whole router, not per-handler.
+router.message.middleware(AdminMiddleware())
+router.callback_query.middleware(AdminMiddleware())
 
 BACK_TO_SETTINGS = InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")
 
@@ -76,7 +82,12 @@ async def show_users(query: CallbackQuery, repo):
 
 @router.callback_query(F.data.startswith("admin:deluser:"))
 async def del_user(query: CallbackQuery, repo):
-    user_id = int(query.data.split(":", 2)[2])
+    # callback_data is client-supplied and forgeable — never trust it to parse
+    try:
+        user_id = int(query.data.split(":", 2)[2])
+    except ValueError:
+        await query.answer("无效的用户 ID", show_alert=True)
+        return
     await repo.remove_allowed_user(user_id)
     await query.answer("已删除")
     text, markup = await _render_users(repo)
@@ -147,9 +158,17 @@ async def show_gofile(query: CallbackQuery):
     await query.answer()
 
 
+GOFILE_TOGGLE_FIELDS = {"enabled", "compress", "delete_local"}
+
+
 @router.callback_query(F.data.startswith("admin:gofile:t:"))
 async def toggle_gofile(query: CallbackQuery):
     field = query.data.split(":")[3]
+    # forged callback_data could otherwise setattr() arbitrary gofile_* fields
+    # (e.g. clobber gofile_token with a bool and persist it to .env)
+    if field not in GOFILE_TOGGLE_FIELDS:
+        await query.answer("未知设置项", show_alert=True)
+        return
     attr = f"gofile_{field}"
     new_value = not getattr(settings, attr)
     setattr(settings, attr, new_value)  # same process as task_manager.py — takes effect immediately

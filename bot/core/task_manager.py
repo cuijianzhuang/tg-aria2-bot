@@ -4,6 +4,7 @@ import os
 import time
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramRetryAfter
 
 from bot.config import settings
 from bot.core.cards import render_task_card
@@ -16,8 +17,12 @@ from bot.db.repo import TaskRepo
 log = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS = 5
-PROGRESS_EDIT_MIN_INTERVAL = 3.0
+# Telegram allows ~20 message edits per minute per chat; with several active
+# tasks in one chat a 3s floor eats the budget and starts drawing 429s.
+PROGRESS_EDIT_MIN_INTERVAL = 10.0
 PROGRESS_EDIT_MIN_PERCENT_DELTA = 5.0
+
+TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 
 
 class TaskManager:
@@ -28,48 +33,81 @@ class TaskManager:
         self._aria2 = aria2
         self._repo = repo
         self._last_edit: dict[str, tuple[float, float]] = {}  # gid -> (timestamp, percent)
+        self._chat_backoff: dict[int, float] = {}  # chat_id -> monotonic deadline after a 429
+        self._poll_task: asyncio.Task | None = None
+        # Strong refs to fire-and-forget pipeline tasks: the event loop only
+        # keeps weak references, so an unreferenced task can be GC'd mid-flight.
+        self._bg_tasks: set[asyncio.Task] = set()
         self._running = False
 
     async def start(self):
         self._running = True
-        asyncio.create_task(self._poll_loop())
+        self._poll_task = asyncio.create_task(self._poll_loop())
 
     def stop(self):
         self._running = False
+        if self._poll_task:
+            self._poll_task.cancel()
+        for task in self._bg_tasks:
+            task.cancel()
+
+    def _spawn(self, coro):
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
 
     async def _poll_loop(self):
         while self._running:
             try:
                 await self._poll_once()
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 log.exception("poll loop iteration failed")
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     async def _poll_once(self):
         rows = await self._repo.get_unfinished()
+        if not rows:
+            return
+        # one RPC batch for everything instead of a get_status roundtrip per task
+        downloads = {d.gid: d for d in await self._aria2.get_all_downloads()}
         for row in rows:
             gid = row["gid"]
             if not gid:
                 continue
-            try:
-                download = await self._aria2.get_status(gid)
-            except Exception:
-                # aria2 no longer knows this gid — usually a real loss (restart
-                # without session file), but can also be a completed task purged
-                # by the cleanup hook between polls, which we can't distinguish
-                log.warning("gid %s not found in aria2, marking FAILED", gid)
-                await self._repo.update_status(
-                    gid, "FAILED", error="任务在 aria2 中丢失（服务重启或已被清理）；若文件已在磁盘上则实际已完成"
-                )
+            download = downloads.get(gid)
+            if download is None:
+                await self._mark_lost(row, gid)
                 continue
-
             await self._handle_download_state(row, download)
+
+    async def _mark_lost(self, row, gid: str):
+        """aria2 no longer knows this gid. Usually a real loss (restart without a
+        session file), but a completed task purged by the cleanup hook between
+        polls looks identical — disambiguate cheaply by checking the disk."""
+        target = row["save_path"] or (
+            os.path.join(settings.download_dir, row["file_name"]) if row["file_name"] else None
+        )
+        if target and os.path.exists(target):
+            log.info("gid %s gone from aria2 but file exists on disk, marking COMPLETED", gid)
+            await self._repo.update_status(gid, "COMPLETED", save_path=target)
+            await self._notify(row, render_task_card(row, status="COMPLETED"),
+                               gid=gid, status="COMPLETED", parse_mode="HTML")
+        else:
+            log.warning("gid %s not found in aria2, marking FAILED", gid)
+            await self._repo.update_status(
+                gid, "FAILED", error="任务在 aria2 中丢失（服务重启或已被清理）"
+            )
+        self._last_edit.pop(gid, None)
 
     async def _handle_download_state(self, row, download):
         gid = row["gid"]
         status = download.status.upper()
 
         if status == "COMPLETE":
+            self._last_edit.pop(gid, None)
             save_path = str(download.files[0].path) if download.files else None
             # download.dir + download.name covers multi-file torrents too (the
             # first file alone would just be one piece of the whole download)
@@ -79,7 +117,7 @@ class TaskManager:
             if settings.gofile_enabled and target_path and os.path.exists(target_path):
                 # background task: a multi-GB compress+upload must not stall the
                 # poll loop (it would freeze progress edits for every other task)
-                asyncio.create_task(self._run_gofile_pipeline(row, gid, target_path))
+                self._spawn(self._run_gofile_pipeline(row, gid, target_path))
             else:
                 await self._notify(
                     row, render_task_card(row, download, status="COMPLETED"),
@@ -88,6 +126,7 @@ class TaskManager:
             return
 
         if status == "ERROR":
+            self._last_edit.pop(gid, None)
             await self._repo.update_status(gid, "FAILED", error=download.error_message)
             await self._notify(
                 row, render_task_card(row, download, status="FAILED"),
@@ -134,6 +173,8 @@ class TaskManager:
             text = f"✅ 下载完成: {row['file_name'] or gid}\n☁️ 已上传: {link}"
             if deleted:
                 text += "\n🗑 本地文件已删除"
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             log.exception("gofile pipeline failed for gid %s", gid)
             text = f"✅ 下载完成: {row['file_name'] or gid}\n⚠️ 上传 gofile 失败: {e}"
@@ -142,10 +183,14 @@ class TaskManager:
 
     async def _maybe_report_progress(self, row, download):
         gid = row["gid"]
+        chat_id = row["chat_id"]
         percent = download.progress
         now = time.monotonic()
-        last_time, last_percent = self._last_edit.get(gid, (0.0, -100.0))
 
+        if now < self._chat_backoff.get(chat_id, 0.0):
+            return  # still inside a Telegram flood-control window for this chat
+
+        last_time, last_percent = self._last_edit.get(gid, (0.0, -100.0))
         if (now - last_time) < PROGRESS_EDIT_MIN_INTERVAL and (percent - last_percent) < PROGRESS_EDIT_MIN_PERCENT_DELTA:
             return
 
@@ -154,12 +199,16 @@ class TaskManager:
         if row["reply_message_id"]:
             try:
                 await self._bot.edit_message_text(
-                    chat_id=row["chat_id"], message_id=row["reply_message_id"], text=text,
+                    chat_id=chat_id, message_id=row["reply_message_id"], text=text,
                     reply_markup=task_keyboard(gid, "ACTIVE"),
                     parse_mode="HTML",
                 )
+            except TelegramRetryAfter as e:
+                # honor flood control instead of hammering through it
+                self._chat_backoff[chat_id] = now + e.retry_after
+                log.info("telegram 429 for chat %s, backing off %ss", chat_id, e.retry_after)
             except Exception:
-                pass  # message unchanged or rate-limited; safe to skip this tick
+                pass  # message unchanged or transient error; safe to skip this tick
 
     async def _update_keyboard(self, row, gid: str, status: str):
         if not row["reply_message_id"]:
@@ -196,9 +245,10 @@ class TaskManager:
 
     async def reconcile_on_startup(self):
         rows = await self._repo.get_unfinished()
-        remote = {d.gid: d for d in await self._aria2.tell_active()}
+        if not rows:
+            return
+        remote = {d.gid: d for d in await self._aria2.get_all_downloads()}
         for row in rows:
             gid = row["gid"]
-            if gid not in remote:
-                await self._repo.update_status(gid, "FAILED", error="task lost after restart")
-                log.info("gid %s missing on restart, marked FAILED", gid)
+            if gid and gid not in remote:
+                await self._mark_lost(row, gid)

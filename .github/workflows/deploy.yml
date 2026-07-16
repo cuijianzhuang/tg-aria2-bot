@@ -5,9 +5,29 @@ on:
     branches: [master]
   workflow_dispatch: {}
 
+env:
+  BOT_TOKEN: test-token
+  API_ID: "1"
+  API_HASH: test-hash
+  ARIA2_SECRET: test-secret
+
 jobs:
+  # Gate the deploy on tests passing in CI — running them on the server AFTER
+  # `git reset --hard` means a red test suite already left the checkout half-updated.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover tests
+
   deploy:
     runs-on: ubuntu-latest
+    needs: test
     steps:
       - name: SSH deploy
         uses: appleboy/ssh-action@v1.0.3
@@ -20,9 +40,10 @@ jobs:
             cd /root/tg-aria2-bot
             git fetch origin
             git reset --hard origin/master
+            .venv/bin/pip install -q -r requirements.txt
             .venv/bin/python -m compileall -q bot
             .venv/bin/python -c 'import bot.main'
-            .venv/bin/python -m unittest discover tests
             systemctl restart tg-aria2-bot
+            systemctl try-restart tg-aria2-web 2>/dev/null || true
             sleep 2
             systemctl is-active tg-aria2-bot

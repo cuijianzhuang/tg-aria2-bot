@@ -33,6 +33,7 @@ async def cmd_pause(message: Message, command: CommandObject, aria2, repo):
         await message.reply("用法: /pause <任务id>")
         return
     await aria2.pause(gid)
+    await repo.update_status(gid, "PAUSED")
     await message.reply("⏸ 已暂停")
 
 
@@ -43,6 +44,7 @@ async def cmd_resume(message: Message, command: CommandObject, aria2, repo):
         await message.reply("用法: /resume <任务id>")
         return
     await aria2.resume(gid)
+    await repo.update_status(gid, "ACTIVE")
     await message.reply("▶️ 已恢复")
 
 

@@ -14,8 +14,10 @@ class Aria2Client:
 
     def __init__(self, rpc_url: str, secret: str):
         host, port = self._split_url(rpc_url)
+        # short explicit timeout: a hung aria2 must not pin poll-loop threads
+        # for the library's default 60s per call
         self._api = aria2p.API(
-            aria2p.Client(host=host, port=port, secret=secret)
+            aria2p.Client(host=host, port=port, secret=secret, timeout=10)
         )
 
     @staticmethod
@@ -62,7 +64,8 @@ class Aria2Client:
         download = await self.get_status(gid)
         await self._run(download.remove, force=True, files=files)
 
-    async def tell_active(self) -> list[aria2p.Download]:
+    async def get_all_downloads(self) -> list[aria2p.Download]:
+        """Every download aria2 knows about (active + waiting + stopped), one RPC batch."""
         return await self._run(self._api.get_downloads)
 
     async def get_progress_map(self) -> dict[str, dict]:
