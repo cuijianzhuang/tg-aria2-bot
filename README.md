@@ -198,6 +198,21 @@ rclone config                                    # bare 模式
 
 服务器地址/SSH key/目录/服务名写在脚本开头，按自己的环境改。脚本**永远不会覆盖服务器上的 `.env`**（真实密钥只存在于服务器）。
 
+### 自动部署（GitHub Actions）
+
+推到 `master` 会自动部署：[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) 通过 SSH 登录服务器执行
+`git fetch && git reset --hard origin/master` → 编译/导入/单测校验 → `systemctl restart tg-aria2-bot`，任何一步失败整个 job 失败，不会重启到半吊子状态。
+
+前提是服务器上的 `/root/tg-aria2-bot` 是这个仓库的 git clone（不是 `deploy.sh` 那种文件同步），且以下三个仓库 Secret 已配置（`Settings → Secrets and variables → Actions`）：
+
+| Secret | 说明 |
+|---|---|
+| `DEPLOY_SSH_KEY` | 部署专用私钥（不要用你日常登录用的私钥） |
+| `DEPLOY_HOST` | 服务器地址 |
+| `DEPLOY_USER` | SSH 用户名 |
+
+`git reset --hard` 只会动 git 跟踪的文件——`.env`、`data/`、`.venv/`、`aria2-bare/`（bare 模式下真实运行的 aria2 配置/会话数据）、`downloads/`（实际下载内容）这些运行时目录都在 `.gitignore` 里，不会被覆盖或删除。想临时关掉自动部署，去 Actions 页面禁用这个 workflow，或者删掉 `.github/workflows/deploy.yml`。
+
 ### 测试
 
 纯函数渲染层（卡片文案、HTML 转义、进度条、键盘结构）有单元测试，在有有效 `.env` 的机器上跑：
