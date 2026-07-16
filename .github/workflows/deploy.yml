@@ -1,0 +1,28 @@
+name: Deploy to production
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script_stop: true
+          script: |
+            cd /root/tg-aria2-bot
+            git fetch origin
+            git reset --hard origin/master
+            .venv/bin/python -m compileall -q bot
+            .venv/bin/python -c 'import bot.main'
+            .venv/bin/python -m unittest discover tests
+            systemctl restart tg-aria2-bot
+            sleep 2
+            systemctl is-active tg-aria2-bot
