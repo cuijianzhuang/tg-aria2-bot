@@ -17,6 +17,12 @@ class TaskRepo:
     async def connect(self):
         self._conn = await aiosqlite.connect(self._db_path)
         self._conn.row_factory = aiosqlite.Row
+        # bot and web are two separate processes sharing this file; WAL lets a
+        # reader and a writer coexist, busy_timeout retries instead of raising
+        # "database is locked" when both write at once.
+        await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.execute("PRAGMA busy_timeout=5000")
+        await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.executescript(SCHEMA)
         for migration in MIGRATIONS:
             try:
@@ -196,10 +202,35 @@ class TaskRepo:
         return PendingTask.from_row(row) if row else None
 
     async def pop_pending(self, token: str) -> PendingTask | None:
-        pending = await self.get_pending(token)
-        if pending:
-            await self.delete_pending(token)
-        return pending
+        """Atomically claim a pending confirmation: two rapid taps on 开始下载
+        must not both see the row and add the download twice."""
+        await self._cleanup_expired_pending()
+        try:
+            cur = await self._conn.execute(
+                "DELETE FROM pending_tasks WHERE token = ? RETURNING *", (token,)
+            )
+            row = await cur.fetchone()
+            await self._conn.commit()
+            return PendingTask.from_row(row) if row else None
+        except sqlite3.OperationalError:
+            # RETURNING needs sqlite >= 3.35; fall back to the non-atomic path
+            pending = await self.get_pending(token)
+            if pending:
+                await self.delete_pending(token)
+            return pending
+
+    async def restore_pending(self, pending: PendingTask):
+        """Put a popped confirmation back (aria2 add failed — keep the button alive)."""
+        await self._conn.execute(
+            """
+            INSERT OR REPLACE INTO pending_tasks
+                (token, kind, user_id, chat_id, source_ref, file_name, file_size, payload, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (pending.token, pending.kind, pending.user_id, pending.chat_id, pending.source_ref,
+             pending.file_name, pending.file_size, pending.payload, pending.created_at),
+        )
+        await self._conn.commit()
 
     async def delete_pending(self, token: str):
         await self._conn.execute("DELETE FROM pending_tasks WHERE token = ?", (token,))

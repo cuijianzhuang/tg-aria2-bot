@@ -183,17 +183,24 @@ async def handle_pending(query: CallbackQuery, aria2, repo):
         await query.answer("⛔ 服务器磁盘空间不足，已拒绝该任务。", show_alert=True)
         return
 
+    # atomically claim the confirmation BEFORE adding to aria2 — a rapid double
+    # tap would otherwise pass the checks twice and add the download twice
+    pending = await repo.pop_pending(token)
+    if pending is None:
+        await query.answer("任务正在处理中。")
+        return
+
     try:
         gid = await _add_source(aria2, pending.kind, pending.payload, pending.file_name)
     except ValueError:
         await query.answer("未知任务类型", show_alert=True)
         return
     except Exception:
-        # keep the pending entry so the button still works on the next tap
+        # put the claim back so the button still works on the next tap
+        await repo.restore_pending(pending)
         log.exception("failed to start pending task")
         await query.answer("添加任务失败，请稍后重试。", show_alert=True)
         return
-    await repo.delete_pending(token)
 
     task_id = await repo.create_task(
         gid=gid,

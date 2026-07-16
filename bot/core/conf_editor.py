@@ -1,5 +1,6 @@
 import os
 import re
+import tempfile
 
 from bot.config import settings
 
@@ -63,8 +64,20 @@ def write_kv(path: str, key: str, value: str | None):
     if not found and value is not None:
         new_lines.append(f"{key}={value}\n")
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.writelines(new_lines)
+    # atomic replace: these are live config files (.env, aria2.conf) and one of
+    # the callers is the restart button, which can kill this very process
+    # mid-write — a plain overwrite would leave a truncated file behind
+    fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)), prefix=".conf_tmp_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 REMOTE_SECTION_RE = re.compile(r"^\[([^\]]+)\]$")

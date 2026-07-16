@@ -51,6 +51,10 @@ CREATE TABLE IF NOT EXISTS pending_tasks (
 MIGRATIONS = [
     "ALTER TABLE tasks ADD COLUMN gofile_link TEXT",
     "ALTER TABLE tasks ADD COLUMN payload TEXT",
+    # hot query paths: WHERE status = ? (lists, counts, poll loop) and
+    # ORDER BY created_at DESC (recent lists) — both full scans without these
+    "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at DESC)",
 ]
 
 # Valid status values, kept here as the single source of truth for the state machine.
