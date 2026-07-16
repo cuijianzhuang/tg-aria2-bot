@@ -37,3 +37,29 @@ class AuthMiddleware(BaseMiddleware):
                 return None
 
         return await handler(event, data)
+
+
+class AdminMiddleware(BaseMiddleware):
+    """Gate for admin-only routers (restart, whitelist, gofile/rclone toggles).
+
+    Unlike AuthMiddleware, this never falls back to "everyone allowed": with no
+    admin ids configured anywhere, admin features are simply locked.
+    """
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        user = data.get("event_from_user")
+        if user is None or not settings.is_admin(user.id):
+            if isinstance(event, CallbackQuery):
+                await event.answer("⛔ 该操作仅限管理员。", show_alert=True)
+            else:
+                message = getattr(event, "message", None) or event
+                reply = getattr(message, "reply", None)
+                if callable(reply):
+                    await reply("⛔ 该操作仅限管理员。")
+            return None
+        return await handler(event, data)

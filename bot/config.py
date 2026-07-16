@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     aria2_secret: str
 
     allowed_user_ids: str = ""
+    # Admin-only Telegram user ids (restart, whitelist management, gofile/rclone
+    # toggles). Empty falls back to the env-seeded ALLOWED_USER_IDS — but never to
+    # DB-added users, and never to "everyone" when the whitelist is off entirely.
+    admin_user_ids: str = ""
     download_dir: str = "/downloads"
     max_file_size: int = 2 * 1024 * 1024 * 1024
     max_concurrent: int = 3
@@ -20,6 +24,10 @@ class Settings(BaseSettings):
 
     admin_password: str = ""
     web_port: int = 8080
+    # Only honor X-Forwarded-For when the web admin actually sits behind a
+    # trusted reverse proxy; when exposed directly, the header is
+    # attacker-controlled and would let login rate limiting be bypassed.
+    trust_proxy_headers: bool = False
     aria2_config_dir: str = "/aria2-config"
 
     # Where aria2.conf's on-download-complete hook should point when the rclone
@@ -51,13 +59,27 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
+    @staticmethod
+    def _parse_ids(raw: str) -> set[int]:
+        return {int(uid.strip()) for uid in raw.split(",") if uid.strip()}
+
     @property
     def allowed_ids(self) -> set[int]:
-        return {
-            int(uid.strip())
-            for uid in self.allowed_user_ids.split(",")
-            if uid.strip()
-        }
+        return self._parse_ids(self.allowed_user_ids)
+
+    @property
+    def admin_ids(self) -> set[int]:
+        return self._parse_ids(self.admin_user_ids)
+
+    def is_admin(self, user_id: int | None) -> bool:
+        if user_id is None:
+            return False
+        if self.admin_ids:
+            return user_id in self.admin_ids
+        # Fallback: env-seeded whitelist doubles as the admin list. An open bot
+        # (both lists empty) has NO admins — admin features stay locked instead
+        # of being world-writable.
+        return user_id in self.allowed_ids
 
 
 settings = Settings()

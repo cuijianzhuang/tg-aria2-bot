@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import os
 import time
 from contextlib import asynccontextmanager
@@ -12,7 +13,13 @@ from bot.core.aria2_client import Aria2Client
 from bot.core.conf_editor import is_safe_value, list_rclone_remotes, read_kv, write_kv
 from bot.core.storage import disk_usage_summary
 from bot.db.repo import TaskRepo
-from bot.web.auth import SESSION_COOKIE, create_session_token, verify_session_token
+from bot.web.auth import (
+    SESSION_COOKIE,
+    create_session_token,
+    load_or_create_secret,
+    rotate_secret,
+    verify_session_token,
+)
 
 ENV_PATH = ".env"
 
@@ -32,10 +39,18 @@ _login_locked_until: dict[str, float] = {}
 
 
 def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    # X-Forwarded-For is attacker-controlled unless a trusted reverse proxy sets
+    # it; honoring it while directly exposed lets one client rotate fake IPs and
+    # bypass the login rate limit entirely.
+    if settings.trust_proxy_headers:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+def _check_password(supplied: str) -> bool:
+    return hmac.compare_digest(supplied.encode(), settings.admin_password.encode())
 
 
 def _check_login_rate_limit(ip: str):
@@ -61,12 +76,17 @@ def _clear_login_failures(ip: str):
     _login_locked_until.pop(ip, None)
 
 
+def _secret_path() -> str:
+    return os.path.join(os.path.dirname(settings.db_path), "web_session_secret")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     repo = TaskRepo(settings.db_path)
     await repo.connect()
     state["repo"] = repo
     state["aria2"] = Aria2Client(settings.aria2_rpc, settings.aria2_secret)
+    state["session_secret"] = load_or_create_secret(_secret_path())
     yield
     await repo.close()
 
@@ -78,7 +98,7 @@ def require_login(request: Request):
     if not settings.admin_password:
         raise HTTPException(503, "ADMIN_PASSWORD 未配置，管理后台已禁用")
     token = request.cookies.get(SESSION_COOKIE)
-    if not verify_session_token(settings.admin_password, token):
+    if not verify_session_token(state["session_secret"], token):
         raise HTTPException(401, "未登录")
 
 
@@ -123,11 +143,11 @@ async def login(body: LoginRequest, request: Request, response: Response):
         raise HTTPException(503, "ADMIN_PASSWORD 未配置，管理后台已禁用")
     ip = _client_ip(request)
     _check_login_rate_limit(ip)
-    if body.password != settings.admin_password:
+    if not _check_password(body.password):
         _record_login_failure(ip)
         raise HTTPException(401, "密码错误")
     _clear_login_failures(ip)
-    token = create_session_token(settings.admin_password)
+    token = create_session_token(state["session_secret"])
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", max_age=7 * 24 * 3600)
     return {"ok": True}
 
@@ -140,7 +160,7 @@ async def logout(response: Response):
 
 @app.post("/api/settings/password", dependencies=[Depends(require_login)])
 async def change_password(body: ChangePasswordRequest, response: Response):
-    if body.current_password != settings.admin_password:
+    if not _check_password(body.current_password):
         raise HTTPException(401, "当前密码错误")
     if len(body.new_password) < 8:
         raise HTTPException(400, "新密码至少 8 位")
@@ -148,10 +168,10 @@ async def change_password(body: ChangePasswordRequest, response: Response):
     write_kv(ENV_PATH, "ADMIN_PASSWORD", body.new_password)
     settings.admin_password = body.new_password  # take effect immediately, no restart needed
 
-    # session tokens are HMAC-signed with admin_password, so this alone invalidates
-    # every other existing session — reissue a fresh one so this session doesn't
-    # get logged out by its own password change.
-    token = create_session_token(settings.admin_password)
+    # rotate the signing secret so every other session is invalidated on a
+    # password change, then reissue a fresh token for this session.
+    state["session_secret"] = rotate_secret(_secret_path())
+    token = create_session_token(state["session_secret"])
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", max_age=7 * 24 * 3600)
     return {"ok": True}
 

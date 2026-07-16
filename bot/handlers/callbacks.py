@@ -28,6 +28,15 @@ from bot.core.list_view import render_task_list
 log = logging.getLogger(__name__)
 router = Router(name="callbacks")
 
+def _can_manage(query: CallbackQuery, owner_id: int | None) -> bool:
+    """Task-level authorization: owner or admin. callback_data is forgeable and
+    tasks are per-user, so every gid/token coming off a button gets checked."""
+    user = query.from_user
+    if user is None:
+        return False
+    return user.id == owner_id or settings.is_admin(user.id)
+
+
 _TOAST = {
     "pause": "已暂停",
     "resume": "已继续",
@@ -97,6 +106,9 @@ async def list_filter(query: CallbackQuery, repo, aria2):
     if parts[1] == "overview":  # legacy alias from old messages
         parts = ["list", "ALL", "0"]
     if parts[1] == "cleanup":
+        if not settings.is_admin(query.from_user.id if query.from_user else None):
+            await query.answer("⛔ 清理记录仅限管理员。", show_alert=True)
+            return
         n = await repo.count_tasks("COMPLETED")
         if not n:
             await query.answer("没有可清理的已完成记录")
@@ -109,6 +121,9 @@ async def list_filter(query: CallbackQuery, repo, aria2):
         )
         return
     if parts[1] == "cleanup_yes":
+        if not settings.is_admin(query.from_user.id if query.from_user else None):
+            await query.answer("⛔ 清理记录仅限管理员。", show_alert=True)
+            return
         deleted = await repo.delete_by_status("COMPLETED")
         text, markup = await render_task_list(repo, aria2, "ALL", 0)
         await _edit(query, text, answer_text=f"已清理 {deleted} 条记录", reply_markup=markup, parse_mode="HTML")
@@ -148,6 +163,9 @@ async def handle_pending(query: CallbackQuery, aria2, repo):
     pending = await repo.get_pending(token)
     if pending is None:
         await query.answer("这个待确认任务已过期，请重新发送。", show_alert=True)
+        return
+    if not _can_manage(query, pending.user_id):
+        await query.answer("⛔ 只能操作自己添加的任务。", show_alert=True)
         return
 
     if action == "cancel":
@@ -198,6 +216,11 @@ async def handle_task_action(query: CallbackQuery, aria2, repo):
     row = await repo.get_by_gid(gid)
     if row is None:
         await query.answer("任务不存在", show_alert=True)
+        return
+    # viewing (detail/open/link/files-info) is fine for any whitelisted user;
+    # anything that mutates the task requires owner-or-admin
+    if action not in {"detail", "open", "link"} and not _can_manage(query, row["user_id"]):
+        await query.answer("⛔ 只能操作自己的任务。", show_alert=True)
         return
 
     if action in {"detail", "open"}:
@@ -303,6 +326,9 @@ async def toggle_file_selection(query: CallbackQuery, aria2, repo):
     if row is None:
         await query.answer("任务不存在", show_alert=True)
         return
+    if not _can_manage(query, row["user_id"]):
+        await query.answer("⛔ 只能操作自己的任务。", show_alert=True)
+        return
 
     download = await _download_or_none(aria2, gid)
     real_files = [f for f in download.files if not f.is_metadata] if download else []
@@ -346,6 +372,8 @@ async def bulk_action(query: CallbackQuery, aria2, repo):
         gid = row["gid"]
         if not gid:
             continue
+        if not _can_manage(query, row["user_id"]):
+            continue  # bulk ops only touch your own tasks (admins touch all)
         try:
             if action == "pause":
                 await aria2.pause(gid)
