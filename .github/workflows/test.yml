@@ -1,0 +1,27 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request: {}
+
+env:
+  # bot.config.Settings requires these at import time; dummies are fine for tests
+  BOT_TOKEN: test-token
+  API_ID: "1"
+  API_HASH: test-hash
+  ARIA2_SECRET: test-secret
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m compileall -q bot
+      - run: python -c 'import bot.main, bot.web.app'
+      - run: python -m unittest discover tests -v

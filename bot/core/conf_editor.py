@@ -71,7 +71,14 @@ def write_kv(path: str, key: str, value: str | None):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
-        os.replace(tmp_path, path)
+        try:
+            os.replace(tmp_path, path)
+        except OSError:
+            # single-file docker bind mounts can't be rename()d over (EBUSY) —
+            # fall back to an in-place rewrite so the host file keeps its inode
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+            os.unlink(tmp_path)
     except BaseException:
         try:
             os.unlink(tmp_path)

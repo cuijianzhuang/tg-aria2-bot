@@ -1,0 +1,6 @@
+# Only bot/ and requirements.txt are needed in the image — keep the build
+# context small and, more importantly, keep downloads/data/secrets out of it.
+*
+!bot
+!requirements.txt
+bot/**/__pycache__
