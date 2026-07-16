@@ -45,7 +45,7 @@ Telegram 下载机器人：给机器人发送 **HTTP(S) 链接 / 磁力链接 / 
 ## 一键安装
 
 ```bash
-git clone <your-repo-url> tg-aria2-bot
+git clone https://github.com/cuijianzhuang/tg-aria2-bot.git
 cd tg-aria2-bot
 sudo ./install.sh
 ```
