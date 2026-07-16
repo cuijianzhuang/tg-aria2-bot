@@ -85,3 +85,8 @@ class Aria2Client:
         await self._run(
             self._api.set_global_options, {"max-overall-download-limit": speed}
         )
+
+    async def get_global_limit(self) -> str:
+        """Raw max-overall-download-limit value ('0' = unlimited, else bytes/s)."""
+        opts = await self._run(self._api.client.get_global_option)
+        return opts.get("max-overall-download-limit", "0")

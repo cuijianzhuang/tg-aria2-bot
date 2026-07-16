@@ -4,8 +4,8 @@
 """
 import unittest
 
-from bot.core.cards import _eta, _fmt_size, render_home, render_pending_card, render_task_card
-from bot.core.keyboards import task_keyboard, text_progress_bar
+from bot.core.cards import _eta, _fmt_limit, _fmt_size, render_home, render_pending_card, render_task_card
+from bot.core.keyboards import list_tab_row, task_keyboard, text_progress_bar
 
 
 class FakeDownload:
@@ -70,16 +70,21 @@ class TestFormatters(unittest.TestCase):
         d.download_speed = 0
         self.assertEqual(_eta(d), "未知")
 
+    def test_fmt_limit(self):
+        self.assertEqual(_fmt_limit("0"), "不限速")
+        self.assertEqual(_fmt_limit("2097152"), "2.0 MiB/s")
+        self.assertEqual(_fmt_limit("garbage"), "garbage")
+
 
 class TestCards(unittest.TestCase):
     def test_active_card_has_speed_line(self):
         text = render_task_card(fake_row(), FakeDownload(), status="ACTIVE")
-        self.assertIn("速度：", text)
+        self.assertIn("⚡", text)
         self.assertIn("movie.mkv", text)
 
     def test_completed_card_hides_speed_line(self):
         text = render_task_card(fake_row(status="COMPLETED"), status="COMPLETED")
-        self.assertNotIn("速度：", text)
+        self.assertNotIn("⚡", text)
 
     def test_card_escapes_html_in_name(self):
         text = render_task_card(fake_row(file_name="<b>x&y</b>.zip"), status="PENDING")
@@ -103,6 +108,18 @@ class TestKeyboards(unittest.TestCase):
 
     def test_unknown_status_returns_none(self):
         self.assertIsNone(task_keyboard("g1", "NONSENSE"))
+
+    def test_open_from_list_gets_back_button(self):
+        kb = task_keyboard("g1", "ACTIVE", with_back=True)
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
+        self.assertIn("list:ALL:0", callbacks)
+
+    def test_tab_row_marks_selected(self):
+        row = list_tab_row("ACTIVE", {"ACTIVE": 2, "COMPLETED": 5})
+        labels = {b.callback_data: b.text for b in row}
+        self.assertTrue(labels["list:ACTIVE:0"].startswith("·"))
+        self.assertFalse(labels["list:COMPLETED:0"].startswith("·"))
+        self.assertIn("7", labels["list:ALL:0"])  # ALL = sum of counts
 
 
 if __name__ == "__main__":

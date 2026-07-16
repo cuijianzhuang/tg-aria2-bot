@@ -9,16 +9,19 @@ from bot.config import settings
 from bot.core import storage
 from bot.core.cards import (
     render_home,
+    render_limit_chooser,
     render_settings,
     render_task_card,
 )
 from bot.core.keyboards import (
+    cleanup_confirm_keyboard,
+    limit_chooser_keyboard,
     main_inline_keyboard,
     settings_keyboard,
     task_cancel_confirm_keyboard,
     task_keyboard,
 )
-from bot.core.list_view import render_task_list, render_task_overview
+from bot.core.list_view import render_task_list
 from bot.core.pending_tasks import delete_pending, get_pending
 
 log = logging.getLogger(__name__)
@@ -44,39 +47,70 @@ async def nav_start(query: CallbackQuery, repo, aria2):
     await _edit(query, render_home(counts, stats), reply_markup=main_inline_keyboard(counts), parse_mode="HTML")
 
 
+async def _show_settings(query: CallbackQuery, aria2):
+    try:
+        limit_raw = await aria2.get_global_limit()
+    except Exception:
+        limit_raw = None
+    await _edit(query, render_settings(limit_raw), reply_markup=settings_keyboard(), parse_mode="HTML")
+
+
 @router.callback_query(F.data == "nav:settings")
-async def nav_settings(query: CallbackQuery):
-    await _edit(query, render_settings(), reply_markup=settings_keyboard(), parse_mode="HTML")
+async def nav_settings(query: CallbackQuery, aria2):
+    await _show_settings(query, aria2)
+
+
+@router.callback_query(F.data == "settings:limit")
+async def settings_limit(query: CallbackQuery, aria2):
+    try:
+        limit_raw = await aria2.get_global_limit()
+    except Exception:
+        limit_raw = None
+    await _edit(query, render_limit_chooser(limit_raw), reply_markup=limit_chooser_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("setlimit:"))
+async def apply_limit(query: CallbackQuery, aria2):
+    value = query.data.split(":", 1)[1]
+    if value not in {"0", "1M", "2M", "5M", "10M"}:
+        await query.answer("无效的限速值", show_alert=True)
+        return
+    try:
+        await aria2.set_global_limit(value)
+    except Exception:
+        log.exception("failed to set global limit")
+        await query.answer("设置失败，请稍后再试", show_alert=True)
+        return
+    await query.answer("✅ 已生效" if value != "0" else "✅ 已取消限速")
+    await _show_settings(query, aria2)
 
 
 @router.callback_query(F.data.startswith("settings:"))
-async def settings_placeholder(query: CallbackQuery):
-    action = query.data.split(":", 1)[1]
-    if action == "dir":
-        await query.answer(f"默认目录：{settings.download_dir}", show_alert=True)
-    elif action == "download_limit":
-        await query.answer("发送 /limit 2M 设置全局下载限速；发送 /limit 0 取消限速。", show_alert=True)
-    elif action == "upload_limit":
-        await query.answer("上传限速沿用 aria2 配置文件。", show_alert=True)
-    elif action == "concurrent":
-        await query.answer(f"当前最大同时下载：{settings.max_concurrent}", show_alert=True)
-    else:
-        await query.answer("该设置暂未接入。", show_alert=True)
-
-
-@router.callback_query(F.data == "list:overview")
-async def list_overview(query: CallbackQuery, repo):
-    text, markup = await render_task_overview(repo)
-    await _edit(query, text, reply_markup=markup, parse_mode="HTML")
+async def settings_fallback(query: CallbackQuery):
+    await query.answer("该设置暂未接入。", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("list:"))
 async def list_filter(query: CallbackQuery, repo, aria2):
     parts = query.data.split(":")
-    if len(parts) >= 2 and parts[1] == "cleanup":
+    if parts[1] == "overview":  # legacy alias from old messages
+        parts = ["list", "ALL", "0"]
+    if parts[1] == "cleanup":
+        n = await repo.count_tasks("COMPLETED")
+        if not n:
+            await query.answer("没有可清理的已完成记录")
+            return
+        await _edit(
+            query,
+            f"🧹 确认清理 <b>{n}</b> 条已完成任务记录？\n\n只删除机器人里的记录，不影响磁盘上的文件。",
+            reply_markup=cleanup_confirm_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+    if parts[1] == "cleanup_yes":
         deleted = await repo.delete_by_status("COMPLETED")
-        text, markup = await render_task_overview(repo)
-        await _edit(query, text, answer_text=f"已清理 {deleted} 条完成记录", reply_markup=markup, parse_mode="HTML")
+        text, markup = await render_task_list(repo, aria2, "ALL", 0)
+        await _edit(query, text, answer_text=f"已清理 {deleted} 条记录", reply_markup=markup, parse_mode="HTML")
         return
     if len(parts) < 3 or parts[1] == "noop":
         await query.answer()
@@ -165,10 +199,15 @@ async def handle_task_action(query: CallbackQuery, aria2, repo):
         await query.answer("任务不存在", show_alert=True)
         return
 
-    if action == "detail":
+    if action in {"detail", "open"}:
         download = await _download_or_none(aria2, gid)
         status = _mapped_status(download, row["status"])
-        await _edit(query, render_task_card(row, download, status=status), reply_markup=task_keyboard(gid, status), parse_mode="HTML")
+        await _edit(
+            query,
+            render_task_card(row, download, status=status),
+            reply_markup=task_keyboard(gid, status, with_back=action == "open"),
+            parse_mode="HTML",
+        )
         return
 
     if action == "retry":

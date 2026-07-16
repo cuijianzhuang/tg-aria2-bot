@@ -5,7 +5,7 @@ STATUS_EMOJI = {
     "ACTIVE": "⬇️",
     "PAUSED": "⏸",
     "COMPLETED": "✅",
-    "FAILED": "❌",
+    "FAILED": "⚠️",
     "CANCELLED": "🗑",
 }
 
@@ -26,7 +26,7 @@ def main_inline_keyboard(counts: dict[str, int] | None = None) -> InlineKeyboard
         inline_keyboard=[
             [
                 InlineKeyboardButton(text=active_label, callback_data="list:ACTIVE:0"),
-                InlineKeyboardButton(text="📋 任务列表", callback_data="list:overview"),
+                InlineKeyboardButton(text="📋 任务列表", callback_data="list:ALL:0"),
             ],
             [
                 InlineKeyboardButton(text="⚙️ 设置", callback_data="nav:settings"),
@@ -93,16 +93,19 @@ def _action_buttons(gid: str, status: str, prefix: str, label_prefix: str = "") 
     ]
 
 
-def task_keyboard(gid: str, status: str) -> InlineKeyboardMarkup | None:
+def task_keyboard(gid: str, status: str, *, with_back: bool = False) -> InlineKeyboardMarkup | None:
     """Buttons for a single task's own progress message; None if the status is
-    unrecognized (there's always at least a delete option once terminal)."""
+    unrecognized (there's always at least a delete option once terminal).
+    with_back appends a 返回列表 row for cards opened from the task list."""
     rows = _action_buttons(gid, status, "task")
+    if with_back:
+        rows.append([InlineKeyboardButton(text="⬅️ 返回列表", callback_data="list:ALL:0")])
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 def task_open_button(index: int, gid: str, name: str) -> list[InlineKeyboardButton]:
     text = f"{index}. {name[:30]}"
-    return [InlineKeyboardButton(text=text, callback_data=f"task:detail:{gid}")]
+    return [InlineKeyboardButton(text=text, callback_data=f"task:open:{gid}")]
 
 
 def redownload_keyboard(gid: str | None) -> InlineKeyboardMarkup | None:
@@ -129,23 +132,28 @@ def task_cancel_confirm_keyboard(gid: str, *, destructive: bool = False) -> Inli
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def task_list_filter_keyboard(counts: dict[str, int]) -> InlineKeyboardMarkup:
+TAB_ORDER = ("ALL", "ACTIVE", "PENDING", "PAUSED", "COMPLETED", "FAILED")
+TAB_ICON = {"ALL": "📚", "ACTIVE": "⬇️", "PENDING": "⏳", "PAUSED": "⏸", "COMPLETED": "✅", "FAILED": "⚠️"}
+
+
+def list_tab_row(selected: str, counts: dict[str, int]) -> list[InlineKeyboardButton]:
+    """Segmented-control style filter tabs shown atop the task list; the active
+    tab is bracketed since Telegram buttons can't be styled."""
+    row = []
+    for key in TAB_ORDER:
+        n = sum(counts.values()) if key == "ALL" else counts.get(key, 0)
+        label = f"{TAB_ICON[key]}{n}"
+        if key == selected:
+            label = f"·{label}·"
+        row.append(InlineKeyboardButton(text=label, callback_data=f"list:{key}:0"))
+    return row
+
+
+def cleanup_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text=f"⬇️ 下载中 {counts.get('ACTIVE', 0)}", callback_data="list:ACTIVE:0"),
-                InlineKeyboardButton(text=f"⏳ 等待中 {counts.get('PENDING', 0)}", callback_data="list:PENDING:0"),
-            ],
-            [
-                InlineKeyboardButton(text=f"✅ 已完成 {counts.get('COMPLETED', 0)}", callback_data="list:COMPLETED:0"),
-                InlineKeyboardButton(text=f"⚠️ 失败 {counts.get('FAILED', 0)}", callback_data="list:FAILED:0"),
-            ],
-            [
-                InlineKeyboardButton(text=f"⏸ 已暂停 {counts.get('PAUSED', 0)}", callback_data="list:PAUSED:0"),
-                InlineKeyboardButton(text="📚 全部任务", callback_data="list:ALL:0"),
-            ],
-            [InlineKeyboardButton(text="🧹 清理已完成", callback_data="list:cleanup")],
-            [InlineKeyboardButton(text="⬅️ 返回主菜单", callback_data="nav:start")],
+            [InlineKeyboardButton(text="⚠️ 确认清理", callback_data="list:cleanup_yes:0")],
+            [InlineKeyboardButton(text="↩️ 返回列表", callback_data="list:ALL:0")],
         ]
     )
 
@@ -153,13 +161,28 @@ def task_list_filter_keyboard(counts: dict[str, int]) -> InlineKeyboardMarkup:
 def settings_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text="⬇️ 下载限速", callback_data="settings:download_limit"),
-                InlineKeyboardButton(text="📂 默认目录", callback_data="settings:dir"),
-            ],
+            [InlineKeyboardButton(text="🚀 调整限速", callback_data="settings:limit")],
             [InlineKeyboardButton(text="⬅️ 返回主菜单", callback_data="nav:start")],
         ]
     )
+
+
+LIMIT_PRESETS = (
+    ("🚫 不限速", "0"),
+    ("1 MiB/s", "1M"),
+    ("2 MiB/s", "2M"),
+    ("5 MiB/s", "5M"),
+    ("10 MiB/s", "10M"),
+)
+
+
+def limit_chooser_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=label, callback_data=f"setlimit:{value}")]
+        for label, value in LIMIT_PRESETS
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def text_progress_bar(percent: float, width: int = 12) -> str:

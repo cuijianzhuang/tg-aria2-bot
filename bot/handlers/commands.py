@@ -4,7 +4,7 @@ from aiogram.types import Message
 
 from bot.core.cards import render_home
 from bot.core.keyboards import main_inline_keyboard
-from bot.core.list_view import render_task_overview
+from bot.core.list_view import render_task_list
 
 router = Router(name="commands")
 
@@ -22,7 +22,7 @@ async def cmd_start(message: Message, repo, aria2):
 
 @router.message(Command("list"))
 async def cmd_list(message: Message, repo, aria2):
-    text, markup = await render_task_overview(repo)
+    text, markup = await render_task_list(repo, aria2, "ALL", 0)
     await message.reply(text, reply_markup=markup, parse_mode="HTML")
 
 

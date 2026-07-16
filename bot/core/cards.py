@@ -8,6 +8,8 @@ from bot.config import settings
 from bot.core.keyboards import STATUS_LABEL, text_progress_bar
 from bot.core.storage import disk_usage_summary
 
+DIVIDER = "──────────────"
+
 
 def _fmt_size(value: int | None) -> str:
     if value is None:
@@ -78,23 +80,26 @@ def render_home(counts: dict[str, int] | None = None, stats=None) -> str:
     c = counts or {}
     lines = [
         "🤖 <b>下载机器人</b>",
-        "",
-        "直接发送 <b>链接 / 磁力 / 种子文件</b> 即可添加下载。",
-        "",
+        DIVIDER,
         f"⬇️ 下载中 {c.get('ACTIVE', 0)} · ⏳ 等待 {c.get('PENDING', 0)} · ⏸ 暂停 {c.get('PAUSED', 0)}",
         f"✅ 已完成 {c.get('COMPLETED', 0)} · ⚠️ 失败 {c.get('FAILED', 0)}",
+        "",
     ]
     if stats is not None:
         try:
-            lines.append(f"网速：↓ {stats.download_speed_string()}   ↑ {stats.upload_speed_string()}")
+            lines.append(f"⚡ ↓ {stats.download_speed_string()} · ↑ {stats.upload_speed_string()}")
         except Exception:
             pass
     try:
         disk = disk_usage_summary(settings.download_dir)
-        lines.append(f"磁盘：剩余 {disk['free']}（已用 {disk['percent_used']}%）")
+        lines.append(f"💾 剩余 {disk['free']}（已用 {disk['percent_used']}%）")
     except OSError:
         pass
-    lines += ["", f"更新于 {datetime.now().strftime('%H:%M:%S')}"]
+    lines += [
+        "",
+        "💡 发送链接、磁力或种子文件即可开始下载",
+        f"<i>更新于 {datetime.now().strftime('%H:%M:%S')}</i>",
+    ]
     return "\n".join(lines)
 
 
@@ -103,13 +108,11 @@ def render_pending_card(kind: str, name: str, *, size: int | None = None, file_c
     safe_name = escape(name, quote=False)
     lines = [
         f"<b>{title}</b>",
-        "",
-        f"<b>{escape(os.path.splitext(name)[0] or name, quote=False)}</b>",
-        "",
-        f"文件：<code>{safe_name}</code>",
-        f"大小：{_fmt_size(size)}",
-        f"文件数：{file_count if file_count is not None else '待解析'}",
-        f"保存到：<code>{escape(settings.download_dir, quote=False)}</code>",
+        DIVIDER,
+        f"📄 <code>{safe_name}</code>",
+        f"📐 大小：{_fmt_size(size)}",
+        f"🗂 文件数：{file_count if file_count is not None else '待解析'}",
+        f"📂 <code>{escape(settings.download_dir, quote=False)}</code>",
         "",
         "确认无误后开始下载。",
     ]
@@ -135,31 +138,52 @@ def render_task_card(row, download=None, *, status: str | None = None) -> str:
     safe_path = escape(str(save_path), quote=False)
     lines = [
         f"{_status_icon(status)} <b>{safe_name}</b>",
+        DIVIDER,
         f"<code>{text_progress_bar(percent)}</code>  <b>{percent:.1f}%</b>",
+        f"<code>{completed} / {total}</code>",
         "",
         f"{status_text} · {safe_reason}",
-        f"大小：<code>{completed} / {total}</code>",
     ]
-    if status == "ACTIVE":
-        lines.append(f"速度：↓ {speed}   ↑ {upload}")
-        lines.append(f"剩余：{_eta(download) if download else '未知'}   连接：{connections if connections is not None else '-'}")
-    lines.append(f"保存：<code>{safe_path}</code>")
-    lines.append("")
-    lines.append(f"<code>#{row['id']}</code> · {updated}")
     if row["error"]:
-        lines.insert(4, f"错误：{escape(str(row['error']), quote=False)}")
+        lines.append(f"❗ {escape(str(row['error']), quote=False)}")
+    if status == "ACTIVE":
+        lines.append(f"⚡ ↓ {speed} · ↑ {upload}")
+        lines.append(f"⏱ 剩余 {_eta(download) if download else '未知'} · 🔗 {connections if connections is not None else '-'} 连接")
+    lines.append(f"📂 <code>{safe_path}</code>")
     if row["gofile_link"]:
-        lines.append(f"链接：{escape(str(row['gofile_link']), quote=False)}")
+        lines.append(f"☁️ {escape(str(row['gofile_link']), quote=False)}")
+    lines += ["", f"<code>#{row['id']}</code> · <i>{updated}</i>"]
     return "\n".join(lines)
 
 
-def render_settings() -> str:
+def _fmt_limit(raw: str) -> str:
+    """aria2's max-overall-download-limit: '0' means unlimited, otherwise bytes/s."""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return str(raw)
+    return "不限速" if n == 0 else f"{_fmt_size(n)}/s"
+
+
+def render_settings(limit_raw: str | None = None) -> str:
+    limit = _fmt_limit(limit_raw) if limit_raw is not None else "未知"
     return (
-        "⚙️ <b>设置</b>\n\n"
-        f"默认目录：<code>{escape(settings.download_dir, quote=False)}</code>\n"
-        f"最大同时下载：{settings.max_concurrent}\n"
-        "下载限速：发送 /limit 2M 设置，/limit 0 取消\n"
-        "完成通知：开启"
+        "⚙️ <b>设置</b>\n"
+        f"{DIVIDER}\n"
+        f"📂 默认目录：<code>{escape(settings.download_dir, quote=False)}</code>\n"
+        f"🚀 全局限速：{limit}\n"
+        f"🔢 最大同时下载：{settings.max_concurrent}\n"
+        "🔔 完成通知：开启"
+    )
+
+
+def render_limit_chooser(limit_raw: str | None = None) -> str:
+    current = _fmt_limit(limit_raw) if limit_raw is not None else "未知"
+    return (
+        "🚀 <b>全局下载限速</b>\n"
+        f"{DIVIDER}\n"
+        f"当前：{current}\n\n"
+        "选择一个预设，立即生效："
     )
 
 
