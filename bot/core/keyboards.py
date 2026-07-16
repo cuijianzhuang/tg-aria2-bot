@@ -108,6 +108,23 @@ def task_open_button(index: int, gid: str, name: str) -> list[InlineKeyboardButt
     return [InlineKeyboardButton(text=text, callback_data=f"task:open:{gid}")]
 
 
+def file_selection_keyboard(gid: str, download) -> InlineKeyboardMarkup:
+    """One row per real file (metadata entries filtered out), checkbox-style
+    toggle button. Each tap applies immediately (pause/changeOption/resume
+    happens synchronously in aria2_client), so there's no separate 应用 step —
+    just a way back to the task card. Index is aria2's own 1-based file index."""
+    rows = []
+    for f in download.files:
+        if f.is_metadata:
+            continue
+        box = "☑️" if f.selected else "⬜"
+        name = f.path.name or str(f.path)
+        label = f"{box} {name[:35]} ({f.length_string()})"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"filesel:{gid}:{f.index}")])
+    rows.append([InlineKeyboardButton(text="✅ 完成", callback_data=f"task:detail:{gid}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def redownload_keyboard(gid: str | None) -> InlineKeyboardMarkup | None:
     """Offered on the '已下载过' dedup reply so it isn't a dead end."""
     if not gid:

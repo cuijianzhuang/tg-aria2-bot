@@ -90,3 +90,16 @@ class Aria2Client:
         """Raw max-overall-download-limit value ('0' = unlimited, else bytes/s)."""
         opts = await self._run(self._api.client.get_global_option)
         return opts.get("max-overall-download-limit", "0")
+
+    async def set_selected_files(self, gid: str, indices: list[int]):
+        """aria2 only accepts select-file changes while the download is not
+        active, so pause -> change -> resume brackets the whole thing here."""
+        was_active = (await self.get_status(gid)).status == "active"
+        if was_active:
+            await self.pause(gid)
+        try:
+            value = ",".join(str(i) for i in sorted(indices)) if indices else "1"
+            await self._run(self._api.client.change_option, gid, {"select-file": value})
+        finally:
+            if was_active:
+                await self.resume(gid)
