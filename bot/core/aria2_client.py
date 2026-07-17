@@ -102,6 +102,15 @@ class Aria2Client:
             self._api.set_global_options, {"max-concurrent-downloads": str(n)}
         )
 
+    async def set_download_limit(self, gid: str, speed: str):
+        """单任务限速（max-download-limit）。跟全局限速不同，aria2 允许在下载
+        进行中直接改这个选项，不需要像 select-file 那样先暂停。"""
+        await self._run(self._api.client.change_option, gid, {"max-download-limit": speed})
+
+    async def get_download_limit(self, gid: str) -> str:
+        opts = await self._run(self._api.client.get_option, gid)
+        return opts.get("max-download-limit", "0")
+
     async def set_selected_files(self, gid: str, indices: list[int]):
         """aria2 only accepts select-file changes while the download is not
         active, so pause -> change -> resume brackets the whole thing here."""

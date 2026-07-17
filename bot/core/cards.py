@@ -175,6 +175,7 @@ def render_settings(limit_raw: str | None = None, concurrent_raw: str | None = N
     concurrent = concurrent_raw if concurrent_raw is not None else str(settings.max_concurrent)
     notify = "开启" if settings.notify_on_complete else "关闭"
     cleanup = f"保留 {settings.auto_cleanup_days} 天" if settings.auto_cleanup_days > 0 else "关闭"
+    send_tg = "开启" if settings.auto_send_to_tg else "关闭"
     return (
         "⚙️ <b>设置</b>\n"
         f"{DIVIDER}\n"
@@ -183,7 +184,8 @@ def render_settings(limit_raw: str | None = None, concurrent_raw: str | None = N
         f"🔢 最大同时下载：{concurrent}\n"
         f"📏 单文件上限：{_fmt_max_file_size(settings.max_file_size)}\n"
         f"🔔 完成通知：{notify}\n"
-        f"🧹 自动清理已完成：{cleanup}"
+        f"🧹 自动清理已完成：{cleanup}\n"
+        f"📤 自动发送到 TG：{send_tg}"
     )
 
 
@@ -252,6 +254,30 @@ def render_limit_chooser(limit_raw: str | None = None) -> str:
     )
 
 
+def render_task_limit_chooser(name: str, limit_raw: str | None = None) -> str:
+    current = _fmt_limit(limit_raw) if limit_raw is not None else "未知"
+    return (
+        "🚀 <b>单任务限速</b>\n"
+        f"{DIVIDER}\n"
+        f"任务：{escape(str(name), quote=False)}\n"
+        f"当前：{current}\n\n"
+        "只影响这一个任务，不影响全局限速。选择一个预设，立即生效："
+    )
+
+
+def render_batch_pending(names: list[str], duplicate_count: int, overflow_count: int) -> str:
+    """一条消息里贴了多条链接/磁力时的汇总确认卡片。"""
+    lines = [f"📦 <b>批量任务</b>（{len(names)} 个待确认）", DIVIDER]
+    for i, name in enumerate(names, start=1):
+        lines.append(f"{i}. {escape(str(name), quote=False)}")
+    if duplicate_count:
+        lines.append(f"\n<i>已跳过 {duplicate_count} 个之前下载过的链接。</i>")
+    if overflow_count:
+        lines.append(f"<i>超出单次批量上限，还有 {overflow_count} 条未处理，请分批发送。</i>")
+    lines.append("\n确认无误后一键开始，或取消整批。")
+    return "\n".join(lines)
+
+
 def _fmt_speed(bytes_per_sec: float) -> str:
     return f"{_fmt_size(int(bytes_per_sec))}/s"
 
@@ -294,6 +320,26 @@ def render_server_status(info: dict, stats=None) -> str:
             pass
 
     lines += ["", f"<i>更新于 {datetime.now().strftime('%H:%M:%S')}</i>"]
+    return "\n".join(lines)
+
+
+def render_stats(period_label: str, stats: dict) -> str:
+    total = stats["total"]
+    completed = stats["completed"]
+    failed = stats["failed"]
+    cancelled = stats["cancelled"]
+    finished = completed + failed + cancelled  # 已有结果的任务数（不含还在进行中的）
+    success_rate = f"{completed / finished * 100:.1f}%" if finished else "暂无数据"
+    lines = [
+        f"📊 <b>下载统计</b>　{period_label}",
+        DIVIDER,
+        f"📥 新增任务：{total}",
+        f"✅ 完成 {completed} · ⚠️ 失败 {failed} · 🗑 取消 {cancelled}",
+        f"🎯 成功率：{success_rate}",
+        f"💾 已下载总量：{_fmt_size(stats['total_bytes'])}",
+    ]
+    if stats["total_bytes"] == 0 and completed:
+        lines.append("<i>部分任务（如种子/磁力）未记录原始大小，总量可能偏低。</i>")
     return "\n".join(lines)
 
 

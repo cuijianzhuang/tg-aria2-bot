@@ -86,3 +86,43 @@ async def render_task_list(repo, aria2, status_key: str = "ALL", page: int = 0) 
     keyboard_rows.append(footer)
 
     return "\n\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+
+SEARCH_LIMIT = 15
+
+
+async def render_search_results(repo, aria2, keyword: str) -> tuple[str, InlineKeyboardMarkup]:
+    """/find 关键词的结果页。不做分页 —— 结果数上限较高（15 条），关键词不够
+    精确时提示缩小范围，比再实现一套搜索分页要划算。搜索用的 callback_data
+    没法直接塞中文关键词进去（64 字节很快超），所以干脆不留"下一页"入口。"""
+    fetched = await repo.search_tasks(keyword, limit=SEARCH_LIMIT)
+    truncated = len(fetched) > SEARCH_LIMIT
+    rows = fetched[:SEARCH_LIMIT]
+
+    safe_keyword = escape(keyword)
+    lines = [f"🔍 <b>搜索「{safe_keyword}」</b>"]
+    keyboard_rows: list[list[InlineKeyboardButton]] = []
+
+    if not rows:
+        lines.append("没有找到匹配的任务。")
+    else:
+        active_gids = [r["gid"] for r in rows if r["status"] == "ACTIVE" and r["gid"]]
+        progress = await aria2.get_progress_map() if active_gids else {}
+
+        for index, row in enumerate(rows, start=1):
+            name = row["file_name"] or row["source_ref"] or row["gid"] or "未命名任务"
+            icon = STATUS_EMOJI.get(row["status"], "•")
+            label = STATUS_LABEL.get(row["status"], row["status"])
+            sub = f"{icon} {label}"
+            p = progress.get(row["gid"]) if row["gid"] and row["status"] == "ACTIVE" else None
+            if p:
+                sub += f" · {p['percent']}% · {p['speed']}"
+            lines.append(f"<b>{index}.</b> {escape(name)}\n{sub}")
+            if row["gid"]:
+                keyboard_rows.append(task_open_button(index, row["gid"], name))
+
+        if truncated:
+            lines.append(f"\n<i>结果超过 {SEARCH_LIMIT} 条，只显示最新的部分，请用更精确的关键词缩小范围。</i>")
+
+    keyboard_rows.append([InlineKeyboardButton(text="⬅️ 主菜单", callback_data="nav:start")])
+    return "\n\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
