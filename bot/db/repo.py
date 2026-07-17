@@ -48,14 +48,15 @@ class TaskRepo:
         file_name: str | None,
         file_size: int | None,
         payload: str | None = None,
+        node: str = "default",
     ) -> int:
         cur = await self._conn.execute(
             """
             INSERT INTO tasks (gid, user_id, chat_id, reply_message_id,
-                                source_type, source_ref, file_name, file_size, payload, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
+                                source_type, source_ref, file_name, file_size, payload, node, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
             """,
-            (gid, user_id, chat_id, reply_message_id, source_type, source_ref, file_name, file_size, payload),
+            (gid, user_id, chat_id, reply_message_id, source_type, source_ref, file_name, file_size, payload, node),
         )
         await self._conn.commit()
         return cur.lastrowid
@@ -191,10 +192,18 @@ class TaskRepo:
         row = await cur.fetchone()
         return row["n"]
 
-    async def get_unfinished(self) -> list[aiosqlite.Row]:
-        cur = await self._conn.execute(
-            "SELECT * FROM tasks WHERE status IN ('PENDING', 'ACTIVE', 'PAUSED')"
-        )
+    async def get_unfinished(self, node: str | None = None) -> list[aiosqlite.Row]:
+        """node=None 取全部节点的未完成任务；轮询循环按节点分别取，
+        避免拿 A 节点的下载列表去比对 B 节点的任务（gid 对不上会被误判丢失）。"""
+        if node:
+            cur = await self._conn.execute(
+                "SELECT * FROM tasks WHERE status IN ('PENDING', 'ACTIVE', 'PAUSED') AND node = ?",
+                (node,),
+            )
+        else:
+            cur = await self._conn.execute(
+                "SELECT * FROM tasks WHERE status IN ('PENDING', 'ACTIVE', 'PAUSED')"
+            )
         return await cur.fetchall()
 
     async def count_by_status(self) -> dict[str, int]:
@@ -236,19 +245,25 @@ class TaskRepo:
         file_size: int | None,
         payload: str,
         batch_id: str | None = None,
+        node: str = "default",
     ) -> str:
         await self._cleanup_expired_pending()
         token = uuid4().hex[:12]
         await self._conn.execute(
             """
             INSERT INTO pending_tasks
-                (token, kind, user_id, chat_id, source_ref, file_name, file_size, payload, created_at, batch_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (token, kind, user_id, chat_id, source_ref, file_name, file_size, payload, created_at, batch_id, node)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (token, kind, user_id, chat_id, source_ref, file_name, file_size, payload, time(), batch_id),
+            (token, kind, user_id, chat_id, source_ref, file_name, file_size, payload, time(), batch_id, node),
         )
         await self._conn.commit()
         return token
+
+    async def update_pending_node(self, token: str, node: str):
+        """确认卡片上的"切换节点"：只改这一条待确认任务的目标节点。"""
+        await self._conn.execute("UPDATE pending_tasks SET node = ? WHERE token = ?", (node, token))
+        await self._conn.commit()
 
     async def get_pending(self, token: str) -> PendingTask | None:
         await self._cleanup_expired_pending()
@@ -279,11 +294,12 @@ class TaskRepo:
         await self._conn.execute(
             """
             INSERT OR REPLACE INTO pending_tasks
-                (token, kind, user_id, chat_id, source_ref, file_name, file_size, payload, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (token, kind, user_id, chat_id, source_ref, file_name, file_size, payload, created_at, batch_id, node)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (pending.token, pending.kind, pending.user_id, pending.chat_id, pending.source_ref,
-             pending.file_name, pending.file_size, pending.payload, pending.created_at),
+             pending.file_name, pending.file_size, pending.payload, pending.created_at,
+             pending.batch_id, pending.node),
         )
         await self._conn.commit()
 
@@ -308,5 +324,46 @@ class TaskRepo:
     async def _cleanup_expired_pending(self):
         await self._conn.execute(
             "DELETE FROM pending_tasks WHERE created_at < ?", (time() - TTL_SECONDS,)
+        )
+        await self._conn.commit()
+
+    # ---- nodes: 额外 aria2 节点注册表（default 节点来自 .env，不在这张表里） ----
+
+    async def list_nodes(self) -> list[aiosqlite.Row]:
+        cur = await self._conn.execute("SELECT * FROM nodes ORDER BY added_at")
+        return await cur.fetchall()
+
+    async def add_node(self, *, name: str, rpc_url: str, secret: str, download_dir: str, is_local: bool = False):
+        await self._conn.execute(
+            """
+            INSERT INTO nodes (name, rpc_url, secret, download_dir, is_local, enabled)
+            VALUES (?, ?, ?, ?, ?, 1)
+            """,
+            (name, rpc_url, secret, download_dir, int(is_local)),
+        )
+        await self._conn.commit()
+
+    async def delete_node(self, name: str):
+        """只删注册表；该节点的历史任务记录保留（node 列还指向它，仅作展示）。"""
+        await self._conn.execute("DELETE FROM nodes WHERE name = ?", (name,))
+        await self._conn.commit()
+
+    async def set_node_enabled(self, name: str, enabled: bool):
+        await self._conn.execute("UPDATE nodes SET enabled = ? WHERE name = ?", (int(enabled), name))
+        await self._conn.commit()
+
+    # ---- user_prefs: per-user 当前节点 ----
+
+    async def get_current_node(self, user_id: int) -> str:
+        cur = await self._conn.execute(
+            "SELECT current_node FROM user_prefs WHERE user_id = ?", (user_id,)
+        )
+        row = await cur.fetchone()
+        return row["current_node"] if row else "default"
+
+    async def set_current_node(self, user_id: int, node: str):
+        await self._conn.execute(
+            "INSERT OR REPLACE INTO user_prefs (user_id, current_node) VALUES (?, ?)",
+            (user_id, node),
         )
         await self._conn.commit()

@@ -42,7 +42,25 @@ CREATE TABLE IF NOT EXISTS pending_tasks (
     file_size   INTEGER,
     payload     TEXT NOT NULL,
     created_at  REAL NOT NULL,
-    batch_id    TEXT              -- 一条消息里贴多条链接时，同批的行共享这个 id
+    batch_id    TEXT,             -- 一条消息里贴多条链接时，同批的行共享这个 id
+    node        TEXT NOT NULL DEFAULT 'default'   -- 目标节点，确认卡片创建时锁定
+);
+
+-- 额外的 aria2 节点（default 节点来自 .env，不入库、不可删）
+CREATE TABLE IF NOT EXISTS nodes (
+    name          TEXT PRIMARY KEY,
+    rpc_url       TEXT NOT NULL,
+    secret        TEXT NOT NULL,
+    download_dir  TEXT NOT NULL DEFAULT '/downloads',
+    is_local      INTEGER NOT NULL DEFAULT 0,   -- bot 是否与该节点同机（决定本地能力开关）
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    added_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 用户偏好，目前只有"当前节点"；后续 per-user 偏好统一放这里
+CREATE TABLE IF NOT EXISTS user_prefs (
+    user_id       INTEGER PRIMARY KEY,
+    current_node  TEXT NOT NULL DEFAULT 'default'
 );
 """
 
@@ -57,6 +75,9 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at DESC)",
     "ALTER TABLE pending_tasks ADD COLUMN batch_id TEXT",
+    # 多节点支持：旧行全部归 default 节点（升级前只有这一个节点，语义正确）
+    "ALTER TABLE tasks ADD COLUMN node TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE pending_tasks ADD COLUMN node TEXT NOT NULL DEFAULT 'default'",
 ]
 
 # Valid status values, kept here as the single source of truth for the state machine.

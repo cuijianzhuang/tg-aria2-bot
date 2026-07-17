@@ -102,6 +102,11 @@ class Aria2Client:
             self._api.set_global_options, {"max-concurrent-downloads": str(n)}
         )
 
+    async def version(self) -> str:
+        """探活用：getVersion 是 aria2 最轻的 RPC 之一，连不上/密钥错都会在这里抛。"""
+        info = await self._run(self._api.client.get_version)
+        return info.get("version", "unknown")
+
     async def set_download_limit(self, gid: str, speed: str):
         """单任务限速（max-download-limit）。跟全局限速不同，aria2 允许在下载
         进行中直接改这个选项，不需要像 select-file 那样先暂停。"""

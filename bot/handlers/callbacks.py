@@ -15,6 +15,8 @@ from bot.core.cards import (
     render_home,
     render_limit_chooser,
     render_maxsize_chooser,
+    render_node_chooser,
+    render_pending_card,
     render_settings,
     render_task_card,
     render_task_limit_chooser,
@@ -33,12 +35,16 @@ from bot.core.keyboards import (
     limit_chooser_keyboard,
     main_inline_keyboard,
     maxsize_chooser_keyboard,
+    node_chooser_keyboard,
+    pending_node_chooser_keyboard,
+    pending_task_keyboard,
     settings_keyboard,
     task_cancel_confirm_keyboard,
     task_keyboard,
     task_limit_chooser_keyboard,
 )
 from bot.core.list_view import render_task_list
+from bot.core.node_pool import NodeUnavailable
 from bot.core.stats_view import render_stats_view
 from bot.core.telegram_files import to_download_uri
 
@@ -63,15 +69,70 @@ _TOAST = {
 }
 
 
+def _client_for_row(nodes, row):
+    """按任务归属节点取客户端。节点被删/停用时抛 NodeUnavailable，
+    调用方给用户一个明确的提示而不是隐式落到错误节点上。"""
+    return nodes.get(row["node"])
+
+
+async def _current_node_label(query: CallbackQuery, repo, nodes) -> str | None:
+    """主菜单节点行的显示名；单节点部署返回 None（不显示该行）。"""
+    if not nodes.is_multi():
+        return None
+    preferred = await repo.get_current_node(query.from_user.id) if query.from_user else "default"
+    return nodes.resolve(preferred).display_name
+
+
 @router.callback_query(F.data == "nav:start")
 @router.callback_query(F.data == "sys:status")  # legacy alias: status page merged into home
-async def nav_start(query: CallbackQuery, repo, aria2):
+async def nav_start(query: CallbackQuery, repo, nodes):
     counts = await repo.count_by_status()
+    # 首页速度取 default 节点（本机）；多节点的分节点速度在节点选择器/统计里看，
+    # 首页保持轻量不逐个节点拉 RPC
     try:
-        stats = await aria2.global_stat()
+        stats = await nodes.get("default").global_stat()
     except Exception:
         stats = None
-    await _edit(query, render_home(counts, stats), reply_markup=main_inline_keyboard(counts), parse_mode="HTML")
+    await _edit(
+        query, render_home(counts, stats),
+        reply_markup=main_inline_keyboard(counts, node_label=await _current_node_label(query, repo, nodes)),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "node:pick")
+async def node_pick(query: CallbackQuery, repo, nodes):
+    current = nodes.resolve(await repo.get_current_node(query.from_user.id)).name
+    enabled = nodes.enabled_nodes()
+    healthy = {n.name: nodes.is_healthy(n.name) for n in enabled}
+    await _edit(
+        query, render_node_chooser(current, enabled, healthy),
+        reply_markup=node_chooser_keyboard(current, enabled, healthy), parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("node:use:"))
+async def node_use(query: CallbackQuery, repo, nodes):
+    name = query.data.split(":", 2)[2]
+    node = nodes.get_node(name)
+    if node is None or not node.enabled:
+        await query.answer("该节点不存在或已停用", show_alert=True)
+        return
+    if not nodes.is_healthy(name):
+        # 离线节点允许选中（可能马上就恢复了），但提示用户当前状态
+        await query.answer(f"⚠️ {node.display_name} 当前离线，任务会在它恢复后才能添加", show_alert=True)
+    await repo.set_current_node(query.from_user.id, name)
+    counts = await repo.count_by_status()
+    try:
+        stats = await nodes.get("default").global_stat()
+    except Exception:
+        stats = None
+    await _edit(
+        query, render_home(counts, stats),
+        answer_text=f"✅ 已切换到 {node.display_name}",
+        reply_markup=main_inline_keyboard(counts, node_label=node.display_name),
+        parse_mode="HTML",
+    )
 
 
 async def _settings_data(aria2) -> tuple[str | None, str | None]:
@@ -129,7 +190,7 @@ async def apply_limit(query: CallbackQuery, aria2):
 
 
 @router.callback_query(F.data.startswith("tasklimit:"))
-async def apply_task_limit(query: CallbackQuery, aria2, repo):
+async def apply_task_limit(query: CallbackQuery, repo, nodes):
     _, gid, value = query.data.split(":", 2)
     if value not in {v for _, v in LIMIT_PRESETS}:
         await query.answer("无效的限速值", show_alert=True)
@@ -142,6 +203,7 @@ async def apply_task_limit(query: CallbackQuery, aria2, repo):
         await query.answer("⛔ 只能操作自己的任务。", show_alert=True)
         return
     try:
+        aria2 = _client_for_row(nodes, row)
         await aria2.set_download_limit(gid, value)
     except Exception:
         log.exception("failed to set per-task limit for gid %s", gid)
@@ -277,7 +339,7 @@ async def settings_fallback(query: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("list:"))
-async def list_filter(query: CallbackQuery, repo, aria2):
+async def list_filter(query: CallbackQuery, repo, nodes):
     parts = query.data.split(":")
     if parts[1] == "overview":  # legacy alias from old messages
         parts = ["list", "ALL", "0"]
@@ -301,7 +363,7 @@ async def list_filter(query: CallbackQuery, repo, aria2):
             await query.answer("⛔ 清理记录仅限管理员。", show_alert=True)
             return
         deleted = await repo.delete_by_status("COMPLETED")
-        text, markup = await render_task_list(repo, aria2, "ALL", 0)
+        text, markup = await render_task_list(repo, nodes, "ALL", 0)
         await _edit(query, text, answer_text=f"已清理 {deleted} 条记录", reply_markup=markup, parse_mode="HTML")
         return
     if len(parts) < 3 or parts[1] == "noop":
@@ -312,7 +374,7 @@ async def list_filter(query: CallbackQuery, repo, aria2):
         page = int(parts[2])
     except ValueError:
         page = 0
-    text, markup = await render_task_list(repo, aria2, status_key, page)
+    text, markup = await render_task_list(repo, nodes, status_key, page)
     await _edit(query, text, reply_markup=markup, parse_mode="HTML")
 
 
@@ -323,38 +385,46 @@ async def show_stats(query: CallbackQuery, repo):
     await _edit(query, text, reply_markup=markup, parse_mode="HTML")
 
 
-async def _add_source(aria2, kind: str, payload: str, file_name: str | None) -> str:
-    """Add a download to aria2 from its original source; returns the new gid.
+async def _add_source(nodes, node_name: str, kind: str, payload: str, file_name: str | None) -> str:
+    """Add a download to the task's node; returns the new gid.
     Shared by pending:start and task:retry so both stay in sync."""
+    node = nodes.get_node(node_name)
+    if node is None or not node.enabled:
+        raise NodeUnavailable(node_name)
+    client = nodes.get(node_name)
+    # 远程节点的 download_dir 是远端路径，绝不能在本地 makedirs（只会在 bot
+    # 机器上造垃圾目录）；路径作为 dir 选项传给 aria2，由它在自己那边创建
     if kind == "tg_media":
         # payload is Telegram's raw getFile() file_path (no bot token baked in —
         # that's deliberate, see the comment where it's persisted in media.py).
         # The token only gets stitched into the URI here, right before the RPC
         # call, so it never touches the database.
-        subdir = storage.build_subdir(settings.download_dir, file_name or payload)
-        return await aria2.add_uri(
+        subdir = storage.build_subdir(node.download_dir, file_name or payload, create=node.is_local)
+        return await client.add_uri(
             to_download_uri(payload),
             out=file_name,
             download_dir=subdir,
         )
     if kind == "url":
-        subdir = storage.build_subdir(settings.download_dir, file_name or payload)
-        return await aria2.add_uri(payload, download_dir=subdir)
+        subdir = storage.build_subdir(node.download_dir, file_name or payload, create=node.is_local)
+        return await client.add_uri(payload, download_dir=subdir)
     if kind == "magnet":
-        return await aria2.add_magnet(payload, download_dir=settings.download_dir)
+        return await client.add_magnet(payload, download_dir=node.download_dir)
     if kind == "torrent":
-        return await aria2.add_torrent(payload, download_dir=settings.download_dir)
+        # aria2p 的 add_torrent 读 bot 本地的种子副本、以 base64 走 RPC 传给目标
+        # aria2 —— 不要求目标节点能访问这个文件路径，天然跨节点
+        return await client.add_torrent(payload, download_dir=node.download_dir)
     raise ValueError(f"unknown source kind: {kind}")
 
 
 @router.callback_query(F.data.startswith("pending:"))
-async def handle_pending(query: CallbackQuery, aria2, repo):
+async def handle_pending(query: CallbackQuery, repo, nodes):
     _, action, token = query.data.split(":", 2)
 
     # 批量确认（一条消息贴了多条链接）走独立分支 —— token 这里实际是 batch_id，
     # 跟下面单条确认的逻辑不共用，提前分流
     if action == "startall":
-        await _handle_batch_start(query, aria2, repo, batch_id=token)
+        await _handle_batch_start(query, repo, nodes, batch_id=token)
         return
     if action == "cancelall":
         await _handle_batch_cancel(query, repo, batch_id=token)
@@ -372,14 +442,33 @@ async def handle_pending(query: CallbackQuery, aria2, repo):
         await repo.delete_pending(token)
         await _edit(query, "已取消添加任务。", reply_markup=main_inline_keyboard(await repo.count_by_status()))
         return
+    if action == "nodes":
+        # 确认卡片上的临时切换：只改这一条任务的目标节点
+        if pending.kind == "tg_media":
+            await query.answer("Telegram 文件转存只能在本机节点下载。", show_alert=True)
+            return
+        enabled = nodes.enabled_nodes()
+        healthy = {n.name: nodes.is_healthy(n.name) for n in enabled}
+        await _edit(
+            query, "🖥 选择这个任务要下载到的节点：",
+            reply_markup=pending_node_chooser_keyboard(token, pending.node, enabled, healthy),
+        )
+        return
     if action in {"dir", "files", "settings"}:
-        await query.answer(f"当前使用默认目录：{settings.download_dir}", show_alert=True)
+        node = nodes.resolve(pending.node)
+        await query.answer(f"当前使用目录：{node.download_dir}", show_alert=True)
         return
     if action != "start":
         await query.answer("未知操作", show_alert=True)
         return
 
-    if not storage.has_enough_space(settings.download_dir, pending.file_size or 0):
+    target_node = nodes.get_node(pending.node)
+    if target_node is None or not target_node.enabled:
+        await query.answer("⛔ 目标节点已被删除或停用，请重新发送任务。", show_alert=True)
+        return
+    # 磁盘预检只对本机节点有意义（aria2 RPC 拿不到远端磁盘信息）；
+    # 远程节点靠 aria2 自己下载失败兜底
+    if target_node.is_local and not storage.has_enough_space(target_node.download_dir, pending.file_size or 0):
         await query.answer("⛔ 服务器磁盘空间不足，已拒绝该任务。", show_alert=True)
         return
 
@@ -391,7 +480,7 @@ async def handle_pending(query: CallbackQuery, aria2, repo):
         return
 
     try:
-        gid = await _add_source(aria2, pending.kind, pending.payload, pending.file_name)
+        gid = await _add_source(nodes, pending.node, pending.kind, pending.payload, pending.file_name)
     except ValueError:
         await query.answer("未知任务类型", show_alert=True)
         return
@@ -412,12 +501,47 @@ async def handle_pending(query: CallbackQuery, aria2, repo):
         file_name=pending.file_name,
         file_size=pending.file_size,
         payload=pending.payload,
+        node=pending.node,
     )
     row = await repo.get_by_id(task_id)
-    await _edit(query, render_task_card(row, status="PENDING"), reply_markup=task_keyboard(gid, "PENDING"), parse_mode="HTML")
+    await _edit(
+        query,
+        render_task_card(row, status="PENDING", node_label=nodes.label(pending.node)),
+        reply_markup=task_keyboard(gid, "PENDING", local=target_node.is_local),
+        parse_mode="HTML",
+    )
 
 
-async def _handle_batch_start(query: CallbackQuery, aria2, repo, *, batch_id: str):
+@router.callback_query(F.data.startswith("pnode:"))
+async def apply_pending_node(query: CallbackQuery, repo, nodes):
+    _, token, name = query.data.split(":", 2)
+    pending = await repo.get_pending(token)
+    if pending is None:
+        await query.answer("这个待确认任务已过期，请重新发送。", show_alert=True)
+        return
+    if not _can_manage(query, pending.user_id):
+        await query.answer("⛔ 只能操作自己添加的任务。", show_alert=True)
+        return
+    node = nodes.get_node(name)
+    if node is None or not node.enabled:
+        await query.answer("该节点不存在或已停用", show_alert=True)
+        return
+
+    await repo.update_pending_node(token, name)
+    await query.answer(f"✅ 目标节点：{node.display_name}")
+    await _edit(
+        query,
+        render_pending_card(
+            pending.kind, pending.file_name or "任务",
+            size=pending.file_size,
+            node_label=nodes.label(name), download_dir=node.download_dir,
+        ),
+        reply_markup=pending_task_keyboard(token, show_node_switch=nodes.is_multi()),
+        parse_mode="HTML",
+    )
+
+
+async def _handle_batch_start(query: CallbackQuery, repo, nodes, *, batch_id: str):
     pendings = await repo.get_pending_batch(batch_id)
     if not pendings:
         await query.answer("批量任务已过期或已处理。", show_alert=True)
@@ -433,11 +557,16 @@ async def _handle_batch_start(query: CallbackQuery, aria2, repo, *, batch_id: st
         claimed = await repo.pop_pending(claimed.token)
         if claimed is None:
             continue
-        if not storage.has_enough_space(settings.download_dir, claimed.file_size or 0):
+        node = nodes.get_node(claimed.node)
+        if node is None or not node.enabled:
+            skipped += 1
+            continue
+        # 磁盘预检只对本机节点做（远端磁盘摸不到），与单条确认的逻辑一致
+        if node.is_local and not storage.has_enough_space(node.download_dir, claimed.file_size or 0):
             skipped += 1
             continue
         try:
-            gid = await _add_source(aria2, claimed.kind, claimed.payload, claimed.file_name)
+            gid = await _add_source(nodes, claimed.node, claimed.kind, claimed.payload, claimed.file_name)
         except Exception:
             log.exception("batch start failed for token %s", claimed.token)
             skipped += 1
@@ -446,6 +575,7 @@ async def _handle_batch_start(query: CallbackQuery, aria2, repo, *, batch_id: st
             gid=gid, user_id=claimed.user_id, chat_id=claimed.chat_id, reply_message_id=None,
             source_type=claimed.kind, source_ref=claimed.source_ref,
             file_name=claimed.file_name, file_size=claimed.file_size, payload=claimed.payload,
+            node=claimed.node,
         )
         started += 1
 
@@ -470,7 +600,7 @@ async def _handle_batch_cancel(query: CallbackQuery, repo, *, batch_id: str):
 
 
 @router.callback_query(F.data.startswith("task:"))
-async def handle_task_action(query: CallbackQuery, aria2, repo, task_manager):
+async def handle_task_action(query: CallbackQuery, repo, nodes, task_manager):
     _, action, gid = query.data.split(":", 2)
     row = await repo.get_by_gid(gid)
     if row is None:
@@ -482,15 +612,29 @@ async def handle_task_action(query: CallbackQuery, aria2, repo, task_manager):
         await query.answer("⛔ 只能操作自己的任务。", show_alert=True)
         return
 
+    # 所有 RPC 操作走任务自己的归属节点；节点被删/停用时 aria2 为 None，
+    # 查看类操作降级为纯 DB 展示，操作类直接提示
+    try:
+        aria2 = _client_for_row(nodes, row)
+    except NodeUnavailable:
+        aria2 = None
+    node = nodes.get_node(row["node"])
+    is_local = node.is_local if node else True
+    node_label = nodes.label(row["node"])
+
     if action in {"detail", "open"}:
         download = await _download_or_none(aria2, gid)
         status = _mapped_status(download, row["status"])
         await _edit(
             query,
-            render_task_card(row, download, status=status),
-            reply_markup=task_keyboard(gid, status, with_back=action == "open"),
+            render_task_card(row, download, status=status, node_label=node_label),
+            reply_markup=task_keyboard(gid, status, with_back=action == "open", local=is_local),
             parse_mode="HTML",
         )
+        return
+
+    if aria2 is None and action in {"retry", "pause", "resume", "cancel_only", "delete_files", "limit"}:
+        await query.answer("⛔ 该任务所在节点已被删除或停用，无法操作。", show_alert=True)
         return
 
     if action == "retry":
@@ -499,7 +643,7 @@ async def handle_task_action(query: CallbackQuery, aria2, repo, task_manager):
             await query.answer("缺少原始下载来源，无法重试。请重新发送链接或文件。", show_alert=True)
             return
         try:
-            new_gid = await _add_source(aria2, row["source_type"], payload, row["file_name"])
+            new_gid = await _add_source(nodes, row["node"], row["source_type"], payload, row["file_name"])
         except Exception:
             log.exception("retry failed for task %s", row["id"])
             await query.answer("重试失败，请稍后再试。", show_alert=True)
@@ -509,7 +653,10 @@ async def handle_task_action(query: CallbackQuery, aria2, repo, task_manager):
             reply_message_id=query.message.message_id if query.message else None,
         )
         row = await repo.get_by_id(row["id"])
-        await _edit(query, render_task_card(row, status="PENDING"), reply_markup=task_keyboard(new_gid, "PENDING"), parse_mode="HTML")
+        await _edit(
+            query, render_task_card(row, status="PENDING", node_label=node_label),
+            reply_markup=task_keyboard(new_gid, "PENDING", local=is_local), parse_mode="HTML",
+        )
         return
 
     if action == "cancel":
@@ -572,6 +719,10 @@ async def handle_task_action(query: CallbackQuery, aria2, repo, task_manager):
         if row["status"] != "COMPLETED":
             await query.answer("任务未完成，无法发送。", show_alert=True)
             return
+        if not is_local:
+            # 远程任务不渲染这个按钮，走到这说明是旧消息/伪造数据 —— 兜底拦截
+            await query.answer("文件在远程节点上，无法从这里发送。", show_alert=True)
+            return
         await query.answer("正在发送…")
         ok, msg = await task_manager.send_file_to_tg(row, gid)
         if not ok:
@@ -588,8 +739,8 @@ async def handle_task_action(query: CallbackQuery, aria2, repo, task_manager):
             row = await repo.get_by_gid(gid)
             download = await _download_or_none(aria2, gid)
             await query.message.edit_text(
-                render_task_card(row, download, status=new_status),
-                reply_markup=task_keyboard(gid, new_status),
+                render_task_card(row, download, status=new_status, node_label=node_label),
+                reply_markup=task_keyboard(gid, new_status, local=is_local),
                 parse_mode="HTML",
             )
     except Exception:
@@ -597,7 +748,7 @@ async def handle_task_action(query: CallbackQuery, aria2, repo, task_manager):
 
 
 @router.callback_query(F.data.startswith("filesel:"))
-async def toggle_file_selection(query: CallbackQuery, aria2, repo):
+async def toggle_file_selection(query: CallbackQuery, repo, nodes):
     _, gid, index_raw = query.data.split(":", 2)
     row = await repo.get_by_gid(gid)
     if row is None:
@@ -605,6 +756,12 @@ async def toggle_file_selection(query: CallbackQuery, aria2, repo):
         return
     if not _can_manage(query, row["user_id"]):
         await query.answer("⛔ 只能操作自己的任务。", show_alert=True)
+        return
+
+    try:
+        aria2 = _client_for_row(nodes, row)
+    except NodeUnavailable:
+        await query.answer("⛔ 该任务所在节点已被删除或停用。", show_alert=True)
         return
 
     download = await _download_or_none(aria2, gid)
@@ -641,7 +798,7 @@ async def toggle_file_selection(query: CallbackQuery, aria2, repo):
 
 
 @router.callback_query(F.data.startswith("bulk:"))
-async def bulk_action(query: CallbackQuery, aria2, repo):
+async def bulk_action(query: CallbackQuery, repo, nodes):
     _, action, status = query.data.split(":", 2)
     rows = await repo.list_recent(1000, status=status)
     changed = 0
@@ -652,6 +809,7 @@ async def bulk_action(query: CallbackQuery, aria2, repo):
         if not _can_manage(query, row["user_id"]):
             continue  # bulk ops only touch your own tasks (admins touch all)
         try:
+            aria2 = _client_for_row(nodes, row)  # 每行按自己的归属节点路由
             if action == "pause":
                 await aria2.pause(gid)
                 await repo.update_status(gid, "PAUSED")
@@ -662,7 +820,7 @@ async def bulk_action(query: CallbackQuery, aria2, repo):
                 changed += 1
         except Exception:
             log.exception("bulk task action failed: %s %s", action, gid)
-    text, markup = await render_task_list(repo, aria2, "ACTIVE" if action == "pause" else "PAUSED", 0)
+    text, markup = await render_task_list(repo, nodes, "ACTIVE" if action == "pause" else "PAUSED", 0)
     await _edit(query, text, answer_text=f"已处理 {changed} 个任务", reply_markup=markup, parse_mode="HTML")
 
 

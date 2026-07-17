@@ -33,7 +33,7 @@ class TestRunCleanupOnce(unittest.IsolatedAsyncioTestCase):
         self.repo = TaskRepo(os.path.join(self._dir.name, "t.db"))
         await self.repo.connect()
         # run_cleanup_once 只碰 self._repo，bot/aria2 在这个方法里用不到，传 None 即可
-        self.tm = TaskManager(bot=None, aria2=None, repo=self.repo)
+        self.tm = TaskManager(bot=None, nodes=None, repo=self.repo)
         self._orig_days = settings.auto_cleanup_days
 
     async def asyncTearDown(self):
@@ -77,7 +77,7 @@ class TestSendFileToTg(unittest.IsolatedAsyncioTestCase):
         self.repo = TaskRepo(os.path.join(self._dir.name, "t.db"))
         await self.repo.connect()
         self.bot = FakeBot()
-        self.tm = TaskManager(bot=self.bot, aria2=None, repo=self.repo)
+        self.tm = TaskManager(bot=self.bot, nodes=None, repo=self.repo)
 
     async def asyncTearDown(self):
         await self.repo.close()
@@ -136,7 +136,7 @@ class TestSendFileToTg(unittest.IsolatedAsyncioTestCase):
 class TestDiskAlert(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.bot = FakeBot()
-        self.tm = TaskManager(bot=self.bot, aria2=None, repo=None)
+        self.tm = TaskManager(bot=self.bot, nodes=None, repo=None)
         self._orig_threshold = settings.disk_alert_threshold_gb
         self._orig_admin = settings.admin_user_ids
         self._orig_allowed = settings.allowed_user_ids

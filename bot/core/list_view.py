@@ -26,7 +26,25 @@ TITLES = {
 }
 
 
-async def render_task_list(repo, aria2, status_key: str = "ALL", page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+async def _progress_for(nodes, rows) -> dict:
+    """页面上 ACTIVE 行的实时进度。多节点时按行归属分别去各节点取，某个节点
+    连不上就只缺它那部分进度（显示为无进度），不拖垮整页渲染。"""
+    node_names = {r["node"] for r in rows if r["status"] == "ACTIVE" and r["gid"]}
+    progress: dict = {}
+    for name in node_names:
+        try:
+            progress.update(await nodes.get(name).get_progress_map())
+        except Exception:
+            pass
+    return progress
+
+
+def _row_node_suffix(nodes, row) -> str:
+    label = nodes.label(row["node"])
+    return f" · 📍{escape(label)}" if label else ""
+
+
+async def render_task_list(repo, nodes, status_key: str = "ALL", page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
     """One-page task browser: filter tabs on top (segmented-control style),
     task rows as buttons, pagination + bulk actions + footer below."""
     counts = await repo.count_by_status()
@@ -46,8 +64,7 @@ async def render_task_list(repo, aria2, status_key: str = "ALL", page: int = 0) 
     if not rows:
         lines += ["暂无任务。"]
     else:
-        active_gids = [r["gid"] for r in rows if r["status"] == "ACTIVE" and r["gid"]]
-        progress = await aria2.get_progress_map() if active_gids else {}
+        progress = await _progress_for(nodes, rows)
 
         for index, row in enumerate(rows, start=offset + 1):
             name = row["file_name"] or row["source_ref"] or row["gid"] or "未命名任务"
@@ -59,6 +76,7 @@ async def render_task_list(repo, aria2, status_key: str = "ALL", page: int = 0) 
                 sub += f" · {p['percent']}% · {p['speed']}"
             elif row["status"] == "FAILED" and row["error"]:
                 sub += f" · {escape(row['error'])}"
+            sub += _row_node_suffix(nodes, row)
             lines.append(f"<b>{index}.</b> {escape(name)}\n{sub}")
             if row["gid"]:
                 keyboard_rows.append(task_open_button(index, row["gid"], name))
@@ -91,7 +109,7 @@ async def render_task_list(repo, aria2, status_key: str = "ALL", page: int = 0) 
 SEARCH_LIMIT = 15
 
 
-async def render_search_results(repo, aria2, keyword: str) -> tuple[str, InlineKeyboardMarkup]:
+async def render_search_results(repo, nodes, keyword: str) -> tuple[str, InlineKeyboardMarkup]:
     """/find 关键词的结果页。不做分页 —— 结果数上限较高（15 条），关键词不够
     精确时提示缩小范围，比再实现一套搜索分页要划算。搜索用的 callback_data
     没法直接塞中文关键词进去（64 字节很快超），所以干脆不留"下一页"入口。"""
@@ -106,8 +124,7 @@ async def render_search_results(repo, aria2, keyword: str) -> tuple[str, InlineK
     if not rows:
         lines.append("没有找到匹配的任务。")
     else:
-        active_gids = [r["gid"] for r in rows if r["status"] == "ACTIVE" and r["gid"]]
-        progress = await aria2.get_progress_map() if active_gids else {}
+        progress = await _progress_for(nodes, rows)
 
         for index, row in enumerate(rows, start=1):
             name = row["file_name"] or row["source_ref"] or row["gid"] or "未命名任务"
@@ -117,6 +134,7 @@ async def render_search_results(repo, aria2, keyword: str) -> tuple[str, InlineK
             p = progress.get(row["gid"]) if row["gid"] and row["status"] == "ACTIVE" else None
             if p:
                 sub += f" · {p['percent']}% · {p['speed']}"
+            sub += _row_node_suffix(nodes, row)
             lines.append(f"<b>{index}.</b> {escape(name)}\n{sub}")
             if row["gid"]:
                 keyboard_rows.append(task_open_button(index, row["gid"], name))

@@ -21,32 +21,73 @@ STATUS_LABEL = {
 }
 
 
-def main_inline_keyboard(counts: dict[str, int] | None = None) -> InlineKeyboardMarkup:
+def main_inline_keyboard(counts: dict[str, int] | None = None, *, node_label: str | None = None) -> InlineKeyboardMarkup:
+    """node_label 仅多节点部署时传入（当前节点显示名），单节点不显示该行。"""
     active = (counts or {}).get("ACTIVE", 0)
     active_label = f"⬇️ 下载中 {active}" if active else "⬇️ 下载中"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text=active_label, callback_data="list:ACTIVE:0"),
-                InlineKeyboardButton(text="📋 任务列表", callback_data="list:ALL:0"),
-            ],
-            [
-                InlineKeyboardButton(text="⚙️ 设置", callback_data="nav:settings"),
-                InlineKeyboardButton(text="🔄 刷新", callback_data="nav:start"),
-            ],
-        ]
-    )
+    rows = [
+        [
+            InlineKeyboardButton(text=active_label, callback_data="list:ACTIVE:0"),
+            InlineKeyboardButton(text="📋 任务列表", callback_data="list:ALL:0"),
+        ],
+    ]
+    if node_label:
+        rows.append([InlineKeyboardButton(text=f"🖥 节点: {node_label} ▾", callback_data="node:pick")])
+    rows.append([
+        InlineKeyboardButton(text="⚙️ 设置", callback_data="nav:settings"),
+        InlineKeyboardButton(text="🔄 刷新", callback_data="nav:start"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def pending_task_keyboard(token: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="▶️ 开始下载", callback_data=f"pending:start:{token}"),
-                InlineKeyboardButton(text="❌ 取消", callback_data=f"pending:cancel:{token}"),
-            ],
-        ]
-    )
+def node_chooser_keyboard(current: str, nodes: list, healthy: dict[str, bool]) -> InlineKeyboardMarkup:
+    """全局切换当前节点。callback 用节点名（/addnode 已限制名字字节长度，
+    拼进 64 字节的 callback_data 不会超）。"""
+    rows = []
+    for node in nodes:
+        dot = "🟢" if healthy.get(node.name, True) else "🔴"
+        label = f"·{dot} {node.display_name}·" if node.name == current else f"{dot} {node.display_name}"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"node:use:{node.name}")])
+    rows.append([InlineKeyboardButton(text="⬅️ 主菜单", callback_data="nav:start")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def pending_node_chooser_keyboard(token: str, current: str, nodes: list, healthy: dict[str, bool]) -> InlineKeyboardMarkup:
+    """确认卡片上的临时切换：只改这一条待确认任务的目标节点，不动用户全局偏好。"""
+    rows = []
+    for node in nodes:
+        dot = "🟢" if healthy.get(node.name, True) else "🔴"
+        label = f"·{dot} {node.display_name}·" if node.name == current else f"{dot} {node.display_name}"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"pnode:{token}:{node.name}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def node_manage_keyboard(nodes: list) -> InlineKeyboardMarkup:
+    """管理员的节点管理页：default 不给停用/删除按钮（它来自 .env）。"""
+    rows = []
+    for node in nodes:
+        if node.name == "default":
+            continue
+        toggle = "▶️ 启用" if not node.enabled else "⏸ 停用"
+        rows.append([
+            InlineKeyboardButton(text=f"{toggle} {node.display_name}", callback_data=f"admin:node:t:{node.name}"),
+            InlineKeyboardButton(text=f"🗑 删除 {node.display_name}", callback_data=f"admin:node:d:{node.name}"),
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def pending_task_keyboard(token: str, *, show_node_switch: bool = False) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(text="▶️ 开始下载", callback_data=f"pending:start:{token}"),
+            InlineKeyboardButton(text="❌ 取消", callback_data=f"pending:cancel:{token}"),
+        ],
+    ]
+    # 多节点部署才显示：发之前临时改目标节点，不用先回主菜单切全局偏好
+    if show_node_switch:
+        rows.append([InlineKeyboardButton(text="🖥 切换节点", callback_data=f"pending:nodes:{token}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def batch_pending_keyboard(batch_id: str) -> InlineKeyboardMarkup:
@@ -86,7 +127,7 @@ def _action_buttons(gid: str, status: str, prefix: str, label_prefix: str = "") 
     elif status == "COMPLETED":
         rows = [
             [("📂 保存位置", "files"), ("🔗 获取链接", "link")],
-            [("📤 发送到 TG", "sendtg")],
+            [("📤 发送到 TG", "sendtg")],  # 远程节点任务由 task_keyboard 的 local 开关移除
             [("🗑 删除记录", "delete")],
         ]
     elif status == "FAILED":
@@ -107,11 +148,20 @@ def _action_buttons(gid: str, status: str, prefix: str, label_prefix: str = "") 
     ]
 
 
-def task_keyboard(gid: str, status: str, *, with_back: bool = False) -> InlineKeyboardMarkup | None:
+def task_keyboard(gid: str, status: str, *, with_back: bool = False, local: bool = True) -> InlineKeyboardMarkup | None:
     """Buttons for a single task's own progress message; None if the status is
     unrecognized (there's always at least a delete option once terminal).
-    with_back appends a 返回列表 row for cards opened from the task list."""
+    with_back appends a 返回列表 row for cards opened from the task list.
+    local=False（任务在远程节点上）时移除依赖本机文件系统的按钮（发送到 TG）
+    ——按钮直接不渲染，而不是点了再报错。"""
     rows = _action_buttons(gid, status, "task")
+    if not local:
+        filtered = []
+        for row in rows:
+            kept = [b for b in row if not b.callback_data.startswith("task:sendtg:")]
+            if kept:
+                filtered.append(kept)
+        rows = filtered
     if with_back:
         rows.append([InlineKeyboardButton(text="⬅️ 返回列表", callback_data="list:ALL:0")])
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
@@ -216,7 +266,10 @@ def settings_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📁 rclone", callback_data="admin:rclone"),
                 InlineKeyboardButton(text="🔄 重启服务", callback_data="admin:restart"),
             ],
-            [InlineKeyboardButton(text="🖥 服务器状态", callback_data="admin:sysinfo")],
+            [
+                InlineKeyboardButton(text="🖥 服务器状态", callback_data="admin:sysinfo"),
+                InlineKeyboardButton(text="🌐 节点管理", callback_data="admin:nodes"),
+            ],
             [InlineKeyboardButton(text="⬅️ 返回主菜单", callback_data="nav:start")],
         ]
     )

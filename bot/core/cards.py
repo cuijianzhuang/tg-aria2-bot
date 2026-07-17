@@ -102,7 +102,13 @@ def render_home(counts: dict[str, int] | None = None, stats=None) -> str:
     return "\n".join(lines)
 
 
-def render_pending_card(kind: str, name: str, *, size: int | None = None, file_count: int | None = None) -> str:
+def render_pending_card(
+    kind: str, name: str, *,
+    size: int | None = None, file_count: int | None = None,
+    node_label: str | None = None, download_dir: str | None = None,
+) -> str:
+    """node_label 仅在多节点部署时传入（单节点不显示，界面保持简洁）；
+    download_dir 是目标节点的目录（远程节点与本机不同），不传退回本机配置。"""
     title = "📦 新下载任务" if kind != "magnet" else "🧲 磁力下载任务"
     safe_name = escape(name, quote=False)
     lines = [
@@ -111,14 +117,15 @@ def render_pending_card(kind: str, name: str, *, size: int | None = None, file_c
         f"📄 <code>{safe_name}</code>",
         f"📐 大小：{_fmt_size(size)}",
         f"🗂 文件数：{file_count if file_count is not None else '待解析'}",
-        f"📂 <code>{escape(settings.download_dir, quote=False)}</code>",
-        "",
-        "确认无误后开始下载。",
+        f"📂 <code>{escape(download_dir or settings.download_dir, quote=False)}</code>",
     ]
+    if node_label:
+        lines.append(f"📍 节点：{escape(node_label, quote=False)}")
+    lines += ["", "确认无误后开始下载。"]
     return "\n".join(lines)
 
 
-def render_task_card(row, download=None, *, status: str | None = None) -> str:
+def render_task_card(row, download=None, *, status: str | None = None, node_label: str | None = None) -> str:
     status = status or row["status"]
     name = row["file_name"] or getattr(download, "name", None) or row["source_ref"] or row["gid"]
     percent = getattr(download, "progress", 0.0) if download else 0.0
@@ -149,6 +156,8 @@ def render_task_card(row, download=None, *, status: str | None = None) -> str:
         lines.append(f"⚡ ↓ {speed} · ↑ {upload}")
         lines.append(f"⏱ 剩余 {_eta(download) if download else '未知'} · 🔗 {connections if connections is not None else '-'} 连接")
     lines.append(f"📂 <code>{safe_path}</code>")
+    if node_label:
+        lines.append(f"📍 节点：{escape(node_label, quote=False)}")
     if row["gofile_link"]:
         lines.append(f"☁️ {escape(str(row['gofile_link']), quote=False)}")
     lines += ["", f"<code>#{row['id']}</code> · <i>{updated}</i>"]
@@ -319,6 +328,33 @@ def render_server_status(info: dict, stats=None) -> str:
             pass
 
     lines += ["", f"<i>更新于 {datetime.now().strftime('%H:%M:%S')}</i>"]
+    return "\n".join(lines)
+
+
+def render_node_chooser(current: str, nodes: list, healthy: dict[str, bool]) -> str:
+    """nodes 是 node_pool.Node 列表；healthy 是名字->健康状态的缓存快照。"""
+    lines = ["🖥 <b>选择下载节点</b>", DIVIDER, "新任务会下载到你选中的节点。", ""]
+    for node in nodes:
+        dot = "🟢" if healthy.get(node.name, True) else "🔴"
+        marker = " ←当前" if node.name == current else ""
+        lines.append(f"{dot} {escape(node.display_name, quote=False)}{marker}")
+    return "\n".join(lines)
+
+
+def render_node_manage(nodes: list, healthy: dict[str, bool]) -> str:
+    lines = ["🖥 <b>节点管理</b>", DIVIDER]
+    for node in nodes:
+        dot = "🟢" if healthy.get(node.name, True) else "🔴"
+        state = "" if node.enabled else "（已停用）"
+        kind = "本机" if node.is_local else "远程"
+        lines.append(f"{dot} <b>{escape(node.display_name, quote=False)}</b>{state} · {kind}")
+        # rpc_url 里可能带内网地址，管理页只对管理员可见，直接展示便于排错
+        lines.append(f"　<code>{escape(node.rpc_url, quote=False)}</code> → <code>{escape(node.download_dir, quote=False)}</code>")
+    lines += [
+        "",
+        "添加节点：<code>/addnode 名称 rpc地址 密钥 [下载目录]</code>",
+        "<i>例：/addnode 群晖 http://192.168.1.5:6800/jsonrpc s3cret /volume1/downloads</i>",
+    ]
     return "\n".join(lines)
 
 
