@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     max_concurrent: int = 3
     # 完成/失败时是否补发新消息（编辑已有进度卡片始终进行，编辑本身无推送打扰）
     notify_on_complete: bool = True
+    # 下载完成后自动把文件发回 Telegram（走自建 Bot API，上限 2GB；
+    # 目录任务和超限文件自动跳过，只对单文件生效）
+    auto_send_to_tg: bool = False
+    # 磁盘剩余空间低于该值（GiB）时主动推送提醒管理员，0 表示关闭
+    disk_alert_threshold_gb: int = 10
     # 已完成任务记录自动清理：保留天数，0 表示关闭；只删数据库记录，不动磁盘文件
     auto_cleanup_days: int = 0
     proxy_url: str | None = None

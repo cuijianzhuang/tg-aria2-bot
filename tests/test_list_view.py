@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from bot.core.list_view import LIST_LIMIT, render_task_list
+from bot.core.list_view import LIST_LIMIT, SEARCH_LIMIT, render_search_results, render_task_list
 from bot.db.repo import TaskRepo
 
 
@@ -71,6 +71,46 @@ class TestBelowLimit(ListViewTestCase):
         text, markup = await render_task_list(self.repo, self.aria2, "COMPLETED", 0)
         self.assertFalse(self._has_next(markup))
         self.assertFalse(self._has_prev(markup))
+
+
+class TestSearchResults(ListViewTestCase):
+    async def _seed_named(self, names: list[str]):
+        for i, name in enumerate(names):
+            gid = f"g{i}"
+            await self.repo.create_task(
+                gid=gid, user_id=1, chat_id=1, reply_message_id=None,
+                source_type="url", source_ref=gid, file_name=name,
+                file_size=10, payload="https://example.com/f.bin",
+            )
+            await self.repo.update_status(gid, "COMPLETED")
+
+    async def test_finds_matching_tasks(self):
+        await self._seed_named(["movie.2024.mkv", "show.s01e01.mp4"])
+        text, markup = await render_search_results(self.repo, self.aria2, "movie")
+        self.assertIn("movie.2024.mkv", text)
+        self.assertNotIn("show.s01e01.mp4", text)
+        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        self.assertIn("task:open:g0", callbacks)
+
+    async def test_no_match_shows_empty_message(self):
+        await self._seed_named(["movie.mkv"])
+        text, markup = await render_search_results(self.repo, self.aria2, "nonexistent")
+        self.assertIn("没有找到匹配的任务", text)
+
+    async def test_truncation_hint_when_results_exceed_limit(self):
+        await self._seed_named([f"dup{i}.mkv" for i in range(SEARCH_LIMIT + 2)])
+        text, markup = await render_search_results(self.repo, self.aria2, "dup")
+        self.assertIn("结果超过", text)
+        # 只渲染 SEARCH_LIMIT 条 open 按钮，不是全部匹配数
+        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        open_buttons = [c for c in callbacks if c.startswith("task:open:")]
+        self.assertEqual(len(open_buttons), SEARCH_LIMIT)
+
+    async def test_keyword_is_escaped_in_title(self):
+        await self._seed_named(["a.mkv"])
+        text, markup = await render_search_results(self.repo, self.aria2, "<script>")
+        self.assertIn("&lt;script&gt;", text)
+        self.assertNotIn("<script>", text)
 
 
 if __name__ == "__main__":

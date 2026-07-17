@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS pending_tasks (
     file_name   TEXT,
     file_size   INTEGER,
     payload     TEXT NOT NULL,
-    created_at  REAL NOT NULL
+    created_at  REAL NOT NULL,
+    batch_id    TEXT              -- 一条消息里贴多条链接时，同批的行共享这个 id
 );
 """
 
@@ -55,6 +56,7 @@ MIGRATIONS = [
     # ORDER BY created_at DESC (recent lists) — both full scans without these
     "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at DESC)",
+    "ALTER TABLE pending_tasks ADD COLUMN batch_id TEXT",
 ]
 
 # Valid status values, kept here as the single source of truth for the state machine.

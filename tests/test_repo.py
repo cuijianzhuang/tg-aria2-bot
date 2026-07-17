@@ -136,5 +136,97 @@ class TestAllowedUsers(RepoTestCase):
         self.assertFalse(await self.repo.is_user_allowed(5))
 
 
+class TestPendingBatch(RepoTestCase):
+    async def _batch_pending(self, batch_id: str, n: int) -> list[str]:
+        tokens = []
+        for i in range(n):
+            token = await self.repo.create_pending(
+                kind="url", user_id=1, chat_id=1, source_ref=f"r{i}",
+                file_name=f"f{i}", file_size=1, payload=f"u{i}", batch_id=batch_id,
+            )
+            tokens.append(token)
+        return tokens
+
+    async def test_get_pending_batch_returns_all_members_in_order(self):
+        await self._batch_pending("b1", 3)
+        pendings = await self.repo.get_pending_batch("b1")
+        self.assertEqual([p.payload for p in pendings], ["u0", "u1", "u2"])
+
+    async def test_batch_isolated_from_other_batches(self):
+        await self._batch_pending("b1", 2)
+        await self._batch_pending("b2", 1)
+        self.assertEqual(len(await self.repo.get_pending_batch("b1")), 2)
+        self.assertEqual(len(await self.repo.get_pending_batch("b2")), 1)
+
+    async def test_delete_pending_batch_removes_only_that_batch(self):
+        await self._batch_pending("b1", 2)
+        await self._batch_pending("b2", 1)
+        deleted = await self.repo.delete_pending_batch("b1")
+        self.assertEqual(deleted, 2)
+        self.assertEqual(await self.repo.get_pending_batch("b1"), [])
+        self.assertEqual(len(await self.repo.get_pending_batch("b2")), 1)
+
+    async def test_single_pending_has_no_batch_id(self):
+        token = await self.repo.create_pending(
+            kind="url", user_id=1, chat_id=1, source_ref="r", file_name="f",
+            file_size=1, payload="u",
+        )
+        pending = await self.repo.get_pending(token)
+        self.assertIsNone(pending.batch_id)
+
+
+class TestSearchTasks(RepoTestCase):
+    async def test_matches_file_name_case_insensitive(self):
+        await self._create("g1", file_name="Movie.2024.mkv")
+        await self._create("g2", source_ref="x", file_name="show.s01e01.mp4")
+        results = await self.repo.search_tasks("movie")
+        self.assertEqual([r["gid"] for r in results], ["g1"])
+
+    async def test_matches_source_ref_too(self):
+        await self._create("g1", file_name=None, source_ref="abc123hash")
+        results = await self.repo.search_tasks("abc123")
+        self.assertEqual([r["gid"] for r in results], ["g1"])
+
+    async def test_no_match_returns_empty(self):
+        await self._create("g1", file_name="movie.mkv")
+        self.assertEqual(await self.repo.search_tasks("nonexistent"), [])
+
+    async def test_orders_newest_first(self):
+        await self._create("g1", file_name="dup.mkv", source_ref="a")
+        await self._create("g2", file_name="dup.mkv", source_ref="b")
+        results = await self.repo.search_tasks("dup")
+        self.assertEqual([r["gid"] for r in results], ["g2", "g1"])
+
+
+class TestPeriodStats(RepoTestCase):
+    async def _created_days_ago(self, gid: str, days: int, *, status: str, file_size: int, source_ref: str):
+        await self._create(gid, source_ref=source_ref, file_size=file_size)
+        if status != "PENDING":
+            await self.repo.update_status(gid, status)
+        created_at = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        await self.repo._conn.execute("UPDATE tasks SET created_at = ? WHERE gid = ?", (created_at, gid))
+        await self.repo._conn.commit()
+
+    async def test_counts_and_bytes_within_period(self):
+        await self._created_days_ago("old", 10, status="COMPLETED", file_size=1000, source_ref="a")
+        await self._created_days_ago("recent_ok", 1, status="COMPLETED", file_size=500, source_ref="b")
+        await self._created_days_ago("recent_fail", 1, status="FAILED", file_size=0, source_ref="c")
+        since = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        stats = await self.repo.get_period_stats(since)
+        self.assertEqual(stats["total"], 2)
+        self.assertEqual(stats["completed"], 1)
+        self.assertEqual(stats["failed"], 1)
+        self.assertEqual(stats["total_bytes"], 500)
+
+    async def test_none_since_covers_everything(self):
+        await self._created_days_ago("old", 100, status="COMPLETED", file_size=1, source_ref="a")
+        stats = await self.repo.get_period_stats(None)
+        self.assertEqual(stats["total"], 1)
+
+    async def test_empty_db_returns_zeros_not_none(self):
+        stats = await self.repo.get_period_stats(None)
+        self.assertEqual(stats, {"total": 0, "completed": 0, "failed": 0, "cancelled": 0, "total_bytes": 0})
+
+
 if __name__ == "__main__":
     unittest.main()

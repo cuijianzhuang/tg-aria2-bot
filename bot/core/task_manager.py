@@ -1,11 +1,13 @@
 import asyncio
 import logging
 import os
+import shutil
 import time
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
+from aiogram.types import FSInputFile
 
 from bot.config import settings
 from bot.core.cards import render_task_card
@@ -28,6 +30,15 @@ PROGRESS_EDIT_MIN_PERCENT_DELTA = 5.0
 
 TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 
+# 自建 telegram-bot-api（--local 模式）发送文件的上限，比公有 Bot API 的 50MB
+# 宽松得多。这是 Telegram 本地服务器自身的硬限制，跟 settings.max_file_size
+# （控制接收文件时拒绝的上限）是两回事，不要混用。
+TG_MAX_SEND_BYTES = 2 * 1000 * 1024 * 1024
+
+# 磁盘告警冷却时间：跌破阈值后先提醒一次，之后在冷却期内即使仍然低于阈值也不
+# 重复刷屏；只有回升到阈值以上再次跌破时才会重新计时。
+DISK_ALERT_COOLDOWN_SECONDS = 6 * 3600
+
 
 class TaskManager:
     """Polls aria2 for in-flight tasks and throttles Telegram progress edits."""
@@ -40,6 +51,10 @@ class TaskManager:
         self._chat_backoff: dict[int, float] = {}  # chat_id -> monotonic deadline after a 429
         self._poll_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
+        # monotonic 时间戳；None 表示当前不处于告警状态。不能用 0.0 当哨兵值——
+        # time.monotonic() 的起点是系统/容器启动时刻，刚启动时它本身就可能小于
+        # 冷却时长，会导致 `now - 0.0 < COOLDOWN` 恒为真，把第一次告警也吞掉。
+        self._last_disk_alert: float | None = None
         # Strong refs to fire-and-forget pipeline tasks: the event loop only
         # keeps weak references, so an unreferenced task can be GC'd mid-flight.
         self._bg_tasks: set[asyncio.Task] = set()
@@ -68,12 +83,50 @@ class TaskManager:
     async def _poll_loop(self):
         while self._running:
             try:
+                await self._check_disk_space()
                 await self._poll_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 log.exception("poll loop iteration failed")
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+    async def _check_disk_space(self):
+        """磁盘剩余空间低于阈值时主动提醒管理员。disk_usage 只是一次 stat 调用，
+        跟着 5 秒轮询一起查代价可以忽略；用冷却时间避免在阈值附近反复刷屏。"""
+        threshold = settings.disk_alert_threshold_gb
+        if threshold <= 0:
+            return
+        try:
+            usage = await asyncio.to_thread(shutil.disk_usage, settings.download_dir)
+        except OSError:
+            return
+
+        free_gb = usage.free / 1024**3
+        now = time.monotonic()
+        if free_gb >= threshold:
+            self._last_disk_alert = None  # 恢复正常，下次再跌破会重新提醒
+            return
+        if self._last_disk_alert is not None and now - self._last_disk_alert < DISK_ALERT_COOLDOWN_SECONDS:
+            return  # 仍处于告警冷却期，不重复发
+
+        self._last_disk_alert = now
+        await self._notify_admins(
+            f"⚠️ <b>磁盘空间告警</b>\n剩余 {free_gb:.1f} GB，低于设置的 {threshold} GB 阈值。"
+        )
+
+    async def _notify_admins(self, text: str):
+        # 明确配置的 ADMIN_USER_IDS 优先；没配就退回 ALLOWED_USER_IDS（跟
+        # settings.is_admin 的判定逻辑保持一致）。两者都空说明没人可通知。
+        recipients = settings.admin_ids or settings.allowed_ids
+        if not recipients:
+            log.warning("disk alert triggered but no admin/allowed ids configured: %s", text)
+            return
+        for uid in recipients:
+            try:
+                await self._bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
+            except Exception:
+                log.warning("failed to send disk alert to user %s", uid)
 
     async def _poll_once(self):
         rows = await self._repo.get_unfinished()
@@ -131,6 +184,10 @@ class TaskManager:
                     row, render_task_card(row, download, status="COMPLETED"),
                     gid=gid, status="COMPLETED", parse_mode="HTML",
                 )
+            # 跟 gofile 流水线是否启用无关，独立触发；目录任务和超限文件在
+            # send_file_to_tg 内部直接跳过，这里不用重复判断
+            if settings.auto_send_to_tg and target_path:
+                self._spawn(self._auto_send_to_tg(row, gid, target_path))
             return
 
         if status == "ERROR":
@@ -188,6 +245,34 @@ class TaskManager:
             text = f"✅ 下载完成: {row['file_name'] or gid}\n⚠️ 上传 gofile 失败: {e}"
 
         await self._notify(row, text, gid=gid, status="COMPLETED")
+
+    async def _auto_send_to_tg(self, row, gid: str, path: str):
+        ok, msg = await self.send_file_to_tg(row, gid, path)
+        if not ok:
+            # 自动发送场景下静默跳过失败（多半是目录/超限），完成卡片本身已经
+            # 通知过用户了，不用再额外弹一条失败提示制造噪音
+            log.info("auto-send-to-tg skipped for gid %s: %s", gid, msg)
+
+    async def send_file_to_tg(self, row, gid: str, path: str | None = None) -> tuple[bool, str]:
+        """把已完成任务的文件发回 Telegram。目录任务、以及超过本地 Bot API
+        发送上限的文件直接拒绝，不会去尝试（避免卡住或占满带宽）。
+        供自动发送和任务卡片上的"发送到 TG"按钮共用。"""
+        target = path or row["save_path"]
+        if not target or not os.path.isfile(target):
+            return False, "文件不存在或是目录，无法发送"
+        size = os.path.getsize(target)
+        if size > TG_MAX_SEND_BYTES:
+            return False, f"文件过大（{size / 1024**3:.1f} GB），超过 Telegram 发送上限"
+        try:
+            await self._bot.send_document(
+                chat_id=row["chat_id"],
+                document=FSInputFile(target),
+                caption=row["file_name"] or os.path.basename(target),
+            )
+            return True, "已发送"
+        except Exception as e:
+            log.exception("failed to send file to telegram for gid %s", gid)
+            return False, f"发送失败: {e}"
 
     async def _maybe_report_progress(self, row, download):
         gid = row["gid"]

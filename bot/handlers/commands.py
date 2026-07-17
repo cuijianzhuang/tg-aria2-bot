@@ -4,7 +4,8 @@ from aiogram.types import Message
 
 from bot.core.cards import render_home
 from bot.core.keyboards import main_inline_keyboard
-from bot.core.list_view import render_task_list
+from bot.core.list_view import render_search_results, render_task_list
+from bot.core.stats_view import DEFAULT_PERIOD, render_stats_view
 
 router = Router(name="commands")
 
@@ -23,6 +24,21 @@ async def cmd_start(message: Message, repo, aria2):
 @router.message(Command("list"))
 async def cmd_list(message: Message, repo, aria2):
     text, markup = await render_task_list(repo, aria2, "ALL", 0)
+    await message.reply(text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.message(Command("find"))
+async def cmd_find(message: Message, command: CommandObject, repo, aria2):
+    if not command.args:
+        await message.reply("用法: /find 关键词（按文件名模糊搜索历史任务）")
+        return
+    text, markup = await render_search_results(repo, aria2, command.args.strip())
+    await message.reply(text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message, repo):
+    text, markup = await render_stats_view(repo, DEFAULT_PERIOD)
     await message.reply(text, reply_markup=markup, parse_mode="HTML")
 
 

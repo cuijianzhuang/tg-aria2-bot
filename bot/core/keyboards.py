@@ -49,6 +49,17 @@ def pending_task_keyboard(token: str) -> InlineKeyboardMarkup:
     )
 
 
+def batch_pending_keyboard(batch_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="▶️ 全部开始", callback_data=f"pending:startall:{batch_id}"),
+                InlineKeyboardButton(text="❌ 全部取消", callback_data=f"pending:cancelall:{batch_id}"),
+            ],
+        ]
+    )
+
+
 def _action_buttons(gid: str, status: str, prefix: str, label_prefix: str = "") -> list[list[InlineKeyboardButton]]:
     """Action buttons for one task, using the given callback_data prefix so the
     handler can tell single-task messages ("task:") apart from a /list row
@@ -75,6 +86,7 @@ def _action_buttons(gid: str, status: str, prefix: str, label_prefix: str = "") 
     elif status == "COMPLETED":
         rows = [
             [("📂 保存位置", "files"), ("🔗 获取链接", "link")],
+            [("📤 发送到 TG", "sendtg")],
             [("🗑 删除记录", "delete")],
         ]
     elif status == "FAILED":
@@ -180,6 +192,7 @@ def cleanup_confirm_keyboard() -> InlineKeyboardMarkup:
 def settings_keyboard() -> InlineKeyboardMarkup:
     """Single hub: download tuning on top, admin features (formerly /admin) below."""
     notify_label = f"🔔 完成通知: {'✅' if settings.notify_on_complete else '❌'}"
+    send_tg_label = f"📤 自动发送: {'✅' if settings.auto_send_to_tg else '❌'}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -194,6 +207,7 @@ def settings_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text=notify_label, callback_data="settings:notify"),
                 InlineKeyboardButton(text="🧹 自动清理", callback_data="settings:cleanup"),
             ],
+            [InlineKeyboardButton(text=send_tg_label, callback_data="settings:sendtg")],
             [
                 InlineKeyboardButton(text="👥 白名单", callback_data="admin:users"),
                 InlineKeyboardButton(text="☁️ GoFile", callback_data="admin:gofile"),
@@ -296,6 +310,41 @@ def cleanup_chooser_keyboard(current_days: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         row,
         [InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")],
+    ])
+
+
+def task_limit_chooser_keyboard(gid: str, current: str | None = None) -> InlineKeyboardMarkup:
+    """跟全局限速用同一套预设，callback_data 里带 gid 区分是哪个任务。"""
+    rows = [
+        [InlineKeyboardButton(
+            text=f"·{label}·" if value == current else label,
+            callback_data=f"tasklimit:{gid}:{value}",
+        )]
+        for label, value in LIMIT_PRESETS
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ 返回任务", callback_data=f"task:detail:{gid}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+PERIOD_PRESETS = (
+    ("24 小时", "1"),
+    ("7 天", "7"),
+    ("30 天", "30"),
+    ("全部", "0"),
+)
+
+
+def stats_period_keyboard(current_days: str) -> InlineKeyboardMarkup:
+    row = [
+        InlineKeyboardButton(
+            text=f"·{label}·" if value == current_days else label,
+            callback_data=f"stats:{value}",
+        )
+        for label, value in PERIOD_PRESETS
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        row,
+        [InlineKeyboardButton(text="⬅️ 主菜单", callback_data="nav:start")],
     ])
 
 

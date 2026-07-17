@@ -3,7 +3,7 @@ import os
 
 from aiogram import Router, F
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.config import settings
 from bot.core import storage
@@ -17,11 +17,13 @@ from bot.core.cards import (
     render_maxsize_chooser,
     render_settings,
     render_task_card,
+    render_task_limit_chooser,
 )
 from bot.core.conf_editor import write_kv
 from bot.core.keyboards import (
     CLEANUP_PRESETS,
     CONCURRENT_PRESETS,
+    LIMIT_PRESETS,
     MAXSIZE_PRESETS,
     cleanup_chooser_keyboard,
     cleanup_confirm_keyboard,
@@ -34,8 +36,10 @@ from bot.core.keyboards import (
     settings_keyboard,
     task_cancel_confirm_keyboard,
     task_keyboard,
+    task_limit_chooser_keyboard,
 )
 from bot.core.list_view import render_task_list
+from bot.core.stats_view import render_stats_view
 
 log = logging.getLogger(__name__)
 router = Router(name="callbacks")
@@ -121,6 +125,33 @@ async def apply_limit(query: CallbackQuery, aria2):
         return
     await query.answer("✅ 已生效" if value != "0" else "✅ 已取消限速")
     await _show_settings(query, aria2)
+
+
+@router.callback_query(F.data.startswith("tasklimit:"))
+async def apply_task_limit(query: CallbackQuery, aria2, repo):
+    _, gid, value = query.data.split(":", 2)
+    if value not in {v for _, v in LIMIT_PRESETS}:
+        await query.answer("无效的限速值", show_alert=True)
+        return
+    row = await repo.get_by_gid(gid)
+    if row is None:
+        await query.answer("任务不存在", show_alert=True)
+        return
+    if not _can_manage(query, row["user_id"]):
+        await query.answer("⛔ 只能操作自己的任务。", show_alert=True)
+        return
+    try:
+        await aria2.set_download_limit(gid, value)
+    except Exception:
+        log.exception("failed to set per-task limit for gid %s", gid)
+        await query.answer("设置失败，请稍后再试", show_alert=True)
+        return
+    await query.answer("✅ 已生效" if value != "0" else "✅ 已取消限速")
+    name = row["file_name"] or row["source_ref"] or gid
+    await _edit(
+        query, render_task_limit_chooser(name, value),
+        reply_markup=task_limit_chooser_keyboard(gid, value), parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data == "settings:concurrent")
@@ -231,6 +262,14 @@ async def apply_dir(query: CallbackQuery, aria2):
     await _show_settings(query, aria2)
 
 
+@router.callback_query(F.data == "settings:sendtg")
+async def toggle_send_tg(query: CallbackQuery, aria2):
+    settings.auto_send_to_tg = not settings.auto_send_to_tg
+    _persist_env("AUTO_SEND_TO_TG", "true" if settings.auto_send_to_tg else "false")
+    await query.answer("📤 自动发送已开启" if settings.auto_send_to_tg else "📤 自动发送已关闭")
+    await _show_settings(query, aria2)
+
+
 @router.callback_query(F.data.startswith("settings:"))
 async def settings_fallback(query: CallbackQuery):
     await query.answer("该设置暂未接入。", show_alert=True)
@@ -276,6 +315,13 @@ async def list_filter(query: CallbackQuery, repo, aria2):
     await _edit(query, text, reply_markup=markup, parse_mode="HTML")
 
 
+@router.callback_query(F.data.startswith("stats:"))
+async def show_stats(query: CallbackQuery, repo):
+    days = query.data.split(":", 1)[1]
+    text, markup = await render_stats_view(repo, days)
+    await _edit(query, text, reply_markup=markup, parse_mode="HTML")
+
+
 async def _add_source(aria2, kind: str, payload: str, file_name: str | None) -> str:
     """Add a download to aria2 from its original source; returns the new gid.
     Shared by pending:start and task:retry so both stay in sync."""
@@ -296,6 +342,16 @@ async def _add_source(aria2, kind: str, payload: str, file_name: str | None) -> 
 @router.callback_query(F.data.startswith("pending:"))
 async def handle_pending(query: CallbackQuery, aria2, repo):
     _, action, token = query.data.split(":", 2)
+
+    # 批量确认（一条消息贴了多条链接）走独立分支 —— token 这里实际是 batch_id，
+    # 跟下面单条确认的逻辑不共用，提前分流
+    if action == "startall":
+        await _handle_batch_start(query, aria2, repo, batch_id=token)
+        return
+    if action == "cancelall":
+        await _handle_batch_cancel(query, repo, batch_id=token)
+        return
+
     pending = await repo.get_pending(token)
     if pending is None:
         await query.answer("这个待确认任务已过期，请重新发送。", show_alert=True)
@@ -353,8 +409,60 @@ async def handle_pending(query: CallbackQuery, aria2, repo):
     await _edit(query, render_task_card(row, status="PENDING"), reply_markup=task_keyboard(gid, "PENDING"), parse_mode="HTML")
 
 
+async def _handle_batch_start(query: CallbackQuery, aria2, repo, *, batch_id: str):
+    pendings = await repo.get_pending_batch(batch_id)
+    if not pendings:
+        await query.answer("批量任务已过期或已处理。", show_alert=True)
+        return
+    if not _can_manage(query, pendings[0].user_id):
+        await query.answer("⛔ 只能操作自己创建的批量任务。", show_alert=True)
+        return
+
+    # 批量任务不挂 reply_message_id：逐个任务都去编辑同一条汇总消息会互相打架，
+    # 干脆不接，进度只能在任务列表里看；完成/失败时仍然会按"完成通知"设置补发新消息
+    started, skipped = 0, 0
+    for claimed in pendings:
+        claimed = await repo.pop_pending(claimed.token)
+        if claimed is None:
+            continue
+        if not storage.has_enough_space(settings.download_dir, claimed.file_size or 0):
+            skipped += 1
+            continue
+        try:
+            gid = await _add_source(aria2, claimed.kind, claimed.payload, claimed.file_name)
+        except Exception:
+            log.exception("batch start failed for token %s", claimed.token)
+            skipped += 1
+            continue
+        await repo.create_task(
+            gid=gid, user_id=claimed.user_id, chat_id=claimed.chat_id, reply_message_id=None,
+            source_type=claimed.kind, source_ref=claimed.source_ref,
+            file_name=claimed.file_name, file_size=claimed.file_size, payload=claimed.payload,
+        )
+        started += 1
+
+    text = f"✅ 批量任务已处理：成功启动 {started} 个"
+    if skipped:
+        text += f"，跳过 {skipped} 个（磁盘空间不足或添加失败）"
+    text += "\n\n可在 📋 任务列表 里查看进度。"
+    markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 任务列表", callback_data="list:ALL:0")]])
+    await _edit(query, text, reply_markup=markup)
+
+
+async def _handle_batch_cancel(query: CallbackQuery, repo, *, batch_id: str):
+    pendings = await repo.get_pending_batch(batch_id)
+    if pendings and not _can_manage(query, pendings[0].user_id):
+        await query.answer("⛔ 只能操作自己创建的批量任务。", show_alert=True)
+        return
+    deleted = await repo.delete_pending_batch(batch_id)
+    await _edit(
+        query, f"已取消批量任务（{deleted} 个）。",
+        reply_markup=main_inline_keyboard(await repo.count_by_status()),
+    )
+
+
 @router.callback_query(F.data.startswith("task:"))
-async def handle_task_action(query: CallbackQuery, aria2, repo):
+async def handle_task_action(query: CallbackQuery, aria2, repo, task_manager):
     _, action, gid = query.data.split(":", 2)
     row = await repo.get_by_gid(gid)
     if row is None:
@@ -432,16 +540,34 @@ async def handle_task_action(query: CallbackQuery, aria2, repo):
         return
 
     if action == "settings":
-        await query.answer("当前任务可直接暂停、继续或取消；限速使用 /limit 2M。", show_alert=True)
+        await query.answer("当前任务可直接暂停、继续或取消；限速见下方「🚀 限速」按钮。", show_alert=True)
         return
 
     if action == "limit":
-        await query.answer("全局限速仍使用原命令：/limit 2M；/limit 0 表示不限速。", show_alert=True)
+        try:
+            limit_raw = await aria2.get_download_limit(gid)
+        except Exception:
+            limit_raw = None
+        name = row["file_name"] or row["source_ref"] or gid
+        await _edit(
+            query, render_task_limit_chooser(name, limit_raw),
+            reply_markup=task_limit_chooser_keyboard(gid, limit_raw), parse_mode="HTML",
+        )
         return
 
     if action == "link":
         link = row["gofile_link"] or row["save_path"] or "当前没有可用链接。"
         await query.answer(link, show_alert=True)
+        return
+
+    if action == "sendtg":
+        if row["status"] != "COMPLETED":
+            await query.answer("任务未完成，无法发送。", show_alert=True)
+            return
+        await query.answer("正在发送…")
+        ok, msg = await task_manager.send_file_to_tg(row, gid)
+        if not ok:
+            await query.answer(msg, show_alert=True)
         return
 
     new_status = await _apply_action(query, aria2, repo, action, gid)

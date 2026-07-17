@@ -17,6 +17,8 @@ from bot.handlers import admin, callbacks, commands, links, media
 BOT_COMMANDS = [
     BotCommand(command="start", description="主菜单（状态总览）"),
     BotCommand(command="list", description="任务列表"),
+    BotCommand(command="find", description="按文件名搜索任务"),
+    BotCommand(command="stats", description="下载统计"),
     BotCommand(command="settings", description="设置与管理"),
 ]
 

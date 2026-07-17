@@ -110,6 +110,46 @@ class TaskRepo:
         await self._conn.commit()
         return cur.rowcount
 
+    async def search_tasks(self, keyword: str, limit: int = 15) -> list[aiosqlite.Row]:
+        """按文件名/来源标识模糊搜索，多取 1 条用来在渲染层判断"结果是否被截断"。
+        SQLite 的 LIKE 对 ASCII 字母默认大小写不敏感，中文本身没有大小写问题。"""
+        pattern = f"%{keyword}%"
+        cur = await self._conn.execute(
+            "SELECT * FROM tasks WHERE file_name LIKE ? OR source_ref LIKE ? "
+            # created_at 的 SQLite CURRENT_TIMESTAMP 精度只到秒，同一秒内插入
+            # 的多条记录 ORDER BY created_at 排序不稳定；id 递增，用它做二级排序键
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (pattern, pattern, limit + 1),
+        )
+        return await cur.fetchall()
+
+    async def get_period_stats(self, since: str | None) -> dict:
+        """since 为 None 时统计全部时间；否则是 'YYYY-MM-DD HH:MM:SS' 格式的 UTC
+        时间戳字符串 —— 必须匹配 SQLite CURRENT_TIMESTAMP 写入 created_at 时用的
+        格式（不能传 ISO8601 的 T 分隔格式，字符串比较会因为格式不同而失真）。"""
+        where = "WHERE created_at >= ?" if since else ""
+        params = (since,) if since else ()
+        cur = await self._conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) AS completed,
+                SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+                SUM(CASE WHEN status = 'CANCELLED' THEN 1 ELSE 0 END) AS cancelled,
+                SUM(CASE WHEN status = 'COMPLETED' THEN file_size ELSE 0 END) AS total_bytes
+            FROM tasks {where}
+            """,
+            params,
+        )
+        row = await cur.fetchone()
+        return {
+            "total": row["total"] or 0,
+            "completed": row["completed"] or 0,
+            "failed": row["failed"] or 0,
+            "cancelled": row["cancelled"] or 0,
+            "total_bytes": row["total_bytes"] or 0,
+        }
+
     async def update_gofile_link(self, gid: str, link: str):
         await self._conn.execute("UPDATE tasks SET gofile_link = ? WHERE gid = ?", (link, gid))
         await self._conn.commit()
@@ -130,14 +170,16 @@ class TaskRepo:
     async def list_recent(
         self, limit: int = 10, offset: int = 0, status: str | None = None
     ) -> list[aiosqlite.Row]:
+        # id DESC 作为 created_at（精度到秒）打平的二级排序键，避免同一秒内插入
+        # 的多条记录顺序不稳定，翻页时行错位或重复
         if status:
             cur = await self._conn.execute(
-                "SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                "SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
                 (status, limit, offset),
             )
         else:
             cur = await self._conn.execute(
-                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ? OFFSET ?", (limit, offset)
+                "SELECT * FROM tasks ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", (limit, offset)
             )
         return await cur.fetchall()
 
@@ -193,15 +235,17 @@ class TaskRepo:
         file_name: str | None,
         file_size: int | None,
         payload: str,
+        batch_id: str | None = None,
     ) -> str:
         await self._cleanup_expired_pending()
         token = uuid4().hex[:12]
         await self._conn.execute(
             """
-            INSERT INTO pending_tasks (token, kind, user_id, chat_id, source_ref, file_name, file_size, payload, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO pending_tasks
+                (token, kind, user_id, chat_id, source_ref, file_name, file_size, payload, created_at, batch_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (token, kind, user_id, chat_id, source_ref, file_name, file_size, payload, time()),
+            (token, kind, user_id, chat_id, source_ref, file_name, file_size, payload, time(), batch_id),
         )
         await self._conn.commit()
         return token
@@ -246,6 +290,20 @@ class TaskRepo:
     async def delete_pending(self, token: str):
         await self._conn.execute("DELETE FROM pending_tasks WHERE token = ?", (token,))
         await self._conn.commit()
+
+    async def get_pending_batch(self, batch_id: str) -> list[PendingTask]:
+        """一条"批量发送链接"消息生成的所有待确认任务，按创建顺序排列。"""
+        await self._cleanup_expired_pending()
+        cur = await self._conn.execute(
+            "SELECT * FROM pending_tasks WHERE batch_id = ? ORDER BY created_at", (batch_id,)
+        )
+        rows = await cur.fetchall()
+        return [PendingTask.from_row(row) for row in rows]
+
+    async def delete_pending_batch(self, batch_id: str) -> int:
+        cur = await self._conn.execute("DELETE FROM pending_tasks WHERE batch_id = ?", (batch_id,))
+        await self._conn.commit()
+        return cur.rowcount
 
     async def _cleanup_expired_pending(self):
         await self._conn.execute(
