@@ -95,6 +95,35 @@ class TestNodePool(PoolTestCase):
         self.pool.mark_health("default", False)
         self.assertFalse(self.pool.is_healthy("default"))
 
+    async def test_remove_closes_the_client_session(self):
+        """节点被删除时要把它的 aiohttp session 关掉，不然连接池/WS 连接
+        一直挂到进程退出（不发真实请求，只强制 session 惰性创建来验证）。"""
+        await self._add_nas()
+        client = self.pool.get("nas")
+        session = client._rpc._get_session()
+        self.assertFalse(session.closed)
+        await self.pool.remove("nas")
+        self.assertTrue(session.closed)
+
+    async def test_remove_without_ever_fetching_client_is_safe(self):
+        await self._add_nas()
+        await self.pool.remove("nas")  # 从没调用过 get("nas")，不应该抛异常
+
+    async def test_close_closes_every_client_session(self):
+        await self._add_nas()
+        default_session = self.pool.get("default")._rpc._get_session()
+        nas_session = self.pool.get("nas")._rpc._get_session()
+        await self.pool.close()
+        self.assertTrue(default_session.closed)
+        self.assertTrue(nas_session.closed)
+
+    async def test_reload_closes_sessions_of_nodes_no_longer_present(self):
+        await self._add_nas()
+        nas_session = self.pool.get("nas")._rpc._get_session()
+        await self.repo.delete_node("nas")  # 绕过 pool，模拟节点在别处被删掉
+        await self.pool.load()
+        self.assertTrue(nas_session.closed)
+
 
 class TestUserPrefs(PoolTestCase):
     async def test_default_when_never_set(self):

@@ -88,6 +88,7 @@ async def lifespan(app: FastAPI):
     state["aria2"] = Aria2Client(settings.aria2_rpc, settings.aria2_secret)
     state["session_secret"] = load_or_create_secret(_secret_path())
     yield
+    await state["aria2"].close()
     await repo.close()
 
 

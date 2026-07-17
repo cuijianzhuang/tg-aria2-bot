@@ -62,6 +62,13 @@ class TaskManager:
         # 加/删的（/addnode、节点管理页），所以这个集合每轮轮询都会对齐一次
         # （_reconcile_ws_listeners），不是启动时建好就不变了。
         self._ws_tasks: dict[str, asyncio.Task] = {}
+        # 接了 WS 推送之后，同一个 gid 的完成/出错事件可能同时被轮询循环和
+        # WS 回调两条路径拿到（WS 先一步 commit 更新，轮询循环手里那份
+        # rows 快照还是旧状态，等轮到这个 gid 时又处理一遍）——不加锁的话
+        # gofile 压缩上传/自动发送 TG 会被并发触发两次。这个集合只是"正在
+        # 处理这个 gid 的终止转换"的标记，check-and-add 之间没有 await，
+        # asyncio 单线程协作式调度保证这两步不会被其它协程插入。
+        self._terminal_in_flight: set[str] = set()
         self._running = False
 
     async def start(self):
@@ -243,39 +250,24 @@ class TaskManager:
         gid = row["gid"]
         status = download.status.upper()
 
-        if status == "COMPLETE":
-            self._last_edit.pop(gid, None)
-            save_path = str(download.files[0].path) if download.files else None
-            # download.dir + download.name covers multi-file torrents too (the
-            # first file alone would just be one piece of the whole download)
-            target_path = os.path.join(download.dir, download.name) if download.name else save_path
-            await self._repo.update_status(gid, "COMPLETED", save_path=target_path or save_path)
-
-            # gofile 压缩上传 / 自动发送 TG 都要读本机磁盘上的产物，远程节点的
-            # 文件在远端机器上，这两条流水线只对本机节点触发
-            if node_is_local and settings.gofile_enabled and target_path and os.path.exists(target_path):
-                # background task: a multi-GB compress+upload must not stall the
-                # poll loop (it would freeze progress edits for every other task)
-                self._spawn(self._run_gofile_pipeline(row, gid, target_path))
-            else:
-                await self._notify(
-                    row, self._render_card(row, download, status="COMPLETED"),
-                    gid=gid, status="COMPLETED", parse_mode="HTML",
-                    local=node_is_local,
-                )
-            # 跟 gofile 流水线是否启用无关，独立触发；目录任务和超限文件在
-            # send_file_to_tg 内部直接跳过，这里不用重复判断
-            if node_is_local and settings.auto_send_to_tg and target_path:
-                self._spawn(self._auto_send_to_tg(row, gid, target_path))
-            return
-
-        if status == "ERROR":
-            self._last_edit.pop(gid, None)
-            await self._repo.update_status(gid, "FAILED", error=download.error_message)
-            await self._notify(
-                row, self._render_card(row, download, status="FAILED"),
-                gid=gid, status="FAILED", parse_mode="HTML",
-            )
+        if status in ("COMPLETE", "ERROR"):
+            if gid in self._terminal_in_flight:
+                return  # 另一条路径（轮询/WS）已经在处理这个 gid 的终止转换了
+            self._terminal_in_flight.add(gid)
+            try:
+                # 进正式处理前重新确认一次 DB 里的当前状态——轮询循环手里的
+                # row 是本轮开始时的快照，如果 WS 路径已经抢先处理完（改成
+                # COMPLETED/FAILED 了），这里就不用再重复触发一次 gofile
+                # 上传/自动发送
+                current = await self._repo.get_by_gid(gid)
+                if current is None or current["status"] not in ("PENDING", "ACTIVE", "PAUSED"):
+                    return
+                if status == "COMPLETE":
+                    await self._handle_complete(row, download, node_is_local=node_is_local)
+                else:
+                    await self._handle_error(row, download)
+            finally:
+                self._terminal_in_flight.discard(gid)
             return
 
         if status in ("ACTIVE", "PAUSED", "WAITING"):
@@ -286,6 +278,41 @@ class TaskManager:
                     await self._update_keyboard(row, gid, mapped)
             if status == "ACTIVE":
                 await self._maybe_report_progress(row, download)
+
+    async def _handle_complete(self, row, download, *, node_is_local: bool):
+        gid = row["gid"]
+        self._last_edit.pop(gid, None)
+        save_path = str(download.files[0].path) if download.files else None
+        # download.dir + download.name covers multi-file torrents too (the
+        # first file alone would just be one piece of the whole download)
+        target_path = os.path.join(download.dir, download.name) if download.name else save_path
+        await self._repo.update_status(gid, "COMPLETED", save_path=target_path or save_path)
+
+        # gofile 压缩上传 / 自动发送 TG 都要读本机磁盘上的产物，远程节点的
+        # 文件在远端机器上，这两条流水线只对本机节点触发
+        if node_is_local and settings.gofile_enabled and target_path and os.path.exists(target_path):
+            # background task: a multi-GB compress+upload must not stall the
+            # poll loop (it would freeze progress edits for every other task)
+            self._spawn(self._run_gofile_pipeline(row, gid, target_path))
+        else:
+            await self._notify(
+                row, self._render_card(row, download, status="COMPLETED"),
+                gid=gid, status="COMPLETED", parse_mode="HTML",
+                local=node_is_local,
+            )
+        # 跟 gofile 流水线是否启用无关，独立触发；目录任务和超限文件在
+        # send_file_to_tg 内部直接跳过，这里不用重复判断
+        if node_is_local and settings.auto_send_to_tg and target_path:
+            self._spawn(self._auto_send_to_tg(row, gid, target_path))
+
+    async def _handle_error(self, row, download):
+        gid = row["gid"]
+        self._last_edit.pop(gid, None)
+        await self._repo.update_status(gid, "FAILED", error=download.error_message)
+        await self._notify(
+            row, self._render_card(row, download, status="FAILED"),
+            gid=gid, status="FAILED", parse_mode="HTML",
+        )
 
     async def _run_gofile_pipeline(self, row, gid, path: str):
         """compress (required for multi-file torrent directories, optional

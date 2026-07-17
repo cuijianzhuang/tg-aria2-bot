@@ -77,6 +77,7 @@ async def main():
         await dp.start_polling(bot)
     finally:
         task_manager.stop()
+        await nodes.close()
         await repo.close()
         await bot.session.close()
         await gofile.close_session()
