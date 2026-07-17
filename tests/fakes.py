@@ -1,4 +1,6 @@
 """测试共用的假对象：不连真实 aria2 的 NodePool/客户端替身。"""
+import tempfile
+
 from bot.core.node_pool import Node, NodeUnavailable
 
 
@@ -34,9 +36,15 @@ class FakeAria2:
 
 class FakeNodePool:
     """行为对齐 node_pool.NodePool 的查询接口，客户端全部用 FakeAria2。
-    默认单节点（default/本机）；传入 extra_nodes 模拟多节点部署。"""
+    默认单节点（default/本机）；传入 extra_nodes 模拟多节点部署。
 
-    def __init__(self, extra_nodes: list[Node] | None = None, download_dir: str = "/downloads"):
+    default 节点的下载目录默认用临时目录而不是 /downloads —— 本机节点的
+    _add_source 会真的 makedirs，CI runner 上非 root 建不了 /downloads
+    （PermissionError），本地 root 沙箱却能建成，这类失败只在 CI 暴露。"""
+
+    def __init__(self, extra_nodes: list[Node] | None = None, download_dir: str | None = None):
+        if download_dir is None:
+            download_dir = tempfile.mkdtemp(prefix="fake-node-dl-")
         self._nodes: dict[str, Node] = {
             "default": Node(
                 name="default", rpc_url="http://localhost:6800/jsonrpc",
