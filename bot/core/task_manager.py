@@ -58,12 +58,17 @@ class TaskManager:
         # Strong refs to fire-and-forget pipeline tasks: the event loop only
         # keeps weak references, so an unreferenced task can be GC'd mid-flight.
         self._bg_tasks: set[asyncio.Task] = set()
+        # node name -> 该节点常驻 WebSocket 事件监听协程；节点是运行时动态
+        # 加/删的（/addnode、节点管理页），所以这个集合每轮轮询都会对齐一次
+        # （_reconcile_ws_listeners），不是启动时建好就不变了。
+        self._ws_tasks: dict[str, asyncio.Task] = {}
         self._running = False
 
     async def start(self):
         self._running = True
         self._poll_task = asyncio.create_task(self._poll_loop())
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+        self._reconcile_ws_listeners()  # 不等第一轮轮询，启动就把 WS 连上
 
     def stop(self):
         self._running = False
@@ -71,6 +76,8 @@ class TaskManager:
             self._poll_task.cancel()
         if self._cleanup_task:
             self._cleanup_task.cancel()
+        for task in self._ws_tasks.values():
+            task.cancel()
         for task in self._bg_tasks:
             task.cancel()
 
@@ -85,11 +92,58 @@ class TaskManager:
             try:
                 await self._check_disk_space()
                 await self._poll_once()
+                self._reconcile_ws_listeners()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 log.exception("poll loop iteration failed")
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+    def _reconcile_ws_listeners(self):
+        """WS 监听任务跟着轮询顺带对齐：新启用的节点补一条监听，被删/停用的
+        节点撤掉对应监听。WS 只是让"通常情况"更快知道下载完成/出错，不是
+        轮询的替代品——断线、节点没实现 WS（老版本 aria2）都不影响正确性，
+        5 秒轮询这条兜底路径始终在跑。"""
+        if self._nodes is None:
+            return
+        wanted = {n.name for n in self._nodes.enabled_nodes()}
+        for name in [n for n in self._ws_tasks if n not in wanted]:
+            self._ws_tasks.pop(name).cancel()
+        for name in wanted:
+            task = self._ws_tasks.get(name)
+            if task is None or task.done():
+                self._ws_tasks[name] = asyncio.create_task(self._ws_listen(name))
+
+    async def _ws_listen(self, node_name: str):
+        """常驻某节点的 WebSocket 事件流。一次 listen_events() 调用只跑完
+        一条连接的生命周期（断开就返回/抛异常），断线退避 5 秒后重连；
+        节点被删除/停用则直接退出，不再重连（下一轮 reconcile 也不会再补）。"""
+        while self._running:
+            node = self._nodes.get_node(node_name)
+            if node is None or not node.enabled:
+                return
+            try:
+                client = self._nodes.get(node_name)
+                async for gid, _event in client.listen_events():
+                    self._spawn(self._handle_ws_event(node_name, gid))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.debug("node %s websocket disconnected, retrying in 5s", node_name)
+            await asyncio.sleep(5)
+
+    async def _handle_ws_event(self, node_name: str, gid: str):
+        """WS 推送到一个 gid 的完成/出错事件后，立即单独查一次这个任务的
+        状态并处理——不用等下一轮 5 秒轮询才发现。"""
+        row = await self._repo.get_by_gid(gid)
+        if row is None or row["node"] != node_name or row["status"] not in ("PENDING", "ACTIVE", "PAUSED"):
+            return  # 跟这个 bot 无关，或者轮询已经先一步处理过了
+        node = self._nodes.get_node(node_name)
+        try:
+            download = await self._nodes.get(node_name).get_status(gid)
+        except Exception:
+            return  # 拿不到就算了，兜底的轮询循环会补上
+        await self._handle_download_state(row, download, node_is_local=node.is_local if node else True)
 
     async def _check_disk_space(self):
         """磁盘剩余空间低于阈值时主动提醒管理员。disk_usage 只是一次 stat 调用，

@@ -411,7 +411,7 @@ async def _add_source(nodes, node_name: str, kind: str, payload: str, file_name:
     if kind == "magnet":
         return await client.add_magnet(payload, download_dir=node.download_dir)
     if kind == "torrent":
-        # aria2p 的 add_torrent 读 bot 本地的种子副本、以 base64 走 RPC 传给目标
+        # add_torrent 读 bot 本地的种子副本、以 base64 走 RPC 传给目标
         # aria2 —— 不要求目标节点能访问这个文件路径，天然跨节点
         return await client.add_torrent(payload, download_dir=node.download_dir)
     raise ValueError(f"unknown source kind: {kind}")
@@ -729,7 +729,7 @@ async def handle_task_action(query: CallbackQuery, repo, nodes, task_manager):
             await query.answer(msg, show_alert=True)
         return
 
-    new_status = await _apply_action(query, aria2, repo, action, gid)
+    new_status = await _apply_action(query, aria2, repo, action, gid, is_local=is_local)
     if new_status is None or not query.message:
         return
     try:
@@ -824,7 +824,7 @@ async def bulk_action(query: CallbackQuery, repo, nodes):
     await _edit(query, text, answer_text=f"已处理 {changed} 个任务", reply_markup=markup, parse_mode="HTML")
 
 
-async def _apply_action(query: CallbackQuery, aria2, repo, action: str, gid: str) -> str | None:
+async def _apply_action(query: CallbackQuery, aria2, repo, action: str, gid: str, *, is_local: bool = True) -> str | None:
     try:
         if action == "delete":
             await repo.delete_task(gid)
@@ -841,9 +841,13 @@ async def _apply_action(query: CallbackQuery, aria2, repo, action: str, gid: str
             await query.answer(_TOAST["resume"])
             return "ACTIVE"
         if action in {"cancel_only", "delete_files"}:
-            await aria2.remove(gid, files=action == "delete_files")
+            want_files = action == "delete_files"
+            await aria2.remove(gid, files=want_files, is_local=is_local)
             await repo.update_status(gid, "CANCELLED")
-            await query.answer(_TOAST[action])
+            # 远程节点没法从这里删文件（aria2 RPC 本身没有这个能力，删本地
+            # 磁盘只对本机节点有意义），toast 如实反映有没有真的删成
+            toast = _TOAST[action] if not want_files or is_local else "已取消任务（远程节点，文件未删除）"
+            await query.answer(toast)
             return "CANCELLED"
     except Exception:
         log.exception("task action failed: %s %s", action, gid)
