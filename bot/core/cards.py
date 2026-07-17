@@ -200,5 +200,50 @@ def render_limit_chooser(limit_raw: str | None = None) -> str:
     )
 
 
+def _fmt_speed(bytes_per_sec: float) -> str:
+    return f"{_fmt_size(int(bytes_per_sec))}/s"
+
+
+def render_server_status(info: dict, stats=None) -> str:
+    """服务器状态 page: host metrics from sysinfo.collect_system_status plus
+    aria2's global stat (None degrades to omitting the aria2 line)."""
+    from bot.core.sysinfo import format_uptime  # local import to avoid a cycle
+
+    load1, load5, load15 = info["load_avg"]
+    lines = [
+        "🖥 <b>服务器状态</b>",
+        DIVIDER,
+        f"⏱ 已运行 {format_uptime(info['uptime_seconds'])}",
+        f"🧮 CPU {info['cpu_percent']}%（{info['cpu_count']} 核）",
+        f"📊 负载 {load1:.2f} / {load5:.2f} / {load15:.2f}",
+        f"🧠 内存 {_fmt_size(info['mem_used'])} / {_fmt_size(info['mem_total'])}（{info['mem_percent']}%）",
+    ]
+    if info.get("swap_total"):
+        lines.append(f"💱 交换 {_fmt_size(info['swap_used'])} / {_fmt_size(info['swap_total'])}")
+
+    disk = info.get("disk")
+    if disk:
+        lines.append(f"💾 磁盘 已用 {disk['used']} / {disk['total']}（{disk['percent_used']}%）· 剩余 {disk['free']}")
+
+    lines.append(
+        f"📶 网络 ↓ {_fmt_speed(info['net_rx_speed'])} · ↑ {_fmt_speed(info['net_tx_speed'])}"
+        f"\n　　 累计 ↓ {_fmt_size(info['net_rx_total'])} · ↑ {_fmt_size(info['net_tx_total'])}"
+    )
+    if info.get("bot_rss"):
+        lines.append(f"🤖 机器人内存 {_fmt_size(info['bot_rss'])}")
+
+    if stats is not None:
+        try:
+            lines.append(
+                f"⚡ aria2 ↓ {stats.download_speed_string()} · ↑ {stats.upload_speed_string()}"
+                f" · 活动 {stats.num_active} · 等待 {stats.num_waiting}"
+            )
+        except Exception:
+            pass
+
+    lines += ["", f"<i>更新于 {datetime.now().strftime('%H:%M:%S')}</i>"]
+    return "\n".join(lines)
+
+
 def html_escape(text: str) -> str:
     return escape(text, quote=False)

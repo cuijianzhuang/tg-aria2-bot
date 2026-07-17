@@ -188,7 +188,17 @@ def settings_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📁 rclone", callback_data="admin:rclone"),
                 InlineKeyboardButton(text="🔄 重启服务", callback_data="admin:restart"),
             ],
+            [InlineKeyboardButton(text="🖥 服务器状态", callback_data="admin:sysinfo")],
             [InlineKeyboardButton(text="⬅️ 返回主菜单", callback_data="nav:start")],
+        ]
+    )
+
+
+def server_status_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 刷新", callback_data="admin:sysinfo")],
+            [InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")],
         ]
     )
 
