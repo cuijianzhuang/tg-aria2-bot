@@ -8,11 +8,12 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.types import BotCommand
 
 from bot.config import settings
+from bot.core import gofile
 from bot.core.aria2_client import Aria2Client
 from bot.core.task_manager import TaskManager
 from bot.db.repo import TaskRepo
-from bot.middlewares.auth import AuthMiddleware
 from bot.handlers import admin, callbacks, commands, links, media
+from bot.middlewares.auth import AuthMiddleware
 
 BOT_COMMANDS = [
     BotCommand(command="start", description="主菜单（状态总览）"),
@@ -71,6 +72,7 @@ async def main():
         task_manager.stop()
         await repo.close()
         await bot.session.close()
+        await gofile.close_session()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
-import hmac
 import hashlib
+import hmac
 import os
 import secrets
 import time
@@ -16,7 +16,7 @@ def load_or_create_secret(path: str) -> str:
     brute-force the password offline against the signature.
     """
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             secret = f.read().strip()
         if secret:
             return secret

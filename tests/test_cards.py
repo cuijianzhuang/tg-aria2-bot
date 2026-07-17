@@ -111,8 +111,8 @@ class TestFileSelection(unittest.TestCase):
     def test_keyboard_shows_checkbox_state(self):
         kb = file_selection_keyboard("g1", self._download())
         labels = [b.text for row in kb.inline_keyboard for b in row]
-        self.assertTrue(any(l.startswith("☑️") and "movie.mkv" in l for l in labels))
-        self.assertTrue(any(l.startswith("⬜") and "sample.mkv" in l for l in labels))
+        self.assertTrue(any(label.startswith("☑️") and "movie.mkv" in label for label in labels))
+        self.assertTrue(any(label.startswith("⬜") and "sample.mkv" in label for label in labels))
 
     def test_keyboard_excludes_metadata_files(self):
         download = FakeMultiFileDownload([
@@ -232,10 +232,10 @@ class TestKeyboards(unittest.TestCase):
         try:
             settings.auto_send_to_tg = True
             labels = [b.text for row in settings_keyboard().inline_keyboard for b in row]
-            self.assertTrue(any("自动发送: ✅" in l for l in labels))
+            self.assertTrue(any("自动发送: ✅" in label for label in labels))
             settings.auto_send_to_tg = False
             labels = [b.text for row in settings_keyboard().inline_keyboard for b in row]
-            self.assertTrue(any("自动发送: ❌" in l for l in labels))
+            self.assertTrue(any("自动发送: ❌" in label for label in labels))
         finally:
             settings.auto_send_to_tg = original
 
@@ -257,17 +257,17 @@ class TestKeyboards(unittest.TestCase):
         self.assertIn("setdir:0", callbacks)
         self.assertIn("setdir:1", callbacks)
         labels = [b.text for row in kb.inline_keyboard for b in row]
-        self.assertTrue(any(l.startswith("✅") and "/downloads" in l and "movies" not in l for l in labels))
+        self.assertTrue(any(label.startswith("✅") and "/downloads" in label and "movies" not in label for label in labels))
 
     def test_notify_toggle_label_tracks_setting(self):
         original = settings.notify_on_complete
         try:
             settings.notify_on_complete = True
             labels = [b.text for row in settings_keyboard().inline_keyboard for b in row]
-            self.assertTrue(any("完成通知: ✅" in l for l in labels))
+            self.assertTrue(any("完成通知: ✅" in label for label in labels))
             settings.notify_on_complete = False
             labels = [b.text for row in settings_keyboard().inline_keyboard for b in row]
-            self.assertTrue(any("完成通知: ❌" in l for l in labels))
+            self.assertTrue(any("完成通知: ❌" in label for label in labels))
         finally:
             settings.notify_on_complete = original
 

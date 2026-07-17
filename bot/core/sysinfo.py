@@ -11,7 +11,7 @@ from bot.core.storage import disk_usage_summary
 
 def _cpu_times() -> tuple[int, int]:
     """(total_jiffies, idle_jiffies) from the aggregate cpu line of /proc/stat."""
-    with open("/proc/stat", "r", encoding="utf-8") as f:
+    with open("/proc/stat", encoding="utf-8") as f:
         parts = [int(x) for x in f.readline().split()[1:]]
     idle = parts[3] + (parts[4] if len(parts) > 4 else 0)  # idle + iowait
     return sum(parts), idle
@@ -21,7 +21,7 @@ def _net_bytes() -> tuple[int, int]:
     """(rx_bytes, tx_bytes) summed over all interfaces except loopback."""
     rx = tx = 0
     try:
-        with open("/proc/net/dev", "r", encoding="utf-8") as f:
+        with open("/proc/net/dev", encoding="utf-8") as f:
             for line in f.readlines()[2:]:
                 iface, _, data = line.partition(":")
                 if iface.strip() == "lo" or not data:
@@ -37,7 +37,7 @@ def _net_bytes() -> tuple[int, int]:
 def _meminfo() -> dict[str, int]:
     """key -> bytes from /proc/meminfo (values there are in KiB)."""
     info: dict[str, int] = {}
-    with open("/proc/meminfo", "r", encoding="utf-8") as f:
+    with open("/proc/meminfo", encoding="utf-8") as f:
         for line in f:
             key, _, rest = line.partition(":")
             fields = rest.split()
@@ -48,7 +48,7 @@ def _meminfo() -> dict[str, int]:
 
 def _process_rss() -> int:
     try:
-        with open("/proc/self/status", "r", encoding="utf-8") as f:
+        with open("/proc/self/status", encoding="utf-8") as f:
             for line in f:
                 if line.startswith("VmRSS:"):
                     return int(line.split()[1]) * 1024
@@ -75,7 +75,7 @@ def collect_system_status(download_dir: str, sample_interval: float = 0.3) -> di
     swap_total = mem.get("SwapTotal", 0)
     swap_free = mem.get("SwapFree", 0)
 
-    with open("/proc/uptime", "r", encoding="utf-8") as f:
+    with open("/proc/uptime", encoding="utf-8") as f:
         uptime_seconds = float(f.read().split()[0])
 
     try:

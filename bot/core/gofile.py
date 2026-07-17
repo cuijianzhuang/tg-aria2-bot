@@ -11,11 +11,33 @@ log = logging.getLogger(__name__)
 # memory per process so we don't mint a fresh throwaway account on every upload.
 _guest_token_cache: str | None = None
 
+# Shared session across calls: each upload used to open+close its own
+# aiohttp.ClientSession (3 fresh TCP/TLS handshakes per file, no connection
+# reuse). One process-lifetime session lets aiohttp keep-alive pool the
+# connections instead.
+_session: aiohttp.ClientSession | None = None
+
+
+def _get_session() -> aiohttp.ClientSession:
+    global _session
+    if _session is None or _session.closed:
+        _session = aiohttp.ClientSession()
+    return _session
+
+
+async def close_session():
+    """Call on process shutdown so the pooled connections don't leak a
+    "Unclosed client session" warning past the event loop's lifetime."""
+    global _session
+    if _session is not None and not _session.closed:
+        await _session.close()
+    _session = None
+
 
 async def _pick_server() -> str:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{API_HOST}/servers", timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            data = await resp.json()
+    session = _get_session()
+    async with session.get(f"{API_HOST}/servers", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        data = await resp.json()
     if data.get("status") != "ok" or not data.get("data", {}).get("servers"):
         raise RuntimeError(f"gofile /servers returned unexpected payload: {data}")
     return data["data"]["servers"][0]["name"]
@@ -26,9 +48,9 @@ async def _get_or_create_guest_token() -> str:
     if _guest_token_cache:
         return _guest_token_cache
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(f"{API_HOST}/accounts", timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            data = await resp.json()
+    session = _get_session()
+    async with session.post(f"{API_HOST}/accounts", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        data = await resp.json()
     if data.get("status") != "ok" or not data.get("data", {}).get("token"):
         raise RuntimeError(f"gofile guest account creation failed: {data}")
 
@@ -50,14 +72,19 @@ async def upload_file(path: str, token: str | None = None) -> dict:
 
     url = f"https://{server}.gofile.io/uploadfile"
 
+    # aiohttp streams the file in chunks as it reads from this handle rather
+    # than loading it into memory up front, but each chunk read is still a
+    # blocking syscall on the event loop — acceptable for local disk reads
+    # (sub-millisecond per chunk), not worth the added aiofiles dependency
+    # this codebase doesn't otherwise need.
     with open(path, "rb") as f:
         form = aiohttp.FormData()
         form.add_field("token", token)
         form.add_field("file", f, filename=os.path.basename(path))
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=None)) as resp:
-                data = await resp.json()
+        session = _get_session()
+        async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=None)) as resp:
+            data = await resp.json()
 
     if data.get("status") != "ok":
         raise RuntimeError(f"gofile upload failed: {data}")

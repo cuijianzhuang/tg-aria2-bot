@@ -1,13 +1,12 @@
 import logging
 
-from aiogram import Router, F
+from aiogram import F, Router
 from aiogram.types import Message
 
 from bot.config import settings
 from bot.core import storage
 from bot.core.cards import render_pending_card
 from bot.core.keyboards import pending_task_keyboard, redownload_keyboard
-from bot.core.telegram_files import to_download_uri
 
 log = logging.getLogger(__name__)
 router = Router(name="media")
@@ -58,7 +57,6 @@ async def handle_media(message: Message, aria2, repo):
         return
 
     tg_file = await message.bot.get_file(file_id)
-    source_uri = to_download_uri(tg_file.file_path)
 
     token = await repo.create_pending(
         kind="tg_media",
@@ -67,7 +65,11 @@ async def handle_media(message: Message, aria2, repo):
         source_ref=file_unique_id,
         file_name=file_name,
         file_size=file_size,
-        payload=source_uri,
+        # 存 Telegram 自己的 file_path，不在这里就拼成带 bot token 的下载
+        # URI —— payload 会落库（tasks.payload，供"重试"复用），如果这里就
+        # 拼好 URI，token 就跟着明文写进数据库了。真正的 URI 只在
+        # _add_source 里、真的要喂给 aria2 的那一刻才现拼现用。
+        payload=tg_file.file_path,
     )
     await message.reply(
         render_pending_card("tg_media", file_name, size=file_size),

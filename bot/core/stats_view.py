@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from aiogram.types import InlineKeyboardMarkup
 
@@ -18,7 +18,7 @@ def _period_since(days: str) -> str | None:
     n = int(days)
     if n <= 0:
         return None
-    return (datetime.now(timezone.utc) - timedelta(days=n)).strftime("%Y-%m-%d %H:%M:%S")
+    return (datetime.now(UTC) - timedelta(days=n)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 async def render_stats_view(repo, days: str) -> tuple[str, InlineKeyboardMarkup]:

@@ -153,6 +153,15 @@ if [[ "$MODE" == "docker" && -f aria2-config/aria2.conf ]]; then
   log "已将 aria2 RPC 密钥写入 aria2-config/aria2.conf"
 fi
 
+if [[ "$MODE" == "docker" ]]; then
+  # bot/web 容器以 UID/GID 1000 非 root 运行（跟 aria2 容器的 PUID/PGID 一致），
+  # 这几个 bind mount 目录/文件是本脚本用 root 权限（sudo）刚创建/写入的，
+  # 提前对齐属主，不然容器起来后写 data/tasks.db 或设置回写 .env 会
+  # Permission denied。
+  chown -R 1000:1000 "$DOWNLOAD_DIR" data aria2-config .env
+  log "已将 downloads/data/aria2-config/.env 属主设为 1000:1000（匹配容器内非 root 用户）"
+fi
+
 EXTRA_FLAGS=()
 [[ "$WITH_RCLONE" -eq 1 ]] && EXTRA_FLAGS+=(--with-rclone)
 [[ "$NO_WEB" -eq 1 ]]      && EXTRA_FLAGS+=(--no-web)

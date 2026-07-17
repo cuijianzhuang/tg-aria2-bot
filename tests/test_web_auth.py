@@ -34,7 +34,8 @@ class TestSessionTokens(unittest.TestCase):
 
     def test_rejects_expired(self):
         expired = str(int(time.time()) - 10)
-        import hmac, hashlib
+        import hashlib
+        import hmac
         sig = hmac.new(self.SECRET.encode(), expired.encode(), hashlib.sha256).hexdigest()
         self.assertFalse(verify_session_token(self.SECRET, f"{expired}.{sig}"))
 

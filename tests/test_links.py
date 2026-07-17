@@ -24,7 +24,7 @@ class TestExtractLinks(unittest.TestCase):
     def test_trims_whitespace_per_line(self):
         text = "  https://example.com/a.zip  \n\thttps://example.com/b.zip\t"
         links = _extract_links(text)
-        self.assertEqual([l[1] for l in links], ["https://example.com/a.zip", "https://example.com/b.zip"])
+        self.assertEqual([link[1] for link in links], ["https://example.com/a.zip", "https://example.com/b.zip"])
 
     def test_no_links_returns_empty(self):
         self.assertEqual(_extract_links("just chatting, no links here"), [])

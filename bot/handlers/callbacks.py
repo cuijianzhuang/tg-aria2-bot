@@ -1,7 +1,7 @@
 import logging
 import os
 
-from aiogram import Router, F
+from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -40,6 +40,7 @@ from bot.core.keyboards import (
 )
 from bot.core.list_view import render_task_list
 from bot.core.stats_view import render_stats_view
+from bot.core.telegram_files import to_download_uri
 
 log = logging.getLogger(__name__)
 router = Router(name="callbacks")
@@ -325,13 +326,20 @@ async def show_stats(query: CallbackQuery, repo):
 async def _add_source(aria2, kind: str, payload: str, file_name: str | None) -> str:
     """Add a download to aria2 from its original source; returns the new gid.
     Shared by pending:start and task:retry so both stay in sync."""
-    if kind in {"url", "tg_media"}:
+    if kind == "tg_media":
+        # payload is Telegram's raw getFile() file_path (no bot token baked in —
+        # that's deliberate, see the comment where it's persisted in media.py).
+        # The token only gets stitched into the URI here, right before the RPC
+        # call, so it never touches the database.
         subdir = storage.build_subdir(settings.download_dir, file_name or payload)
         return await aria2.add_uri(
-            payload,
-            out=file_name if kind == "tg_media" else None,
+            to_download_uri(payload),
+            out=file_name,
             download_dir=subdir,
         )
+    if kind == "url":
+        subdir = storage.build_subdir(settings.download_dir, file_name or payload)
+        return await aria2.add_uri(payload, download_dir=subdir)
     if kind == "magnet":
         return await aria2.add_magnet(payload, download_dir=settings.download_dir)
     if kind == "torrent":

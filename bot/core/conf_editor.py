@@ -32,7 +32,7 @@ def is_safe_value(value: str) -> bool:
 def read_kv(path: str, key: str) -> str | None:
     """Read the first uncommented `key=value` line from a flat aria2-style config file."""
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 stripped = line.strip()
                 if stripped.startswith(f"{key}="):
@@ -48,7 +48,7 @@ def write_kv(path: str, key: str, value: str | None):
     value=None comments the key out instead of deleting it, preserving the
     upstream P3TERX file's documentation comments around it.
     """
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         lines = f.readlines()
 
     pattern = re.compile(rf"^\s*#?\s*{re.escape(key)}=")
@@ -97,7 +97,7 @@ def list_rclone_remotes(rclone_conf_path: str) -> list[str]:
     remotes — rclone.conf is a plain INI file, one `[name]` header per remote.
     """
     try:
-        with open(rclone_conf_path, "r", encoding="utf-8") as f:
+        with open(rclone_conf_path, encoding="utf-8") as f:
             return [m.group(1) for line in f if (m := REMOTE_SECTION_RE.match(line.strip()))]
     except FileNotFoundError:
         return []
