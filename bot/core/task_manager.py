@@ -11,10 +11,10 @@ from aiogram.types import FSInputFile
 
 from bot.config import settings
 from bot.core import gofile
-from bot.core.aria2_client import Aria2Client
 from bot.core.cards import render_task_card
 from bot.core.compress import compress_path, remove_path
 from bot.core.keyboards import task_keyboard
+from bot.core.node_pool import NodePool
 from bot.db.repo import TaskRepo
 
 log = logging.getLogger(__name__)
@@ -41,11 +41,11 @@ DISK_ALERT_COOLDOWN_SECONDS = 6 * 3600
 
 
 class TaskManager:
-    """Polls aria2 for in-flight tasks and throttles Telegram progress edits."""
+    """Polls every enabled aria2 node for in-flight tasks and throttles Telegram progress edits."""
 
-    def __init__(self, bot: Bot, aria2: Aria2Client, repo: TaskRepo):
+    def __init__(self, bot: Bot, nodes: NodePool | None, repo: TaskRepo):
         self._bot = bot
-        self._aria2 = aria2
+        self._nodes = nodes
         self._repo = repo
         self._last_edit: dict[str, tuple[float, float]] = {}  # gid -> (timestamp, percent)
         self._chat_backoff: dict[int, float] = {}  # chat_id -> monotonic deadline after a 429
@@ -129,32 +129,42 @@ class TaskManager:
                 log.warning("failed to send disk alert to user %s", uid)
 
     async def _poll_once(self):
-        rows = await self._repo.get_unfinished()
-        if not rows:
-            return
-        # one RPC batch for everything instead of a get_status roundtrip per task
-        downloads = {d.gid: d for d in await self._aria2.get_all_downloads()}
-        for row in rows:
-            gid = row["gid"]
-            if not gid:
+        # 逐节点轮询，错误隔离：一个节点断线只跳过它自己，不影响其它节点，
+        # 更不能把它的任务标 FAILED（节点不可达 ≠ 任务丢失）
+        for node in self._nodes.enabled_nodes():
+            try:
+                downloads = {d.gid: d for d in await self._nodes.get(node.name).get_all_downloads()}
+            except Exception:
+                if self._nodes.is_healthy(node.name):
+                    # 只在 在线→离线 的边沿记一条日志，避免每 5 秒刷一次
+                    log.warning("node %s unreachable, skipping this poll round", node.name)
+                self._nodes.mark_health(node.name, False)
                 continue
-            download = downloads.get(gid)
-            if download is None:
-                await self._mark_lost(row, gid)
-                continue
-            await self._handle_download_state(row, download)
+            self._nodes.mark_health(node.name, True)
 
-    async def _mark_lost(self, row, gid: str):
+            rows = await self._repo.get_unfinished(node=node.name)
+            for row in rows:
+                gid = row["gid"]
+                if not gid:
+                    continue
+                download = downloads.get(gid)
+                if download is None:
+                    await self._mark_lost(row, gid, is_local=node.is_local)
+                    continue
+                await self._handle_download_state(row, download, node_is_local=node.is_local)
+
+    async def _mark_lost(self, row, gid: str, *, is_local: bool = True):
         """aria2 no longer knows this gid. Usually a real loss (restart without a
         session file), but a completed task purged by the cleanup hook between
-        polls looks identical — disambiguate cheaply by checking the disk."""
+        polls looks identical — disambiguate cheaply by checking the disk.
+        远程节点摸不到它的文件系统，跳过探测、一律按 FAILED 处理。"""
         target = row["save_path"] or (
             os.path.join(settings.download_dir, row["file_name"]) if row["file_name"] else None
         )
-        if target and os.path.exists(target):
+        if is_local and target and os.path.exists(target):
             log.info("gid %s gone from aria2 but file exists on disk, marking COMPLETED", gid)
             await self._repo.update_status(gid, "COMPLETED", save_path=target)
-            await self._notify(row, render_task_card(row, status="COMPLETED"),
+            await self._notify(row, self._render_card(row, status="COMPLETED"),
                                gid=gid, status="COMPLETED", parse_mode="HTML")
         else:
             log.warning("gid %s not found in aria2, marking FAILED", gid)
@@ -163,7 +173,19 @@ class TaskManager:
             )
         self._last_edit.pop(gid, None)
 
-    async def _handle_download_state(self, row, download):
+    def _render_card(self, row, download=None, *, status: str) -> str:
+        # 多节点部署时卡片带节点标注；单节点 label() 返回 None，界面不变
+        return render_task_card(row, download, status=status, node_label=self._node_label(row))
+
+    def _node_label(self, row) -> str | None:
+        if self._nodes is None:
+            return None  # 只测清理/发送等旁路功能的用例不装配节点池
+        try:
+            return self._nodes.label(row["node"])
+        except (KeyError, IndexError):
+            return None  # 旧测试的精简 fake row 可能没有 node 列
+
+    async def _handle_download_state(self, row, download, *, node_is_local: bool = True):
         gid = row["gid"]
         status = download.status.upper()
 
@@ -175,18 +197,21 @@ class TaskManager:
             target_path = os.path.join(download.dir, download.name) if download.name else save_path
             await self._repo.update_status(gid, "COMPLETED", save_path=target_path or save_path)
 
-            if settings.gofile_enabled and target_path and os.path.exists(target_path):
+            # gofile 压缩上传 / 自动发送 TG 都要读本机磁盘上的产物，远程节点的
+            # 文件在远端机器上，这两条流水线只对本机节点触发
+            if node_is_local and settings.gofile_enabled and target_path and os.path.exists(target_path):
                 # background task: a multi-GB compress+upload must not stall the
                 # poll loop (it would freeze progress edits for every other task)
                 self._spawn(self._run_gofile_pipeline(row, gid, target_path))
             else:
                 await self._notify(
-                    row, render_task_card(row, download, status="COMPLETED"),
+                    row, self._render_card(row, download, status="COMPLETED"),
                     gid=gid, status="COMPLETED", parse_mode="HTML",
+                    local=node_is_local,
                 )
             # 跟 gofile 流水线是否启用无关，独立触发；目录任务和超限文件在
             # send_file_to_tg 内部直接跳过，这里不用重复判断
-            if settings.auto_send_to_tg and target_path:
+            if node_is_local and settings.auto_send_to_tg and target_path:
                 self._spawn(self._auto_send_to_tg(row, gid, target_path))
             return
 
@@ -194,7 +219,7 @@ class TaskManager:
             self._last_edit.pop(gid, None)
             await self._repo.update_status(gid, "FAILED", error=download.error_message)
             await self._notify(
-                row, render_task_card(row, download, status="FAILED"),
+                row, self._render_card(row, download, status="FAILED"),
                 gid=gid, status="FAILED", parse_mode="HTML",
             )
             return
@@ -288,7 +313,7 @@ class TaskManager:
             return
 
         self._last_edit[gid] = (now, percent)
-        text = render_task_card(row, download, status="ACTIVE")
+        text = self._render_card(row, download, status="ACTIVE")
         if row["reply_message_id"]:
             try:
                 await self._bot.edit_message_text(
@@ -322,8 +347,9 @@ class TaskManager:
         gid: str | None = None,
         status: str | None = None,
         parse_mode: str | None = None,
+        local: bool = True,
     ):
-        markup = task_keyboard(gid, status) if gid and status else None
+        markup = task_keyboard(gid, status, local=local) if gid and status else None
         if row["reply_message_id"]:
             try:
                 await self._bot.edit_message_text(
@@ -365,11 +391,19 @@ class TaskManager:
         return deleted
 
     async def reconcile_on_startup(self):
-        rows = await self._repo.get_unfinished()
-        if not rows:
-            return
-        remote = {d.gid: d for d in await self._aria2.get_all_downloads()}
-        for row in rows:
-            gid = row["gid"]
-            if gid and gid not in remote:
-                await self._mark_lost(row, gid)
+        for node in self._nodes.enabled_nodes():
+            rows = await self._repo.get_unfinished(node=node.name)
+            if not rows:
+                continue
+            try:
+                remote = {d.gid: d for d in await self._nodes.get(node.name).get_all_downloads()}
+            except Exception:
+                # 启动时节点连不上：不动它的任务（可能只是还没起来），交给
+                # 轮询循环后续处理
+                log.warning("node %s unreachable during startup reconcile, leaving its tasks as-is", node.name)
+                self._nodes.mark_health(node.name, False)
+                continue
+            for row in rows:
+                gid = row["gid"]
+                if gid and gid not in remote:
+                    await self._mark_lost(row, gid, is_local=node.is_local)

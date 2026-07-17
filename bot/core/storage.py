@@ -17,10 +17,14 @@ def category_for(file_name: str | None) -> str:
     return CATEGORY_BY_EXT.get(ext, "other")
 
 
-def build_subdir(download_dir: str, file_name: str | None) -> str:
+def build_subdir(download_dir: str, file_name: str | None, *, create: bool = True) -> str:
+    """按扩展名分类拼子目录。create=False 用于远程节点：download_dir 是远端
+    机器上的路径，在本地 makedirs 只会造出无意义的垃圾目录——路径只作为
+    aria2 的 dir 选项传过去，由远端 aria2 自己创建。"""
     category = category_for(file_name)
     path = os.path.join(download_dir, category)
-    os.makedirs(path, exist_ok=True)
+    if create:
+        os.makedirs(path, exist_ok=True)
     return path
 
 

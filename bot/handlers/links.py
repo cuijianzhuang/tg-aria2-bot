@@ -39,7 +39,13 @@ def _torrent_store_path(file_unique_id: str) -> str:
     return os.path.join(store, f"{file_unique_id}.torrent")
 
 
-async def _create_url_pending(message: Message, repo, url: str, *, batch_id: str | None = None) -> str | None:
+async def _user_node(message: Message, repo, nodes) -> str:
+    """发起人的当前节点（已删除/停用的偏好静默回退 default）。"""
+    preferred = await repo.get_current_node(message.from_user.id)
+    return nodes.resolve(preferred).name
+
+
+async def _create_url_pending(message: Message, repo, url: str, *, node: str, batch_id: str | None = None) -> str | None:
     """建一条 url 类型的待确认任务；已经下载过的链接返回 None（不建 pending，
     调用方决定要不要提示"已下载过"——单条发送时提示，批量场景里静默跳过）。"""
     ref = storage.url_hash(url)
@@ -55,11 +61,12 @@ async def _create_url_pending(message: Message, repo, url: str, *, batch_id: str
         file_size=None,
         payload=url,
         batch_id=batch_id,
+        node=node,
     )
     return token
 
 
-async def _create_magnet_pending(message: Message, repo, magnet: str, *, batch_id: str | None = None) -> str | None:
+async def _create_magnet_pending(message: Message, repo, magnet: str, *, node: str, batch_id: str | None = None) -> str | None:
     ref = storage.url_hash(magnet)
     if await repo.get_completed_by_source("magnet", ref):
         return None
@@ -72,12 +79,13 @@ async def _create_magnet_pending(message: Message, repo, magnet: str, *, batch_i
         file_size=None,
         payload=magnet,
         batch_id=batch_id,
+        node=node,
     )
     return token
 
 
 @router.message(F.text.regexp(URL_RE.pattern))
-async def handle_url(message: Message, aria2, repo):
+async def handle_url(message: Message, repo, nodes):
     url = message.text.strip()
     existing = await repo.get_completed_by_source("url", storage.url_hash(url))
     if existing:
@@ -87,16 +95,20 @@ async def handle_url(message: Message, aria2, repo):
         )
         return
 
-    token = await _create_url_pending(message, repo, url)
+    node = await _user_node(message, repo, nodes)
+    token = await _create_url_pending(message, repo, url, node=node)
     await message.reply(
-        render_pending_card("url", _url_display_name(url)),
-        reply_markup=pending_task_keyboard(token),
+        render_pending_card(
+            "url", _url_display_name(url),
+            node_label=nodes.label(node), download_dir=nodes.get_node(node).download_dir,
+        ),
+        reply_markup=pending_task_keyboard(token, show_node_switch=nodes.is_multi()),
         parse_mode="HTML",
     )
 
 
 @router.message(F.text.regexp(MAGNET_RE.pattern))
-async def handle_magnet(message: Message, aria2, repo):
+async def handle_magnet(message: Message, repo, nodes):
     magnet = message.text.strip()
     existing = await repo.get_completed_by_source("magnet", storage.url_hash(magnet))
     if existing:
@@ -106,10 +118,14 @@ async def handle_magnet(message: Message, aria2, repo):
         )
         return
 
-    token = await _create_magnet_pending(message, repo, magnet)
+    node = await _user_node(message, repo, nodes)
+    token = await _create_magnet_pending(message, repo, magnet, node=node)
     await message.reply(
-        render_pending_card("magnet", "磁力链接任务"),
-        reply_markup=pending_task_keyboard(token),
+        render_pending_card(
+            "magnet", "磁力链接任务",
+            node_label=nodes.label(node), download_dir=nodes.get_node(node).download_dir,
+        ),
+        reply_markup=pending_task_keyboard(token, show_node_switch=nodes.is_multi()),
         parse_mode="HTML",
     )
 
@@ -139,20 +155,21 @@ def _is_multi_link_message(message: Message) -> bool:
 
 
 @router.message(F.text, _is_multi_link_message)
-async def handle_batch_links(message: Message, repo):
+async def handle_batch_links(message: Message, repo, nodes):
     all_links = _extract_links(message.text)
     overflow = max(0, len(all_links) - MAX_BATCH_LINKS)
     links = all_links[:MAX_BATCH_LINKS]
 
+    node = await _user_node(message, repo, nodes)
     batch_id = uuid4().hex[:12]
     names: list[str] = []
     duplicates = 0
     for kind, payload in links:
         if kind == "magnet":
-            token = await _create_magnet_pending(message, repo, payload, batch_id=batch_id)
+            token = await _create_magnet_pending(message, repo, payload, node=node, batch_id=batch_id)
             name = "磁力链接任务"
         else:
-            token = await _create_url_pending(message, repo, payload, batch_id=batch_id)
+            token = await _create_url_pending(message, repo, payload, node=node, batch_id=batch_id)
             name = _url_display_name(payload)
         if token is None:
             duplicates += 1
@@ -171,11 +188,13 @@ async def handle_batch_links(message: Message, repo):
 
 
 @router.message(F.document.file_name.endswith(".torrent"))
-async def handle_torrent(message: Message, aria2, repo):
+async def handle_torrent(message: Message, repo, nodes):
     tg_file = await message.bot.get_file(message.document.file_id)
 
     # Always copy into our own persistent store: temp files leaked, and both the
     # bot-api's local path and a temp path die before a later 重试 needs them.
+    # 种子文件天然跨节点：aria2p 的 add_torrent 读的是 bot 本地这份副本、以
+    # base64 走 RPC 传给目标 aria2，不要求目标节点能访问这个路径。
     torrent_path = _torrent_store_path(message.document.file_unique_id)
     if not os.path.exists(torrent_path):
         local = to_local_path(tg_file.file_path)
@@ -184,6 +203,7 @@ async def handle_torrent(message: Message, aria2, repo):
         else:
             await message.bot.download_file(tg_file.file_path, destination=torrent_path)
 
+    node = await _user_node(message, repo, nodes)
     token = await repo.create_pending(
         kind="torrent",
         user_id=message.from_user.id,
@@ -192,9 +212,13 @@ async def handle_torrent(message: Message, aria2, repo):
         file_name=message.document.file_name,
         file_size=message.document.file_size,
         payload=torrent_path,
+        node=node,
     )
     await message.reply(
-        render_pending_card("torrent", message.document.file_name, size=message.document.file_size),
-        reply_markup=pending_task_keyboard(token),
+        render_pending_card(
+            "torrent", message.document.file_name, size=message.document.file_size,
+            node_label=nodes.label(node), download_dir=nodes.get_node(node).download_dir,
+        ),
+        reply_markup=pending_task_keyboard(token, show_node_switch=nodes.is_multi()),
         parse_mode="HTML",
     )

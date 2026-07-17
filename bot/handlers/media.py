@@ -30,7 +30,7 @@ def _extract_file(message: Message):
 
 
 @router.message(F.document | F.video | F.audio | F.photo)
-async def handle_media(message: Message, aria2, repo):
+async def handle_media(message: Message, repo):
     extracted = _extract_file(message)
     if not extracted:
         return
@@ -70,6 +70,10 @@ async def handle_media(message: Message, aria2, repo):
         # 拼好 URI，token 就跟着明文写进数据库了。真正的 URI 只在
         # _add_source 里、真的要喂给 aria2 的那一刻才现拼现用。
         payload=tg_file.file_path,
+        # tg_media 固定走本机节点：--local 模式下文件源是 file:// 本地路径，
+        # 远程 aria2 既读不到这个路径、默认也连不上本机的 bot-api HTTP 端口。
+        # 所以这类任务不跟随用户的当前节点，确认卡片上也不给切换按钮。
+        node="default",
     )
     await message.reply(
         render_pending_card("tg_media", file_name, size=file_size),

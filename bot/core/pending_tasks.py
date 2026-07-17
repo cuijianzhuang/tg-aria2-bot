@@ -17,11 +17,13 @@ class PendingTask:
     payload: str
     created_at: float
     batch_id: str | None = None
+    node: str = "default"
 
     @classmethod
     def from_row(cls, row) -> PendingTask:
-        # batch_id 列是后加的迁移字段，旧库里的行经 sqlite3.Row 仍然带这个 key
-        # （ALTER TABLE 已经把它加到表结构上了），直接取值即可，不存在需要兼容的场景
+        # batch_id/node 是后加的迁移字段，旧库经 ALTER TABLE 补列后行里一定带
+        # 这些 key，防御性判断只为覆盖测试里手工构造的精简行
+        keys = row.keys()
         return cls(
             token=row["token"],
             kind=row["kind"],
@@ -32,5 +34,6 @@ class PendingTask:
             file_size=row["file_size"],
             payload=row["payload"],
             created_at=row["created_at"],
-            batch_id=row["batch_id"] if "batch_id" in row.keys() else None,
+            batch_id=row["batch_id"] if "batch_id" in keys else None,
+            node=row["node"] if "node" in keys else "default",
         )

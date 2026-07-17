@@ -7,9 +7,11 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.config import settings
-from bot.core.cards import render_server_status, render_settings
+from bot.core.aria2_client import Aria2Client
+from bot.core.cards import render_node_manage, render_server_status, render_settings
 from bot.core.conf_editor import aria2_conf_path, read_kv, script_conf_path, write_kv
-from bot.core.keyboards import server_status_keyboard, settings_keyboard
+from bot.core.keyboards import node_manage_keyboard, server_status_keyboard, settings_keyboard
+from bot.core.node_pool import DEFAULT_NODE, MAX_NODE_NAME_BYTES
 from bot.core.sysinfo import collect_system_status
 from bot.middlewares.auth import AdminMiddleware
 
@@ -220,6 +222,111 @@ async def toggle_rclone(query: CallbackQuery):
     write_kv(aria2_conf_path(), "on-download-complete", hook)
     await query.answer("已切换，需要重启 aria2 才生效")
     await query.message.edit_text(_rclone_text(), reply_markup=_rclone_menu(), parse_mode="HTML")
+
+
+# ---------- 节点管理 ----------
+
+async def _node_manage_view(nodes) -> tuple[str, InlineKeyboardMarkup]:
+    all_nodes = nodes.all_nodes()
+    healthy = {n.name: nodes.is_healthy(n.name) for n in all_nodes}
+    return render_node_manage(all_nodes, healthy), node_manage_keyboard(all_nodes)
+
+
+@router.callback_query(F.data == "admin:nodes")
+async def show_nodes(query: CallbackQuery, nodes):
+    text, kb = await _node_manage_view(nodes)
+    await query.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("admin:node:t:"))
+async def toggle_node(query: CallbackQuery, nodes):
+    name = query.data.split(":", 3)[3]
+    node = nodes.get_node(name)
+    if node is None or name == DEFAULT_NODE:
+        await query.answer("无效的节点", show_alert=True)
+        return
+    await nodes.set_enabled(name, not node.enabled)
+    await query.answer(f"已{'启用' if node.enabled else '停用'} {node.display_name}")
+    text, kb = await _node_manage_view(nodes)
+    await query.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("admin:node:d:"))
+async def delete_node_confirm(query: CallbackQuery, nodes):
+    name = query.data.split(":", 3)[3]
+    node = nodes.get_node(name)
+    if node is None or name == DEFAULT_NODE:
+        await query.answer("无效的节点", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"⚠️ 确认删除 {node.display_name}", callback_data=f"admin:node:dy:{name}")],
+        [InlineKeyboardButton(text="⬅️ 返回节点管理", callback_data="admin:nodes")],
+    ])
+    await query.message.edit_text(
+        f"⚠️ 确认删除节点 <b>{node.display_name}</b>？\n\n"
+        "只移除节点注册信息，不影响该节点上正在跑的 aria2 和已下载的文件；"
+        "它的历史任务记录会保留但无法再操作。",
+        reply_markup=kb, parse_mode="HTML",
+    )
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("admin:node:dy:"))
+async def delete_node(query: CallbackQuery, nodes):
+    name = query.data.split(":", 3)[3]
+    if nodes.get_node(name) is None or name == DEFAULT_NODE:
+        await query.answer("无效的节点", show_alert=True)
+        return
+    await nodes.remove(name)
+    await query.answer("已删除")
+    text, kb = await _node_manage_view(nodes)
+    await query.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(Command("addnode"))
+async def cmd_addnode(message: Message, command: CommandObject, nodes):
+    usage = "用法: /addnode 名称 rpc地址 密钥 [下载目录]\n例: /addnode 群晖 http://192.168.1.5:6800/jsonrpc s3cret /volume1/downloads"
+    parts = (command.args or "").split()
+    if len(parts) not in (3, 4):
+        await message.reply(usage)
+        return
+    name, rpc_url, secret = parts[0], parts[1], parts[2]
+    download_dir = parts[3] if len(parts) == 4 else "/downloads"
+
+    if name == DEFAULT_NODE or nodes.get_node(name) is not None:
+        await message.reply("⛔ 节点名已存在（default 是内置本机节点）。")
+        return
+    # 名字要拼进 callback_data（64 字节上限），限制字节长度
+    if len(name.encode()) > MAX_NODE_NAME_BYTES:
+        await message.reply(f"⛔ 节点名太长（最多 {MAX_NODE_NAME_BYTES} 字节，约 10 个汉字）。")
+        return
+    if not rpc_url.startswith(("http://", "https://")):
+        await message.reply("⛔ rpc地址必须是 http(s)://host:port/jsonrpc 形式。")
+        return
+
+    # 消息里带着 RPC 密钥，处理完立刻删掉原消息，避免密钥留在聊天记录里
+    try:
+        await message.delete()
+        deleted_hint = ""
+    except Exception:
+        deleted_hint = "\n⚠️ 无法删除你发的那条命令消息，请手动删除（里面有密钥）。"
+
+    # 入库前先探活，连不上直接拒绝，避免存入废节点
+    probe = Aria2Client(rpc_url, secret)
+    ok, info = await nodes.check(probe)
+    if not ok:
+        await message.answer(f"⛔ 连接失败，节点未添加：{info[:200]}{deleted_hint}")
+        return
+
+    await nodes.add(name=name, rpc_url=rpc_url, secret=secret, download_dir=download_dir)
+    await message.answer(
+        f"✅ 节点 <b>{name}</b> 已添加（aria2 {info}）\n"
+        f"下载目录：<code>{download_dir}</code>\n"
+        "在主菜单「🖥 节点」里切换后即可往它下载。"
+        f"{deleted_hint}",
+        parse_mode="HTML",
+    )
 
 
 # ---------- 服务器状态 ----------
