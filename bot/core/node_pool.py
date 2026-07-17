@@ -67,8 +67,12 @@ class NodePool:
                 is_local=bool(row["is_local"]),
                 enabled=bool(row["enabled"]),
             )
-        # 客户端惰性创建（get 时），这里只清掉已不存在节点的旧客户端
-        self._clients = {k: v for k, v in self._clients.items() if k in self._nodes}
+        # 客户端惰性创建（get 时）；这里把已不存在节点的旧客户端关掉再清出去，
+        # 不然它们各自持有的 aiohttp session（HTTP 连接池 + 可能还挂着的 WS
+        # 连接）就没人管了，一直挂到进程退出
+        stale = [k for k in self._clients if k not in self._nodes]
+        for name in stale:
+            await self._clients.pop(name).close()
 
     # ---- 查询 ----
 
@@ -122,7 +126,9 @@ class NodePool:
             raise ValueError("default node cannot be removed")
         await self._repo.delete_node(name)
         self._nodes.pop(name, None)
-        self._clients.pop(name, None)
+        client = self._clients.pop(name, None)
+        if client is not None:
+            await client.close()
         self._healthy.pop(name, None)
 
     async def set_enabled(self, name: str, enabled: bool):
@@ -147,3 +153,10 @@ class NodePool:
             return True, version
         except Exception as e:
             return False, str(e)
+
+    async def close(self):
+        """进程关闭时把所有节点的 aiohttp session 都关掉，避免每个残留一条
+        "Unclosed client session" 警告和一个没释放的连接池/WS 连接。"""
+        for client in self._clients.values():
+            await client.close()
+        self._clients.clear()

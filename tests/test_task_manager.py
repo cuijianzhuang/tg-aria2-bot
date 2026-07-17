@@ -305,5 +305,78 @@ class TestWebSocketEvents(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["status"], "COMPLETED")
 
 
+class TestTerminalDeduplication(unittest.IsolatedAsyncioTestCase):
+    """接了 WS 推送之后，轮询循环和 WS 回调可能对同一个 gid 的完成/出错事件
+    各跑一遍 _handle_download_state——不去重的话 gofile 上传/自动发送会被
+    并发触发两次。覆盖两种场景：真正并发的一对调用，以及轮询循环拿着过期
+    快照、在 WS 已经先处理完之后才轮到这个 gid 的"迟到"场景。"""
+
+    async def asyncSetUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = TaskRepo(os.path.join(self._dir.name, "t.db"))
+        await self.repo.connect()
+        self.tm = TaskManager(bot=FakeBot(), nodes=FakeNodePool(), repo=self.repo)
+        await self.repo.create_task(
+            gid="g1", user_id=1, chat_id=1, reply_message_id=None,
+            source_type="url", source_ref="g1", file_name="f.bin",
+            file_size=10, payload="https://example.com/f.bin",
+        )
+
+    async def asyncTearDown(self):
+        await self.repo.close()
+        self._dir.cleanup()
+
+    def _download(self) -> Download:
+        return Download(
+            gid="g1", status="complete", total_length=10, completed_length=10,
+            download_speed=0, upload_speed=0, connections=0, error_message=None,
+            dir=Path("/dl"), files=[],
+        )
+
+    def _spy_notify(self):
+        calls = []
+        original = self.tm._notify
+
+        async def spy(*args, **kwargs):
+            calls.append(1)
+            return await original(*args, **kwargs)
+
+        self.tm._notify = spy
+        return calls
+
+    async def test_truly_concurrent_calls_notify_only_once(self):
+        row = dict(await self.repo.get_by_gid("g1"))
+        download = self._download()
+        calls = self._spy_notify()
+
+        await asyncio.gather(
+            self.tm._handle_download_state(row, download, node_is_local=True),
+            self.tm._handle_download_state(row, download, node_is_local=True),
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((await self.repo.get_by_gid("g1"))["status"], "COMPLETED")
+
+    async def test_stale_snapshot_replayed_after_the_fact_is_a_noop(self):
+        stale_row = dict(await self.repo.get_by_gid("g1"))  # 还是 ACTIVE 的旧快照
+        download = self._download()
+
+        await self.tm._handle_download_state(dict(stale_row), download, node_is_local=True)
+        self.assertEqual((await self.repo.get_by_gid("g1"))["status"], "COMPLETED")
+
+        calls = self._spy_notify()
+        # 模拟轮询循环手里那份 rows 快照没跟上——用同一份过期的 ACTIVE 快照
+        # 再处理一次，此时 DB 里其实已经是 COMPLETED 了
+        await self.tm._handle_download_state(dict(stale_row), download, node_is_local=True)
+        self.assertEqual(len(calls), 0)
+
+    async def test_in_flight_guard_is_released_after_processing(self):
+        """守卫只应该在处理期间生效，不能处理完之后一直占着导致这个 gid
+        以后永远处理不了（比如重试之后重新变成 ACTIVE 又完成一次）。"""
+        row = dict(await self.repo.get_by_gid("g1"))
+        await self.tm._handle_download_state(row, self._download(), node_is_local=True)
+        self.assertNotIn("g1", self.tm._terminal_in_flight)
+
+
 if __name__ == "__main__":
     unittest.main()
