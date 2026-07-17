@@ -4,6 +4,7 @@
 """
 import unittest
 
+from bot.config import settings
 from bot.core.cards import (
     _eta,
     _fmt_limit,
@@ -11,9 +12,17 @@ from bot.core.cards import (
     render_file_selection,
     render_home,
     render_pending_card,
+    render_settings,
     render_task_card,
 )
-from bot.core.keyboards import file_selection_keyboard, list_tab_row, settings_keyboard, task_keyboard, text_progress_bar
+from bot.core.keyboards import (
+    concurrent_chooser_keyboard,
+    file_selection_keyboard,
+    list_tab_row,
+    settings_keyboard,
+    task_keyboard,
+    text_progress_bar,
+)
 
 
 class FakeDownload:
@@ -170,8 +179,40 @@ class TestKeyboards(unittest.TestCase):
     def test_settings_keyboard_includes_admin_entries(self):
         kb = settings_keyboard()
         callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
-        for expected in ("settings:limit", "admin:users", "admin:gofile", "admin:rclone", "admin:restart"):
+        for expected in ("settings:limit", "settings:concurrent", "settings:notify",
+                         "admin:users", "admin:gofile", "admin:rclone", "admin:restart"):
             self.assertIn(expected, callbacks)
+
+    def test_notify_toggle_label_tracks_setting(self):
+        original = settings.notify_on_complete
+        try:
+            settings.notify_on_complete = True
+            labels = [b.text for row in settings_keyboard().inline_keyboard for b in row]
+            self.assertTrue(any("完成通知: ✅" in l for l in labels))
+            settings.notify_on_complete = False
+            labels = [b.text for row in settings_keyboard().inline_keyboard for b in row]
+            self.assertTrue(any("完成通知: ❌" in l for l in labels))
+        finally:
+            settings.notify_on_complete = original
+
+    def test_concurrent_chooser_marks_current(self):
+        kb = concurrent_chooser_keyboard("3")
+        labels = {b.callback_data: b.text for row in kb.inline_keyboard for b in row}
+        self.assertEqual(labels["setconcurrent:3"], "·3·")
+        self.assertEqual(labels["setconcurrent:5"], "5")
+
+
+class TestSettingsCard(unittest.TestCase):
+    def test_shows_live_values(self):
+        original = settings.notify_on_complete
+        try:
+            settings.notify_on_complete = False
+            text = render_settings("2097152", "5")
+            self.assertIn("最大同时下载：5", text)
+            self.assertIn("完成通知：关闭", text)
+            self.assertIn("2.0 MiB/s", text)
+        finally:
+            settings.notify_on_complete = original
 
     def test_tab_row_marks_selected(self):
         row = list_tab_row("ACTIVE", {"ACTIVE": 2, "COMPLETED": 5})

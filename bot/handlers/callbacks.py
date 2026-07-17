@@ -8,14 +8,18 @@ from aiogram.types import CallbackQuery
 from bot.config import settings
 from bot.core import storage
 from bot.core.cards import (
+    render_concurrent_chooser,
     render_file_selection,
     render_home,
     render_limit_chooser,
     render_settings,
     render_task_card,
 )
+from bot.core.conf_editor import write_kv
 from bot.core.keyboards import (
+    CONCURRENT_PRESETS,
     cleanup_confirm_keyboard,
+    concurrent_chooser_keyboard,
     file_selection_keyboard,
     limit_chooser_keyboard,
     main_inline_keyboard,
@@ -57,12 +61,28 @@ async def nav_start(query: CallbackQuery, repo, aria2):
     await _edit(query, render_home(counts, stats), reply_markup=main_inline_keyboard(counts), parse_mode="HTML")
 
 
-async def _show_settings(query: CallbackQuery, aria2):
+async def _settings_data(aria2) -> tuple[str | None, str | None]:
+    """(max-overall-download-limit, max-concurrent-downloads) straight from
+    aria2 — the live values, not whatever .env said at boot."""
     try:
-        limit_raw = await aria2.get_global_limit()
+        opts = await aria2.get_global_options()
     except Exception:
-        limit_raw = None
-    await _edit(query, render_settings(limit_raw), reply_markup=settings_keyboard(), parse_mode="HTML")
+        opts = {}
+    return opts.get("max-overall-download-limit"), opts.get("max-concurrent-downloads")
+
+
+async def _show_settings(query: CallbackQuery, aria2):
+    limit_raw, concurrent_raw = await _settings_data(aria2)
+    await _edit(query, render_settings(limit_raw, concurrent_raw), reply_markup=settings_keyboard(), parse_mode="HTML")
+
+
+def _persist_env(key: str, value: str):
+    """Best-effort .env write-back so the choice survives a bot restart; a
+    missing .env (e.g. env vars injected some other way) is not an error."""
+    try:
+        write_kv(".env", key, value)
+    except OSError:
+        log.warning("could not persist %s to .env", key)
 
 
 @router.callback_query(F.data == "nav:settings")
@@ -92,6 +112,41 @@ async def apply_limit(query: CallbackQuery, aria2):
         await query.answer("设置失败，请稍后再试", show_alert=True)
         return
     await query.answer("✅ 已生效" if value != "0" else "✅ 已取消限速")
+    await _show_settings(query, aria2)
+
+
+@router.callback_query(F.data == "settings:concurrent")
+async def settings_concurrent(query: CallbackQuery, aria2):
+    _, concurrent_raw = await _settings_data(aria2)
+    await _edit(
+        query, render_concurrent_chooser(concurrent_raw),
+        reply_markup=concurrent_chooser_keyboard(concurrent_raw), parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("setconcurrent:"))
+async def apply_concurrent(query: CallbackQuery, aria2):
+    value = query.data.split(":", 1)[1]
+    if value not in CONCURRENT_PRESETS:
+        await query.answer("无效的数量", show_alert=True)
+        return
+    try:
+        await aria2.set_max_concurrent(int(value))
+    except Exception:
+        log.exception("failed to set max-concurrent-downloads")
+        await query.answer("设置失败，请稍后再试", show_alert=True)
+        return
+    settings.max_concurrent = int(value)
+    _persist_env("MAX_CONCURRENT", value)  # re-applied to aria2 on bot startup
+    await query.answer("✅ 已生效")
+    await _show_settings(query, aria2)
+
+
+@router.callback_query(F.data == "settings:notify")
+async def toggle_notify(query: CallbackQuery, aria2):
+    settings.notify_on_complete = not settings.notify_on_complete
+    _persist_env("NOTIFY_ON_COMPLETE", "true" if settings.notify_on_complete else "false")
+    await query.answer("🔔 完成通知已开启" if settings.notify_on_complete else "🔕 完成通知已关闭")
     await _show_settings(query, aria2)
 
 

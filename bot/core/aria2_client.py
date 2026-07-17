@@ -89,10 +89,18 @@ class Aria2Client:
             self._api.set_global_options, {"max-overall-download-limit": speed}
         )
 
+    async def get_global_options(self) -> dict:
+        return await self._run(self._api.client.get_global_option)
+
     async def get_global_limit(self) -> str:
         """Raw max-overall-download-limit value ('0' = unlimited, else bytes/s)."""
-        opts = await self._run(self._api.client.get_global_option)
+        opts = await self.get_global_options()
         return opts.get("max-overall-download-limit", "0")
+
+    async def set_max_concurrent(self, n: int):
+        await self._run(
+            self._api.set_global_options, {"max-concurrent-downloads": str(n)}
+        )
 
     async def set_selected_files(self, gid: str, indices: list[int]):
         """aria2 only accepts select-file changes while the download is not

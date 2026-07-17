@@ -165,15 +165,17 @@ def _fmt_limit(raw: str) -> str:
     return "不限速" if n == 0 else f"{_fmt_size(n)}/s"
 
 
-def render_settings(limit_raw: str | None = None) -> str:
+def render_settings(limit_raw: str | None = None, concurrent_raw: str | None = None) -> str:
     limit = _fmt_limit(limit_raw) if limit_raw is not None else "未知"
+    concurrent = concurrent_raw if concurrent_raw is not None else str(settings.max_concurrent)
+    notify = "开启" if settings.notify_on_complete else "关闭"
     return (
         "⚙️ <b>设置</b>\n"
         f"{DIVIDER}\n"
         f"📂 默认目录：<code>{escape(settings.download_dir, quote=False)}</code>\n"
         f"🚀 全局限速：{limit}\n"
-        f"🔢 最大同时下载：{settings.max_concurrent}\n"
-        "🔔 完成通知：开启"
+        f"🔢 最大同时下载：{concurrent}\n"
+        f"🔔 完成通知：{notify}"
     )
 
 
@@ -188,6 +190,15 @@ def render_file_selection(download) -> str:
         "点击文件切换选中/取消，即点即生效（会短暂暂停任务）。",
     ]
     return "\n".join(lines)
+
+
+def render_concurrent_chooser(current: str | None = None) -> str:
+    return (
+        "🔢 <b>最大同时下载数</b>\n"
+        f"{DIVIDER}\n"
+        f"当前：{current if current is not None else '未知'}\n\n"
+        "选择一个数量，立即生效："
+    )
 
 
 def render_limit_chooser(limit_raw: str | None = None) -> str:

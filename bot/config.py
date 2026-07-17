@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     download_dir: str = "/downloads"
     max_file_size: int = 2 * 1024 * 1024 * 1024
     max_concurrent: int = 3
+    # 完成/失败时是否补发新消息（编辑已有进度卡片始终进行，编辑本身无推送打扰）
+    notify_on_complete: bool = True
     proxy_url: str | None = None
 
     db_path: str = "/app/data/tasks.db"

@@ -1,5 +1,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from bot.config import settings
+
 STATUS_EMOJI = {
     "PENDING": "⏳",
     "ACTIVE": "⬇️",
@@ -177,9 +179,14 @@ def cleanup_confirm_keyboard() -> InlineKeyboardMarkup:
 
 def settings_keyboard() -> InlineKeyboardMarkup:
     """Single hub: download tuning on top, admin features (formerly /admin) below."""
+    notify_label = f"🔔 完成通知: {'✅' if settings.notify_on_complete else '❌'}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🚀 调整限速", callback_data="settings:limit")],
+            [
+                InlineKeyboardButton(text="🚀 调整限速", callback_data="settings:limit"),
+                InlineKeyboardButton(text="🔢 同时下载数", callback_data="settings:concurrent"),
+            ],
+            [InlineKeyboardButton(text=notify_label, callback_data="settings:notify")],
             [
                 InlineKeyboardButton(text="👥 白名单", callback_data="admin:users"),
                 InlineKeyboardButton(text="☁️ GoFile", callback_data="admin:gofile"),
@@ -219,6 +226,23 @@ def limit_chooser_keyboard() -> InlineKeyboardMarkup:
     ]
     rows.append([InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+CONCURRENT_PRESETS = ("1", "2", "3", "5", "8", "10")
+
+
+def concurrent_chooser_keyboard(current: str | None = None) -> InlineKeyboardMarkup:
+    row = [
+        InlineKeyboardButton(
+            text=f"·{n}·" if n == current else n,
+            callback_data=f"setconcurrent:{n}",
+        )
+        for n in CONCURRENT_PRESETS
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        row,
+        [InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")],
+    ])
 
 
 def text_progress_bar(percent: float, width: int = 12) -> str:

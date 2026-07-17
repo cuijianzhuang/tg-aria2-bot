@@ -241,7 +241,11 @@ class TaskManager:
                 return
             except Exception:
                 pass
-        await self._bot.send_message(chat_id=row["chat_id"], text=text, reply_markup=markup)
+        # editing the existing card is always fine (edits don't push-notify);
+        # only a brand-new message actually notifies, so that's what the
+        # 完成通知 toggle gates
+        if settings.notify_on_complete:
+            await self._bot.send_message(chat_id=row["chat_id"], text=text, reply_markup=markup)
 
     async def reconcile_on_startup(self):
         rows = await self._repo.get_unfinished()

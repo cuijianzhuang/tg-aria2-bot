@@ -26,10 +26,13 @@ BACK_TO_SETTINGS = InlineKeyboardButton(text="⬅️ 返回设置", callback_dat
 
 async def _settings_view(aria2) -> tuple[str, InlineKeyboardMarkup]:
     try:
-        limit_raw = await aria2.get_global_limit()
+        opts = await aria2.get_global_options()
     except Exception:
-        limit_raw = None
-    return render_settings(limit_raw), settings_keyboard()
+        opts = {}
+    return (
+        render_settings(opts.get("max-overall-download-limit"), opts.get("max-concurrent-downloads")),
+        settings_keyboard(),
+    )
 
 
 @router.message(Command("settings"))
