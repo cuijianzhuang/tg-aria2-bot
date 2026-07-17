@@ -1,13 +1,19 @@
+import asyncio
+import contextlib
 import os
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from bot.config import settings
+from bot.core.aria2_client import Download
+from bot.core.node_pool import Node
 from bot.core.task_manager import TaskManager
 from bot.db.repo import TaskRepo
+from tests.fakes import FakeNodePool
 
 
 class FakeBot:
@@ -197,6 +203,106 @@ class TestDiskAlert(unittest.IsolatedAsyncioTestCase):
         with patch("bot.core.task_manager.shutil.disk_usage", return_value=self._usage(2.0)):
             await self.tm._check_disk_space()  # 不应该抛异常
         self.assertEqual(self.bot.sent_messages, [])
+
+
+class TestWebSocketEvents(unittest.IsolatedAsyncioTestCase):
+    """WS 推送让 TaskManager 不用等 5 秒轮询就能处理下载完成/出错——测试
+    覆盖事件路由（gid/节点匹配）和监听任务的动态增减，不测真实网络连接
+    （那部分在 test_aria2_rpc.py 里已经覆盖）。"""
+
+    async def asyncSetUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = TaskRepo(os.path.join(self._dir.name, "t.db"))
+        await self.repo.connect()
+        self.pool = FakeNodePool()
+        self.bot = FakeBot()
+        self.tm = TaskManager(bot=self.bot, nodes=self.pool, repo=self.repo)
+
+    async def asyncTearDown(self):
+        self.tm.stop()
+        for task in list(self.tm._ws_tasks.values()) + list(self.tm._bg_tasks):
+            task.cancel()
+        await self.repo.close()
+        self._dir.cleanup()
+
+    async def _create_row(self, gid: str, *, node: str = "default", status: str = "ACTIVE"):
+        await self.repo.create_task(
+            gid=gid, user_id=1, chat_id=1, reply_message_id=None,
+            source_type="url", source_ref=gid, file_name="f.bin",
+            file_size=10, payload="https://example.com/f.bin", node=node,
+        )
+        if status != "PENDING":
+            await self.repo.update_status(gid, status)
+
+    @staticmethod
+    def _download(gid: str, status: str = "complete") -> Download:
+        return Download(
+            gid=gid, status=status, total_length=10, completed_length=10,
+            download_speed=0, upload_speed=0, connections=0, error_message=None,
+            dir=Path("/dl"), files=[],
+        )
+
+    async def test_handle_ws_event_processes_matching_row(self):
+        await self._create_row("g1")
+        self.pool.get("default").statuses["g1"] = self._download("g1")
+        await self.tm._handle_ws_event("default", "g1")
+        row = await self.repo.get_by_gid("g1")
+        self.assertEqual(row["status"], "COMPLETED")
+
+    async def test_ignores_gid_unknown_to_this_bot(self):
+        await self.tm._handle_ws_event("default", "ghost")  # 不应该抛异常
+
+    async def test_ignores_event_from_wrong_node(self):
+        await self._create_row("g1", node="default")
+        await self.tm._handle_ws_event("nas", "g1")  # 事件来自另一个节点，忽略
+        row = await self.repo.get_by_gid("g1")
+        self.assertEqual(row["status"], "ACTIVE")  # 没被处理
+
+    async def test_ignores_already_terminal_row_without_rpc_call(self):
+        await self._create_row("g1", status="COMPLETED")
+        # "default" 节点的 statuses 里没配 "g1"——如果代码真的发起 get_status
+        # 会直接 KeyError；能跑到断言说明确实提前 return 了，没发多余的 RPC
+        await self.tm._handle_ws_event("default", "g1")
+
+    async def test_falls_back_to_poll_when_get_status_fails(self):
+        await self._create_row("g1")  # 没在 statuses 里配置 -> get_status 抛 KeyError
+        await self.tm._handle_ws_event("default", "g1")  # 吞掉异常，不传播
+        row = await self.repo.get_by_gid("g1")
+        self.assertEqual(row["status"], "ACTIVE")  # 状态没被误改
+
+    async def test_reconcile_tracks_node_additions_and_removals(self):
+        self.tm._reconcile_ws_listeners()
+        self.assertIn("default", self.tm._ws_tasks)
+
+        self.pool._nodes["nas"] = Node(
+            name="nas", rpc_url="http://nas:6800/jsonrpc", secret="s",
+            download_dir="/v", is_local=False,
+        )
+        self.tm._reconcile_ws_listeners()
+        self.assertIn("nas", self.tm._ws_tasks)
+
+        self.pool._nodes["nas"].enabled = False
+        self.tm._reconcile_ws_listeners()
+        self.assertNotIn("nas", self.tm._ws_tasks)
+
+    async def test_ws_listen_end_to_end_updates_task_on_emitted_event(self):
+        await self._create_row("g1")
+        client = self.pool.get("default")
+        client.statuses["g1"] = self._download("g1")
+        client.events_to_emit = [("g1", "complete")]
+
+        self.tm._running = True  # 平时由 start() 置位，这里绕过 start() 直调
+        task = asyncio.create_task(self.tm._ws_listen("default"))
+        for _ in range(10):
+            await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        if self.tm._bg_tasks:
+            await asyncio.gather(*self.tm._bg_tasks, return_exceptions=True)
+
+        row = await self.repo.get_by_gid("g1")
+        self.assertEqual(row["status"], "COMPLETED")
 
 
 if __name__ == "__main__":

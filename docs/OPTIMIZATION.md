@@ -184,7 +184,7 @@ aria2p 是同步库，每次调用都要 `to_thread`。aria2 的 JSON-RPC 极简
 | #14 RPC 超时 | ✅ | aria2p Client timeout=10s |
 | #15 小项 | ✅ | `tell_active`→`get_all_downloads`；`/pause` `/resume` 同步 DB 状态；gofile 模块改用进程级复用的 `aiohttp.ClientSession`（原来每次上传开 3 个新 session），进程退出时 `close_session()` 收尾 |
 | #16 索引 | ✅ | `idx_tasks_status`、`idx_tasks_created` |
-| #17 异步 RPC | ⏳ 未做 | 长期项 |
+| #17 异步 RPC | ✅ | 新增 `bot/core/aria2_rpc.py`（纯 aiohttp JSON-RPC + WebSocket 事件订阅），`aria2_client.py` 全部重写为原生异步（不再是 aria2p+to_thread），移除 aria2p 依赖；TaskManager 每个节点常驻一条 WS 连接，收到 onDownloadComplete/onBtDownloadComplete/onDownloadError 立即处理那个 gid，5 秒轮询降级为兜底而非唯一路径；顺带修了一个真实 bug：`remove(files=True)` 在远程节点上不再误删 bot 本机同名路径的文件 |
 | #18 CI | ✅ | 新增 test workflow；deploy 依赖 test job，服务器端补 `pip install` 和 web 重启 |
 | #19 测试补全 | ✅ | 新增 web/auth、conf_editor、TaskRepo 测试（42 个用例） |
 | #20 Docker | ✅ | `.dockerignore`、去掉 compose `version`；非 root 用户（UID/GID 1000，跟 aria2 的 PUID/PGID 对齐）——`install.sh` 新装机自动 `chown` 好 bind mount 目录/`.env`，旧部署升级需要手动跑一次 `chown`（README 已写明），未在真实 Docker 环境里跑通全流程（沙箱没有 docker daemon），建议合并后在真实环境验证一次 |

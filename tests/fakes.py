@@ -11,6 +11,13 @@ class FakeAria2:
         self.add_torrent_calls = []
         self.paused = []
         self.resumed = []
+        self.removed = []
+        # gid -> Download-like 对象；get_status 对未配置的 gid 抛异常，
+        # 模拟"aria2 不认识这个 gid 了"
+        self.statuses: dict = {}
+        # (gid, event) 元组列表；listen_events 按顺序 yield 完就正常结束
+        # （模拟服务器主动断开），空列表 = 一条事件都不推送
+        self.events_to_emit: list[tuple[str, str]] = []
 
     async def add_uri(self, uri, *, out=None, download_dir=None):
         self.add_uri_calls.append((uri, out, download_dir))
@@ -32,6 +39,18 @@ class FakeAria2:
 
     async def resume(self, gid):
         self.resumed.append(gid)
+
+    async def get_status(self, gid):
+        if gid not in self.statuses:
+            raise KeyError(f"unknown gid: {gid}")
+        return self.statuses[gid]
+
+    async def remove(self, gid, *, files=False, is_local=True):
+        self.removed.append((gid, files, is_local))
+
+    async def listen_events(self):
+        for gid, event in self.events_to_emit:
+            yield gid, event
 
 
 class FakeNodePool:

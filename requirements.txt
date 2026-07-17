@@ -1,5 +1,4 @@
 aiogram==3.29.1
-aria2p==0.12.1
 aiosqlite==0.22.1
 pydantic-settings==2.5.2
 fastapi==0.115.0

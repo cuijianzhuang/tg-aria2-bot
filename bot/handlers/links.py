@@ -193,7 +193,7 @@ async def handle_torrent(message: Message, repo, nodes):
 
     # Always copy into our own persistent store: temp files leaked, and both the
     # bot-api's local path and a temp path die before a later 重试 needs them.
-    # 种子文件天然跨节点：aria2p 的 add_torrent 读的是 bot 本地这份副本、以
+    # 种子文件天然跨节点：add_torrent 读的是 bot 本地这份副本、以
     # base64 走 RPC 传给目标 aria2，不要求目标节点能访问这个路径。
     torrent_path = _torrent_store_path(message.document.file_unique_id)
     if not os.path.exists(torrent_path):
