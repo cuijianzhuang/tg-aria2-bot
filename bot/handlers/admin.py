@@ -2,13 +2,15 @@ import asyncio
 import logging
 
 from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.config import settings
-from bot.core.cards import render_settings
+from bot.core.cards import render_server_status, render_settings
 from bot.core.conf_editor import aria2_conf_path, read_kv, script_conf_path, write_kv
-from bot.core.keyboards import settings_keyboard
+from bot.core.keyboards import server_status_keyboard, settings_keyboard
+from bot.core.sysinfo import collect_system_status
 from bot.middlewares.auth import AdminMiddleware
 
 log = logging.getLogger(__name__)
@@ -215,6 +217,37 @@ async def toggle_rclone(query: CallbackQuery):
     write_kv(aria2_conf_path(), "on-download-complete", hook)
     await query.answer("已切换，需要重启 aria2 才生效")
     await query.message.edit_text(_rclone_text(), reply_markup=_rclone_menu(), parse_mode="HTML")
+
+
+# ---------- 服务器状态 ----------
+
+async def _server_status_view(aria2) -> str:
+    # sampling sleeps ~0.3s inside — keep it off the event loop
+    info = await asyncio.to_thread(collect_system_status, settings.download_dir)
+    try:
+        stats = await aria2.global_stat()
+    except Exception:
+        stats = None
+    return render_server_status(info, stats)
+
+
+@router.callback_query(F.data == "admin:sysinfo")
+async def show_sysinfo(query: CallbackQuery, aria2):
+    await query.answer("正在采集…")  # sampling takes a moment; ack the tap first
+    text = await _server_status_view(aria2)
+    try:
+        await query.message.edit_text(text, reply_markup=server_status_keyboard(), parse_mode="HTML")
+    except TelegramBadRequest as e:
+        # double-tapped 刷新 within the same second: card text (incl. timestamp)
+        # is identical, Telegram rejects the no-op edit — nothing to do
+        if "message is not modified" not in str(e):
+            raise
+
+
+@router.message(Command("server"))
+async def cmd_server(message: Message, aria2):
+    text = await _server_status_view(aria2)
+    await message.reply(text, reply_markup=server_status_keyboard(), parse_mode="HTML")
 
 
 # ---------- 重启服务 ----------
