@@ -33,7 +33,11 @@ async def render_task_list(repo, aria2, status_key: str = "ALL", page: int = 0) 
     status = LIST_STATUS_MAP.get(status_key)
     page = max(0, page)
     offset = page * LIST_LIMIT
-    rows = await repo.list_recent(LIST_LIMIT, offset=offset, status=status)
+    # 多取 1 条来判断"是否还有下一页"，避免任务数恰好是 LIST_LIMIT 整数倍时
+    # 显示一个空白的下一页（旧逻辑用 len(rows)==LIST_LIMIT 判断，这种情况会误判）
+    fetched = await repo.list_recent(LIST_LIMIT + 1, offset=offset, status=status)
+    has_next_page = len(fetched) > LIST_LIMIT
+    rows = fetched[:LIST_LIMIT]
 
     keyboard_rows = [list_tab_row(status_key, counts)]
     title = TITLES.get(status_key, TITLES["ALL"])
@@ -59,12 +63,12 @@ async def render_task_list(repo, aria2, status_key: str = "ALL", page: int = 0) 
             if row["gid"]:
                 keyboard_rows.append(task_open_button(index, row["gid"], name))
 
-        if page > 0 or len(rows) == LIST_LIMIT:
+        if page > 0 or has_next_page:
             controls = []
             if page > 0:
                 controls.append(InlineKeyboardButton(text="⬅️", callback_data=f"list:{status_key}:{page - 1}"))
             controls.append(InlineKeyboardButton(text=f"第 {page + 1} 页", callback_data="list:noop"))
-            if len(rows) == LIST_LIMIT:
+            if has_next_page:
                 controls.append(InlineKeyboardButton(text="➡️", callback_data=f"list:{status_key}:{page + 1}"))
             keyboard_rows.append(controls)
 

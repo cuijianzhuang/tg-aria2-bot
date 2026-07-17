@@ -165,15 +165,25 @@ def _fmt_limit(raw: str) -> str:
     return "不限速" if n == 0 else f"{_fmt_size(n)}/s"
 
 
-def render_settings(limit_raw: str | None = None) -> str:
+def _fmt_max_file_size(n: int) -> str:
+    # 0 约定为不限制单文件大小
+    return "不限" if not n else _fmt_size(n)
+
+
+def render_settings(limit_raw: str | None = None, concurrent_raw: str | None = None) -> str:
     limit = _fmt_limit(limit_raw) if limit_raw is not None else "未知"
+    concurrent = concurrent_raw if concurrent_raw is not None else str(settings.max_concurrent)
+    notify = "开启" if settings.notify_on_complete else "关闭"
+    cleanup = f"保留 {settings.auto_cleanup_days} 天" if settings.auto_cleanup_days > 0 else "关闭"
     return (
         "⚙️ <b>设置</b>\n"
         f"{DIVIDER}\n"
         f"📂 默认目录：<code>{escape(settings.download_dir, quote=False)}</code>\n"
         f"🚀 全局限速：{limit}\n"
-        f"🔢 最大同时下载：{settings.max_concurrent}\n"
-        "🔔 完成通知：开启"
+        f"🔢 最大同时下载：{concurrent}\n"
+        f"📏 单文件上限：{_fmt_max_file_size(settings.max_file_size)}\n"
+        f"🔔 完成通知：{notify}\n"
+        f"🧹 自动清理已完成：{cleanup}"
     )
 
 
@@ -187,6 +197,48 @@ def render_file_selection(download) -> str:
         "",
         "点击文件切换选中/取消，即点即生效（会短暂暂停任务）。",
     ]
+    return "\n".join(lines)
+
+
+def render_concurrent_chooser(current: str | None = None) -> str:
+    return (
+        "🔢 <b>最大同时下载数</b>\n"
+        f"{DIVIDER}\n"
+        f"当前：{current if current is not None else '未知'}\n\n"
+        "选择一个数量，立即生效："
+    )
+
+
+def render_maxsize_chooser(current: int) -> str:
+    return (
+        "📏 <b>单文件大小上限</b>\n"
+        f"{DIVIDER}\n"
+        f"当前：{_fmt_max_file_size(current)}\n\n"
+        "超过上限的文件会被直接拒绝，不会开始下载。选择一个上限，立即生效："
+    )
+
+
+def render_cleanup_chooser() -> str:
+    current = f"保留 {settings.auto_cleanup_days} 天" if settings.auto_cleanup_days > 0 else "关闭"
+    return (
+        "🧹 <b>自动清理已完成任务</b>\n"
+        f"{DIVIDER}\n"
+        f"当前：{current}\n\n"
+        "到期后自动删除机器人里的任务记录（只删记录，不删磁盘文件）。选择保留天数："
+    )
+
+
+def render_dir_chooser(options: list[str]) -> str:
+    current = settings.download_dir
+    lines = [
+        "📂 <b>下载目录</b>",
+        DIVIDER,
+        f"当前：<code>{escape(current, quote=False)}</code>",
+        "",
+        "选择要切换到的目录（不影响已下载的文件位置）：",
+    ]
+    if len(options) <= 1:
+        lines += ["", "<i>只有一个目录可选，在 .env 里配置 DOWNLOAD_DIR_PRESETS 增加更多候选目录。</i>"]
     return "\n".join(lines)
 
 

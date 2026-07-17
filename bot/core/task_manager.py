@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import time
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
@@ -17,6 +18,9 @@ from bot.db.repo import TaskRepo
 log = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS = 5
+# 自动清理检查间隔：不需要很频繁，一天查一次即可（用户改天数后手动触发的
+# run_cleanup_once 会立即生效，不必等这个周期）
+CLEANUP_CHECK_INTERVAL_SECONDS = 24 * 3600
 # Telegram allows ~20 message edits per minute per chat; with several active
 # tasks in one chat a 3s floor eats the budget and starts drawing 429s.
 PROGRESS_EDIT_MIN_INTERVAL = 10.0
@@ -35,6 +39,7 @@ class TaskManager:
         self._last_edit: dict[str, tuple[float, float]] = {}  # gid -> (timestamp, percent)
         self._chat_backoff: dict[int, float] = {}  # chat_id -> monotonic deadline after a 429
         self._poll_task: asyncio.Task | None = None
+        self._cleanup_task: asyncio.Task | None = None
         # Strong refs to fire-and-forget pipeline tasks: the event loop only
         # keeps weak references, so an unreferenced task can be GC'd mid-flight.
         self._bg_tasks: set[asyncio.Task] = set()
@@ -43,11 +48,14 @@ class TaskManager:
     async def start(self):
         self._running = True
         self._poll_task = asyncio.create_task(self._poll_loop())
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 
     def stop(self):
         self._running = False
         if self._poll_task:
             self._poll_task.cancel()
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
         for task in self._bg_tasks:
             task.cancel()
 
@@ -241,7 +249,35 @@ class TaskManager:
                 return
             except Exception:
                 pass
-        await self._bot.send_message(chat_id=row["chat_id"], text=text, reply_markup=markup)
+        # editing the existing card is always fine (edits don't push-notify);
+        # only a brand-new message actually notifies, so that's what the
+        # 完成通知 toggle gates
+        if settings.notify_on_complete:
+            await self._bot.send_message(chat_id=row["chat_id"], text=text, reply_markup=markup)
+
+    async def _cleanup_loop(self):
+        # 每天检查一次是否需要清理，比 5 秒轮询低频得多，避免无意义的空跑
+        while self._running:
+            try:
+                await self.run_cleanup_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("auto cleanup failed")
+            await asyncio.sleep(CLEANUP_CHECK_INTERVAL_SECONDS)
+
+    async def run_cleanup_once(self) -> int:
+        """按 AUTO_CLEANUP_DAYS 清理过期的已完成任务记录，返回删除条数。
+        AUTO_CLEANUP_DAYS <= 0 表示关闭，直接跳过。设置菜单里改天数后会立即
+        调用一次这个方法，不用等下一个 24 小时周期。"""
+        days = settings.auto_cleanup_days
+        if days <= 0:
+            return 0
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        deleted = await self._repo.delete_old_completed(cutoff)
+        if deleted:
+            log.info("auto cleanup removed %d completed task records older than %d days", deleted, days)
+        return deleted
 
     async def reconcile_on_startup(self):
         rows = await self._repo.get_unfinished()

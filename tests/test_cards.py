@@ -4,16 +4,32 @@
 """
 import unittest
 
+from bot.config import settings
 from bot.core.cards import (
     _eta,
     _fmt_limit,
+    _fmt_max_file_size,
     _fmt_size,
+    render_cleanup_chooser,
+    render_dir_chooser,
     render_file_selection,
     render_home,
+    render_maxsize_chooser,
     render_pending_card,
+    render_settings,
     render_task_card,
 )
-from bot.core.keyboards import file_selection_keyboard, list_tab_row, settings_keyboard, task_keyboard, text_progress_bar
+from bot.core.keyboards import (
+    cleanup_chooser_keyboard,
+    concurrent_chooser_keyboard,
+    dir_chooser_keyboard,
+    file_selection_keyboard,
+    list_tab_row,
+    maxsize_chooser_keyboard,
+    settings_keyboard,
+    task_keyboard,
+    text_progress_bar,
+)
 
 
 class FakeDownload:
@@ -170,8 +186,101 @@ class TestKeyboards(unittest.TestCase):
     def test_settings_keyboard_includes_admin_entries(self):
         kb = settings_keyboard()
         callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
-        for expected in ("settings:limit", "admin:users", "admin:gofile", "admin:rclone", "admin:restart"):
+        for expected in ("settings:limit", "settings:concurrent", "settings:notify",
+                         "settings:maxsize", "settings:dir", "settings:cleanup",
+                         "admin:users", "admin:gofile", "admin:rclone", "admin:restart"):
             self.assertIn(expected, callbacks)
+
+    def test_maxsize_chooser_marks_current(self):
+        kb = maxsize_chooser_keyboard("1024")
+        labels = {b.callback_data: b.text for row in kb.inline_keyboard for b in row}
+        self.assertEqual(labels["setmaxsize:1024"], "·1 GB·")
+        self.assertEqual(labels["setmaxsize:0"], "不限")
+
+    def test_cleanup_chooser_marks_current(self):
+        kb = cleanup_chooser_keyboard(7)
+        labels = {b.callback_data: b.text for row in kb.inline_keyboard for b in row}
+        self.assertEqual(labels["setcleanup:7"], "·7 天·")
+        self.assertEqual(labels["setcleanup:0"], "关闭")
+
+    def test_dir_chooser_marks_current_and_uses_index(self):
+        kb = dir_chooser_keyboard(["/downloads", "/downloads/movies"])
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
+        self.assertIn("setdir:0", callbacks)
+        self.assertIn("setdir:1", callbacks)
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+        self.assertTrue(any(l.startswith("✅") and "/downloads" in l and "movies" not in l for l in labels))
+
+    def test_notify_toggle_label_tracks_setting(self):
+        original = settings.notify_on_complete
+        try:
+            settings.notify_on_complete = True
+            labels = [b.text for row in settings_keyboard().inline_keyboard for b in row]
+            self.assertTrue(any("完成通知: ✅" in l for l in labels))
+            settings.notify_on_complete = False
+            labels = [b.text for row in settings_keyboard().inline_keyboard for b in row]
+            self.assertTrue(any("完成通知: ❌" in l for l in labels))
+        finally:
+            settings.notify_on_complete = original
+
+    def test_concurrent_chooser_marks_current(self):
+        kb = concurrent_chooser_keyboard("3")
+        labels = {b.callback_data: b.text for row in kb.inline_keyboard for b in row}
+        self.assertEqual(labels["setconcurrent:3"], "·3·")
+        self.assertEqual(labels["setconcurrent:5"], "5")
+
+
+class TestSettingsCard(unittest.TestCase):
+    def test_shows_live_values(self):
+        original_notify = settings.notify_on_complete
+        original_cleanup = settings.auto_cleanup_days
+        original_maxsize = settings.max_file_size
+        try:
+            settings.notify_on_complete = False
+            settings.auto_cleanup_days = 7
+            settings.max_file_size = 1024 * 1024 * 1024
+            text = render_settings("2097152", "5")
+            self.assertIn("最大同时下载：5", text)
+            self.assertIn("完成通知：关闭", text)
+            self.assertIn("2.0 MiB/s", text)
+            self.assertIn("单文件上限：1.0 GiB", text)
+            self.assertIn("自动清理已完成：保留 7 天", text)
+        finally:
+            settings.notify_on_complete = original_notify
+            settings.auto_cleanup_days = original_cleanup
+            settings.max_file_size = original_maxsize
+
+    def test_cleanup_off_shows_disabled(self):
+        original = settings.auto_cleanup_days
+        try:
+            settings.auto_cleanup_days = 0
+            self.assertIn("自动清理已完成：关闭", render_settings())
+        finally:
+            settings.auto_cleanup_days = original
+
+    def test_fmt_max_file_size(self):
+        self.assertEqual(_fmt_max_file_size(0), "不限")
+        self.assertEqual(_fmt_max_file_size(2 * 1024 * 1024 * 1024), "2.0 GiB")
+
+    def test_maxsize_chooser_shows_current(self):
+        self.assertIn("当前：2.0 GiB", render_maxsize_chooser(2 * 1024 * 1024 * 1024))
+        self.assertIn("当前：不限", render_maxsize_chooser(0))
+
+    def test_cleanup_chooser_shows_current(self):
+        original = settings.auto_cleanup_days
+        try:
+            settings.auto_cleanup_days = 14
+            self.assertIn("当前：保留 14 天", render_cleanup_chooser())
+        finally:
+            settings.auto_cleanup_days = original
+
+    def test_dir_chooser_hints_when_single_option(self):
+        text = render_dir_chooser(["/downloads"])
+        self.assertIn("DOWNLOAD_DIR_PRESETS", text)
+
+    def test_dir_chooser_no_hint_with_multiple_options(self):
+        text = render_dir_chooser(["/downloads", "/downloads/movies"])
+        self.assertNotIn("DOWNLOAD_DIR_PRESETS", text)
 
     def test_tab_row_marks_selected(self):
         row = list_tab_row("ACTIVE", {"ACTIVE": 2, "COMPLETED": 5})

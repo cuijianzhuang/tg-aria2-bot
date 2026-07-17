@@ -1,5 +1,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from bot.config import settings
+
 STATUS_EMOJI = {
     "PENDING": "⏳",
     "ACTIVE": "⬇️",
@@ -177,9 +179,21 @@ def cleanup_confirm_keyboard() -> InlineKeyboardMarkup:
 
 def settings_keyboard() -> InlineKeyboardMarkup:
     """Single hub: download tuning on top, admin features (formerly /admin) below."""
+    notify_label = f"🔔 完成通知: {'✅' if settings.notify_on_complete else '❌'}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🚀 调整限速", callback_data="settings:limit")],
+            [
+                InlineKeyboardButton(text="🚀 调整限速", callback_data="settings:limit"),
+                InlineKeyboardButton(text="🔢 同时下载数", callback_data="settings:concurrent"),
+            ],
+            [
+                InlineKeyboardButton(text="📏 单文件上限", callback_data="settings:maxsize"),
+                InlineKeyboardButton(text="📂 下载目录", callback_data="settings:dir"),
+            ],
+            [
+                InlineKeyboardButton(text=notify_label, callback_data="settings:notify"),
+                InlineKeyboardButton(text="🧹 自动清理", callback_data="settings:cleanup"),
+            ],
             [
                 InlineKeyboardButton(text="👥 白名单", callback_data="admin:users"),
                 InlineKeyboardButton(text="☁️ GoFile", callback_data="admin:gofile"),
@@ -217,6 +231,82 @@ def limit_chooser_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=label, callback_data=f"setlimit:{value}")]
         for label, value in LIMIT_PRESETS
     ]
+    rows.append([InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+CONCURRENT_PRESETS = ("1", "2", "3", "5", "8", "10")
+
+
+def concurrent_chooser_keyboard(current: str | None = None) -> InlineKeyboardMarkup:
+    row = [
+        InlineKeyboardButton(
+            text=f"·{n}·" if n == current else n,
+            callback_data=f"setconcurrent:{n}",
+        )
+        for n in CONCURRENT_PRESETS
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        row,
+        [InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")],
+    ])
+
+
+# MB 转字节时用 1024*1024（跟 _fmt_size 的 MiB 单位保持一致），"0" 约定为不限
+MAXSIZE_PRESETS = (
+    ("不限", "0"),
+    ("512 MB", "512"),
+    ("1 GB", "1024"),
+    ("2 GB", "2048"),
+    ("5 GB", "5120"),
+    ("10 GB", "10240"),
+)
+
+
+def maxsize_chooser_keyboard(current_mb: str | None = None) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(
+            text=f"·{label}·" if value == current_mb else label,
+            callback_data=f"setmaxsize:{value}",
+        )]
+        for label, value in MAXSIZE_PRESETS
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+CLEANUP_PRESETS = (
+    ("关闭", "0"),
+    ("3 天", "3"),
+    ("7 天", "7"),
+    ("14 天", "14"),
+    ("30 天", "30"),
+)
+
+
+def cleanup_chooser_keyboard(current_days: int) -> InlineKeyboardMarkup:
+    current = str(current_days)
+    row = [
+        InlineKeyboardButton(
+            text=f"·{label}·" if value == current else label,
+            callback_data=f"setcleanup:{value}",
+        )
+        for label, value in CLEANUP_PRESETS
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        row,
+        [InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")],
+    ])
+
+
+def dir_chooser_keyboard(options: list[str]) -> InlineKeyboardMarkup:
+    """按 index 而不是路径本身做 callback_data —— 路径可能带非法字符或超长，
+    索引更安全也更短。"""
+    current = settings.download_dir
+    rows = []
+    for i, path in enumerate(options):
+        label = f"✅ {path}" if path == current else path
+        rows.append([InlineKeyboardButton(text=label[:60], callback_data=f"setdir:{i}")])
     rows.append([InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

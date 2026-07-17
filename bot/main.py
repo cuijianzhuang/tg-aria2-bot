@@ -37,6 +37,12 @@ async def main():
     await repo.connect()
 
     aria2 = Aria2Client(settings.aria2_rpc, settings.aria2_secret)
+    # MAX_CONCURRENT chosen in the settings menu is persisted to .env; re-apply
+    # it to aria2 here since aria2 forgets runtime option changes on restart.
+    try:
+        await aria2.set_max_concurrent(settings.max_concurrent)
+    except Exception:
+        log.warning("could not apply max_concurrent=%s to aria2 (is it up yet?)", settings.max_concurrent)
     task_manager = TaskManager(bot, aria2, repo)
 
     dp = Dispatcher()
@@ -50,6 +56,8 @@ async def main():
 
     dp["aria2"] = aria2
     dp["repo"] = repo
+    # 设置菜单里"立即清理一次"需要直接调用 task_manager.run_cleanup_once()
+    dp["task_manager"] = task_manager
 
     await bot.set_my_commands(BOT_COMMANDS)
     await task_manager.reconcile_on_startup()
