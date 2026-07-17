@@ -1,6 +1,6 @@
 aiogram==3.29.1
 aiosqlite==0.22.1
 pydantic-settings==2.5.2
-fastapi==0.115.0
+fastapi==0.139.2
 uvicorn==0.51.0
 aiohttp==3.14.1
