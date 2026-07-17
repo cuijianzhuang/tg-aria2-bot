@@ -37,7 +37,8 @@ async def handle_media(message: Message, aria2, repo):
         return
     file_id, file_unique_id, file_name, file_size = extracted
 
-    if file_size and file_size > settings.max_file_size:
+    # settings.max_file_size == 0 表示不限制（设置菜单里的"不限"选项）
+    if file_size and settings.max_file_size and file_size > settings.max_file_size:
         await message.reply(
             f"⛔ 文件过大 ({file_size / 1024 / 1024:.1f} MB)，超过 "
             f"{settings.max_file_size / 1024 / 1024:.0f} MB 上限。"

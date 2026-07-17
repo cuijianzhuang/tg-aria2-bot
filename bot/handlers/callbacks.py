@@ -8,21 +8,29 @@ from aiogram.types import CallbackQuery
 from bot.config import settings
 from bot.core import storage
 from bot.core.cards import (
+    render_cleanup_chooser,
     render_concurrent_chooser,
+    render_dir_chooser,
     render_file_selection,
     render_home,
     render_limit_chooser,
+    render_maxsize_chooser,
     render_settings,
     render_task_card,
 )
 from bot.core.conf_editor import write_kv
 from bot.core.keyboards import (
+    CLEANUP_PRESETS,
     CONCURRENT_PRESETS,
+    MAXSIZE_PRESETS,
+    cleanup_chooser_keyboard,
     cleanup_confirm_keyboard,
     concurrent_chooser_keyboard,
+    dir_chooser_keyboard,
     file_selection_keyboard,
     limit_chooser_keyboard,
     main_inline_keyboard,
+    maxsize_chooser_keyboard,
     settings_keyboard,
     task_cancel_confirm_keyboard,
     task_keyboard,
@@ -147,6 +155,79 @@ async def toggle_notify(query: CallbackQuery, aria2):
     settings.notify_on_complete = not settings.notify_on_complete
     _persist_env("NOTIFY_ON_COMPLETE", "true" if settings.notify_on_complete else "false")
     await query.answer("🔔 完成通知已开启" if settings.notify_on_complete else "🔕 完成通知已关闭")
+    await _show_settings(query, aria2)
+
+
+@router.callback_query(F.data == "settings:maxsize")
+async def settings_maxsize(query: CallbackQuery):
+    current_mb = str(settings.max_file_size // (1024 * 1024))
+    await _edit(
+        query, render_maxsize_chooser(settings.max_file_size),
+        reply_markup=maxsize_chooser_keyboard(current_mb), parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("setmaxsize:"))
+async def apply_maxsize(query: CallbackQuery, aria2):
+    value = query.data.split(":", 1)[1]
+    presets = {v for _, v in MAXSIZE_PRESETS}
+    if value not in presets:
+        await query.answer("无效的大小", show_alert=True)
+        return
+    # "0" 约定为不限；其余预设单位是 MB，换算成字节存进 settings
+    settings.max_file_size = int(value) * 1024 * 1024 if value != "0" else 0
+    _persist_env("MAX_FILE_SIZE", str(settings.max_file_size))
+    await query.answer("✅ 已生效")
+    await _show_settings(query, aria2)
+
+
+@router.callback_query(F.data == "settings:cleanup")
+async def settings_cleanup(query: CallbackQuery):
+    await _edit(
+        query, render_cleanup_chooser(),
+        reply_markup=cleanup_chooser_keyboard(settings.auto_cleanup_days), parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("setcleanup:"))
+async def apply_cleanup(query: CallbackQuery, aria2, task_manager):
+    value = query.data.split(":", 1)[1]
+    presets = {v for _, v in CLEANUP_PRESETS}
+    if value not in presets:
+        await query.answer("无效的天数", show_alert=True)
+        return
+    settings.auto_cleanup_days = int(value)
+    _persist_env("AUTO_CLEANUP_DAYS", value)
+    # 立即按新设置跑一次，不用等下一个 24 小时周期才看到效果
+    deleted = await task_manager.run_cleanup_once()
+    toast = "✅ 已关闭自动清理" if settings.auto_cleanup_days == 0 else f"✅ 已生效，本次清理了 {deleted} 条记录"
+    await query.answer(toast)
+    await _show_settings(query, aria2)
+
+
+@router.callback_query(F.data == "settings:dir")
+async def settings_dir(query: CallbackQuery):
+    options = settings.download_dir_options
+    await _edit(
+        query, render_dir_chooser(options),
+        reply_markup=dir_chooser_keyboard(options), parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("setdir:"))
+async def apply_dir(query: CallbackQuery, aria2):
+    try:
+        index = int(query.data.split(":", 1)[1])
+        chosen = settings.download_dir_options[index]
+    except (ValueError, IndexError):
+        await query.answer("无效的目录", show_alert=True)
+        return
+    # 新目录此刻可能还不存在（比如刚在 .env 里配的预设），提前建好，
+    # 避免用户切完目录第一次下载才发现目录不存在
+    os.makedirs(chosen, exist_ok=True)
+    settings.download_dir = chosen
+    _persist_env("DOWNLOAD_DIR", chosen)
+    await query.answer("✅ 已切换（不影响已下载文件的位置）")
     await _show_settings(query, aria2)
 
 

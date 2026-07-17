@@ -56,6 +56,8 @@ async def main():
 
     dp["aria2"] = aria2
     dp["repo"] = repo
+    # 设置菜单里"立即清理一次"需要直接调用 task_manager.run_cleanup_once()
+    dp["task_manager"] = task_manager
 
     await bot.set_my_commands(BOT_COMMANDS)
     await task_manager.reconcile_on_startup()

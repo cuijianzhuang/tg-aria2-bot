@@ -16,10 +16,15 @@ class Settings(BaseSettings):
     # DB-added users, and never to "everyone" when the whitelist is off entirely.
     admin_user_ids: str = ""
     download_dir: str = "/downloads"
+    # 逗号分隔的备选下载目录，配合设置菜单里的"下载目录"切换使用；当前 download_dir
+    # 始终排在选项第一位，这里只补充其它可选目录
+    download_dir_presets: str = ""
     max_file_size: int = 2 * 1024 * 1024 * 1024
     max_concurrent: int = 3
     # 完成/失败时是否补发新消息（编辑已有进度卡片始终进行，编辑本身无推送打扰）
     notify_on_complete: bool = True
+    # 已完成任务记录自动清理：保留天数，0 表示关闭；只删数据库记录，不动磁盘文件
+    auto_cleanup_days: int = 0
     proxy_url: str | None = None
 
     db_path: str = "/app/data/tasks.db"
@@ -82,6 +87,17 @@ class Settings(BaseSettings):
         # (both lists empty) has NO admins — admin features stay locked instead
         # of being world-writable.
         return user_id in self.allowed_ids
+
+    @property
+    def download_dir_options(self) -> list[str]:
+        """下载目录切换器里展示的候选目录：当前目录固定排第一（去重），
+        其余来自 DOWNLOAD_DIR_PRESETS。"""
+        options = [self.download_dir]
+        for d in self.download_dir_presets.split(","):
+            d = d.strip()
+            if d and d not in options:
+                options.append(d)
+        return options
 
 
 settings = Settings()

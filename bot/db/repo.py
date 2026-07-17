@@ -99,6 +99,17 @@ class TaskRepo:
         await self._conn.commit()
         return cur.rowcount
 
+    async def delete_old_completed(self, cutoff_iso: str) -> int:
+        """自动清理：删除 finished_at 早于 cutoff_iso 的已完成任务记录。
+        只删数据库记录，磁盘上的文件不受影响。cutoff_iso 与 update_status 里
+        写入的 finished_at 同为 UTC ISO8601，格式一致所以可以直接字符串比较。"""
+        cur = await self._conn.execute(
+            "DELETE FROM tasks WHERE status = 'COMPLETED' AND finished_at IS NOT NULL AND finished_at < ?",
+            (cutoff_iso,),
+        )
+        await self._conn.commit()
+        return cur.rowcount
+
     async def update_gofile_link(self, gid: str, link: str):
         await self._conn.execute("UPDATE tasks SET gofile_link = ? WHERE gid = ?", (link, gid))
         await self._conn.commit()
