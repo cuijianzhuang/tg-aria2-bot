@@ -94,7 +94,11 @@ class Aria2RpcClient:
         断线不在这里重连——一次只跑完一条连接的生命周期，重连策略交给调用方
         （TaskManager 按固定退避重新调用这个方法）。"""
         session = self._get_session()
-        async with session.ws_connect(self._ws_url(), timeout=self._timeout_s) as ws:
+        # 只设关闭握手超时（ws_close），receive 超时留空——这条连接的意义就是
+        # 长期挂着等 aria2 推事件，节点空闲很久没有任务完成/出错时不该被判定
+        # "超时"而掐断。
+        ws_timeout = aiohttp.ClientWSTimeout(ws_close=self._timeout_s)
+        async with session.ws_connect(self._ws_url(), timeout=ws_timeout) as ws:
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     pass
