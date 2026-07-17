@@ -59,5 +59,30 @@ class TestIsAdmin(unittest.TestCase):
         self.assertFalse(settings.is_admin(1))  # 在白名单里但不在管理员里
 
 
+class TestScopeFor(unittest.TestCase):
+    def setUp(self):
+        self._orig_allowed = settings.allowed_user_ids
+        self._orig_admin = settings.admin_user_ids
+
+    def tearDown(self):
+        settings.allowed_user_ids = self._orig_allowed
+        settings.admin_user_ids = self._orig_admin
+
+    def test_admin_sees_all(self):
+        settings.allowed_user_ids = ""
+        settings.admin_user_ids = "1"
+        self.assertIsNone(settings.scope_for(1))
+
+    def test_regular_user_scoped_to_self(self):
+        settings.allowed_user_ids = ""
+        settings.admin_user_ids = "1"
+        self.assertEqual(settings.scope_for(2), 2)
+
+    def test_none_user_id_stays_none(self):
+        settings.allowed_user_ids = ""
+        settings.admin_user_ids = ""
+        self.assertIsNone(settings.scope_for(None))
+
+
 if __name__ == "__main__":
     unittest.main()

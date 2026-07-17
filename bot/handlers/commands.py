@@ -2,6 +2,7 @@ from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
+from bot.config import settings
 from bot.core.cards import render_home
 from bot.core.keyboards import main_inline_keyboard
 from bot.core.list_view import render_search_results, render_task_list
@@ -14,7 +15,8 @@ router = Router(name="commands")
 @router.message(Command("start"))
 @router.message(Command("status"))  # status page merged into the home dashboard
 async def cmd_start(message: Message, repo, nodes):
-    counts = await repo.count_by_status()
+    scope = settings.scope_for(message.from_user.id) if message.from_user else None
+    counts = await repo.count_by_status(user_id=scope)
     # 首页速度取 default 节点，跟 nav:start 保持一致（多节点速度看统计/选择器）
     try:
         stats = await nodes.get("default").global_stat()
@@ -33,7 +35,8 @@ async def cmd_start(message: Message, repo, nodes):
 
 @router.message(Command("list"))
 async def cmd_list(message: Message, repo, nodes):
-    text, markup = await render_task_list(repo, nodes, "ALL", 0)
+    scope = settings.scope_for(message.from_user.id) if message.from_user else None
+    text, markup = await render_task_list(repo, nodes, "ALL", 0, user_id=scope)
     await message.reply(text, reply_markup=markup, parse_mode="HTML")
 
 
@@ -42,13 +45,15 @@ async def cmd_find(message: Message, command: CommandObject, repo, nodes):
     if not command.args:
         await message.reply("用法: /find 关键词（按文件名模糊搜索历史任务）")
         return
-    text, markup = await render_search_results(repo, nodes, command.args.strip())
+    scope = settings.scope_for(message.from_user.id) if message.from_user else None
+    text, markup = await render_search_results(repo, nodes, command.args.strip(), user_id=scope)
     await message.reply(text, reply_markup=markup, parse_mode="HTML")
 
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, repo):
-    text, markup = await render_stats_view(repo, DEFAULT_PERIOD)
+    scope = settings.scope_for(message.from_user.id) if message.from_user else None
+    text, markup = await render_stats_view(repo, DEFAULT_PERIOD, user_id=scope)
     await message.reply(text, reply_markup=markup, parse_mode="HTML")
 
 

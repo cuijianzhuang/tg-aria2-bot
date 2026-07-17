@@ -111,25 +111,39 @@ class TaskRepo:
         await self._conn.commit()
         return cur.rowcount
 
-    async def search_tasks(self, keyword: str, limit: int = 15) -> list[aiosqlite.Row]:
+    async def search_tasks(self, keyword: str, limit: int = 15, *, user_id: int | None = None) -> list[aiosqlite.Row]:
         """按文件名/来源标识模糊搜索，多取 1 条用来在渲染层判断"结果是否被截断"。
-        SQLite 的 LIKE 对 ASCII 字母默认大小写不敏感，中文本身没有大小写问题。"""
+        SQLite 的 LIKE 对 ASCII 字母默认大小写不敏感，中文本身没有大小写问题。
+        user_id=None 搜全部（管理员）；否则只搜这个用户自己发起的任务。"""
         pattern = f"%{keyword}%"
+        where = "WHERE (file_name LIKE ? OR source_ref LIKE ?)"
+        params: list = [pattern, pattern]
+        if user_id is not None:
+            where += " AND user_id = ?"
+            params.append(user_id)
         cur = await self._conn.execute(
-            "SELECT * FROM tasks WHERE file_name LIKE ? OR source_ref LIKE ? "
+            f"SELECT * FROM tasks {where} "
             # created_at 的 SQLite CURRENT_TIMESTAMP 精度只到秒，同一秒内插入
             # 的多条记录 ORDER BY created_at 排序不稳定；id 递增，用它做二级排序键
             "ORDER BY created_at DESC, id DESC LIMIT ?",
-            (pattern, pattern, limit + 1),
+            (*params, limit + 1),
         )
         return await cur.fetchall()
 
-    async def get_period_stats(self, since: str | None) -> dict:
+    async def get_period_stats(self, since: str | None, *, user_id: int | None = None) -> dict:
         """since 为 None 时统计全部时间；否则是 'YYYY-MM-DD HH:MM:SS' 格式的 UTC
         时间戳字符串 —— 必须匹配 SQLite CURRENT_TIMESTAMP 写入 created_at 时用的
-        格式（不能传 ISO8601 的 T 分隔格式，字符串比较会因为格式不同而失真）。"""
-        where = "WHERE created_at >= ?" if since else ""
-        params = (since,) if since else ()
+        格式（不能传 ISO8601 的 T 分隔格式，字符串比较会因为格式不同而失真）。
+        user_id=None 统计全部（管理员）；否则只统计这个用户自己的任务。"""
+        conditions = []
+        params: list = []
+        if since:
+            conditions.append("created_at >= ?")
+            params.append(since)
+        if user_id is not None:
+            conditions.append("user_id = ?")
+            params.append(user_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         cur = await self._conn.execute(
             f"""
             SELECT
@@ -169,26 +183,37 @@ class TaskRepo:
         await self._conn.commit()
 
     async def list_recent(
-        self, limit: int = 10, offset: int = 0, status: str | None = None
+        self, limit: int = 10, offset: int = 0, status: str | None = None, *, user_id: int | None = None
     ) -> list[aiosqlite.Row]:
         # id DESC 作为 created_at（精度到秒）打平的二级排序键，避免同一秒内插入
         # 的多条记录顺序不稳定，翻页时行错位或重复
+        # user_id=None 取全部用户的任务（管理员）；否则只取这个用户自己的
+        conditions = []
+        params: list = []
         if status:
-            cur = await self._conn.execute(
-                "SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
-                (status, limit, offset),
-            )
-        else:
-            cur = await self._conn.execute(
-                "SELECT * FROM tasks ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", (limit, offset)
-            )
+            conditions.append("status = ?")
+            params.append(status)
+        if user_id is not None:
+            conditions.append("user_id = ?")
+            params.append(user_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        cur = await self._conn.execute(
+            f"SELECT * FROM tasks {where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        )
         return await cur.fetchall()
 
-    async def count_tasks(self, status: str | None = None) -> int:
+    async def count_tasks(self, status: str | None = None, *, user_id: int | None = None) -> int:
+        conditions = []
+        params: list = []
         if status:
-            cur = await self._conn.execute("SELECT COUNT(*) AS n FROM tasks WHERE status = ?", (status,))
-        else:
-            cur = await self._conn.execute("SELECT COUNT(*) AS n FROM tasks")
+            conditions.append("status = ?")
+            params.append(status)
+        if user_id is not None:
+            conditions.append("user_id = ?")
+            params.append(user_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        cur = await self._conn.execute(f"SELECT COUNT(*) AS n FROM tasks {where}", params)
         row = await cur.fetchone()
         return row["n"]
 
@@ -206,8 +231,15 @@ class TaskRepo:
             )
         return await cur.fetchall()
 
-    async def count_by_status(self) -> dict[str, int]:
-        cur = await self._conn.execute("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status")
+    async def count_by_status(self, *, user_id: int | None = None) -> dict[str, int]:
+        """user_id=None 统计全部用户（管理员看的主页/列表 tab 计数）；
+        否则只统计这个用户自己的任务。"""
+        if user_id is not None:
+            cur = await self._conn.execute(
+                "SELECT status, COUNT(*) AS n FROM tasks WHERE user_id = ? GROUP BY status", (user_id,)
+            )
+        else:
+            cur = await self._conn.execute("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status")
         rows = await cur.fetchall()
         return {row["status"]: row["n"] for row in rows}
 

@@ -107,5 +107,45 @@ class TestSearchResults(ListViewTestCase):
         self.assertNotIn("<script>", text)
 
 
+class TestUserScoping(ListViewTestCase):
+    async def _seed_owned(self):
+        await self.repo.create_task(
+            gid="mine", user_id=1, chat_id=1, reply_message_id=None,
+            source_type="url", source_ref="mine", file_name="mine.mkv",
+            file_size=10, payload="https://example.com/f.bin",
+        )
+        await self.repo.update_status("mine", "COMPLETED")
+        await self.repo.create_task(
+            gid="theirs", user_id=2, chat_id=1, reply_message_id=None,
+            source_type="url", source_ref="theirs", file_name="theirs.mkv",
+            file_size=10, payload="https://example.com/f.bin",
+        )
+        await self.repo.update_status("theirs", "COMPLETED")
+
+    async def test_render_task_list_scoped_to_owner(self):
+        await self._seed_owned()
+        text, _ = await render_task_list(self.repo, self.nodes, "COMPLETED", 0, user_id=1)
+        self.assertIn("mine.mkv", text)
+        self.assertNotIn("theirs.mkv", text)
+
+    async def test_render_task_list_admin_sees_all(self):
+        await self._seed_owned()
+        text, _ = await render_task_list(self.repo, self.nodes, "COMPLETED", 0, user_id=None)
+        self.assertIn("mine.mkv", text)
+        self.assertIn("theirs.mkv", text)
+
+    async def test_render_search_results_scoped_to_owner(self):
+        await self._seed_owned()
+        text, _ = await render_search_results(self.repo, self.nodes, "mkv", user_id=1)
+        self.assertIn("mine.mkv", text)
+        self.assertNotIn("theirs.mkv", text)
+
+    async def test_render_search_results_admin_sees_all(self):
+        await self._seed_owned()
+        text, _ = await render_search_results(self.repo, self.nodes, "mkv", user_id=None)
+        self.assertIn("mine.mkv", text)
+        self.assertIn("theirs.mkv", text)
+
+
 if __name__ == "__main__":
     unittest.main()

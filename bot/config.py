@@ -93,6 +93,13 @@ class Settings(BaseSettings):
         # of being world-writable.
         return user_id in self.allowed_ids
 
+    def scope_for(self, user_id: int | None) -> int | None:
+        """任务列表/搜索/统计的可见范围：管理员看全部（返回 None，调用方
+        据此不加 user_id 过滤条件），普通用户只看自己的（原样返回 user_id）。"""
+        if user_id is not None and self.is_admin(user_id):
+            return None
+        return user_id
+
     @property
     def download_dir_options(self) -> list[str]:
         """下载目录切换器里展示的候选目录：当前目录固定排第一（去重），
