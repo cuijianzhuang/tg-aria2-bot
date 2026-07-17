@@ -1,0 +1,14 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# 保守起步：明显的 bug 类规则（未定义名/未使用导入/裸 except 等）+ import 排序，
+# 不强行铺开风格类规则（如 E501 行长），避免一次性引入大量与本次改动无关的 diff。
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+    "E501",  # 行长交给 line-length 软限制即可，不强制拆行
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bot"]

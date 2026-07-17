@@ -1,9 +1,9 @@
 import sqlite3
+from datetime import UTC, datetime
 from time import time
 from uuid import uuid4
 
 import aiosqlite
-from datetime import datetime, timezone
 
 from bot.core.pending_tasks import TTL_SECONDS, PendingTask
 from bot.db.models import MIGRATIONS, SCHEMA
@@ -155,7 +155,7 @@ class TaskRepo:
         await self._conn.commit()
 
     async def update_status(self, gid: str, status: str, *, error: str | None = None, save_path: str | None = None):
-        finished_at = datetime.now(timezone.utc).isoformat() if status in ("COMPLETED", "FAILED", "CANCELLED") else None
+        finished_at = datetime.now(UTC).isoformat() if status in ("COMPLETED", "FAILED", "CANCELLED") else None
         await self._conn.execute(
             """
             UPDATE tasks

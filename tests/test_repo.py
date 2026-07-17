@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from bot.db.repo import TaskRepo
 
@@ -75,7 +75,7 @@ class TestAutoCleanup(RepoTestCase):
     async def _finished_days_ago(self, gid: str, days: int, *, source_ref: str):
         await self._create(gid, source_ref=source_ref)
         await self.repo.update_status(gid, "COMPLETED")
-        finished_at = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        finished_at = (datetime.now(UTC) - timedelta(days=days)).isoformat()
         await self.repo._conn.execute(
             "UPDATE tasks SET finished_at = ? WHERE gid = ?", (finished_at, gid)
         )
@@ -84,7 +84,7 @@ class TestAutoCleanup(RepoTestCase):
     async def test_deletes_only_older_than_cutoff(self):
         await self._finished_days_ago("old", 10, source_ref="a")
         await self._finished_days_ago("recent", 1, source_ref="b")
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(days=7)).isoformat()
         deleted = await self.repo.delete_old_completed(cutoff)
         self.assertEqual(deleted, 1)
         self.assertIsNone(await self.repo.get_by_gid("old"))
@@ -92,7 +92,7 @@ class TestAutoCleanup(RepoTestCase):
 
     async def test_never_touches_non_completed(self):
         await self._create("active", source_ref="c")
-        cutoff = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()  # 未来，理论上会清光已完成的
+        cutoff = (datetime.now(UTC) + timedelta(days=1)).isoformat()  # 未来，理论上会清光已完成的
         deleted = await self.repo.delete_old_completed(cutoff)
         self.assertEqual(deleted, 0)
         self.assertIsNotNone(await self.repo.get_by_gid("active"))
@@ -203,7 +203,7 @@ class TestPeriodStats(RepoTestCase):
         await self._create(gid, source_ref=source_ref, file_size=file_size)
         if status != "PENDING":
             await self.repo.update_status(gid, status)
-        created_at = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        created_at = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         await self.repo._conn.execute("UPDATE tasks SET created_at = ? WHERE gid = ?", (created_at, gid))
         await self.repo._conn.commit()
 
@@ -211,7 +211,7 @@ class TestPeriodStats(RepoTestCase):
         await self._created_days_ago("old", 10, status="COMPLETED", file_size=1000, source_ref="a")
         await self._created_days_ago("recent_ok", 1, status="COMPLETED", file_size=500, source_ref="b")
         await self._created_days_ago("recent_fail", 1, status="FAILED", file_size=0, source_ref="c")
-        since = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        since = (datetime.now(UTC) - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
         stats = await self.repo.get_period_stats(since)
         self.assertEqual(stats["total"], 2)
         self.assertEqual(stats["completed"], 1)

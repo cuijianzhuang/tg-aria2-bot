@@ -3,16 +3,16 @@ import logging
 import os
 import shutil
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import FSInputFile
 
 from bot.config import settings
-from bot.core.cards import render_task_card
 from bot.core import gofile
 from bot.core.aria2_client import Aria2Client
+from bot.core.cards import render_task_card
 from bot.core.compress import compress_path, remove_path
 from bot.core.keyboards import task_keyboard
 from bot.db.repo import TaskRepo
@@ -358,7 +358,7 @@ class TaskManager:
         days = settings.auto_cleanup_days
         if days <= 0:
             return 0
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
         deleted = await self._repo.delete_old_completed(cutoff)
         if deleted:
             log.info("auto cleanup removed %d completed task records older than %d days", deleted, days)

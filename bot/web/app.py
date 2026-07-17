@@ -4,7 +4,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response, HTTPException, Depends
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -351,7 +351,7 @@ async def restart_service(body: RestartRequest):
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         _, stderr = await proc.communicate()
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         # docker mode: this container has no systemctl at all (and even if it
         # did, "restart" would need to mean the *other* container, not this
         # process) — nothing to do here except tell the user to do it themselves.
@@ -359,7 +359,7 @@ async def restart_service(body: RestartRequest):
             501,
             "此环境没有 systemctl（大概率是 docker 部署），请手动执行："
             f" docker compose restart {'bot' if body.service == 'bot' else 'aria2'}",
-        )
+        ) from e
 
     if proc.returncode != 0:
         raise HTTPException(500, f"重启失败: {stderr.decode(errors='replace')[:300]}")

@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -48,7 +48,7 @@ class TestRunCleanupOnce(unittest.IsolatedAsyncioTestCase):
             file_size=10, payload="https://example.com/f.bin",
         )
         await self.repo.update_status(gid, "COMPLETED")
-        finished_at = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        finished_at = (datetime.now(UTC) - timedelta(days=days)).isoformat()
         await self.repo._conn.execute(
             "UPDATE tasks SET finished_at = ? WHERE gid = ?", (finished_at, gid)
         )

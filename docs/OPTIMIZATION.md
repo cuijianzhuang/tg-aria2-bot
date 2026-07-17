@@ -174,7 +174,7 @@ aria2p 是同步库，每次调用都要 `to_thread`。aria2 的 JSON-RPC 极简
 | #4 XFF 绕过 | ✅ | 新增 `TRUST_PROXY_HEADERS`，默认不信任 XFF |
 | #5 TLS | ⏳ 未做 | 部署侧动作，建议挂 Caddy/Nginx |
 | #6 配置持久化 | ✅（方案调整） | 未迁移 DB，改为把 `.env` bind mount 进 bot/web 容器，写回即持久 |
-| #7 token 落库 | ⏳ 未做 | 低优先级 |
+| #7 token 落库 | ✅ | `tg_media` 的 payload 改存 Telegram 原始 `file_path`（不含 token），真正的下载 URI 只在 `_add_source` 调用 aria2 那一刻现拼；`url`/`magnet`/`torrent` 本来就不含密钥 |
 | #8 WAL | ✅ | `journal_mode=WAL` + `busy_timeout=5000` + `synchronous=NORMAL` |
 | #9 轮询重构 | ✅ | 单次全量 RPC 匹配 gid；持有 poll/gofile 任务强引用并在 stop 时取消；`_last_edit` 终态清理 |
 | #10 FAILED 误报 | ✅ | gid 丢失时先探测磁盘文件，存在则标 COMPLETED |
@@ -182,11 +182,11 @@ aria2p 是同步库，每次调用都要 `to_thread`。aria2 的 JSON-RPC 极简
 | #12 原子写 | ✅ | temp + `os.replace`，对单文件 bind mount 回退原地写 |
 | #13 429 退避 | ✅ | 最小编辑间隔 3s→10s；捕获 `TelegramRetryAfter` 按 chat 退避 |
 | #14 RPC 超时 | ✅ | aria2p Client timeout=10s |
-| #15 小项 | 部分 | `tell_active`→`get_all_downloads`；`/pause` `/resume` 同步 DB 状态；gofile session 复用未做 |
+| #15 小项 | ✅ | `tell_active`→`get_all_downloads`；`/pause` `/resume` 同步 DB 状态；gofile 模块改用进程级复用的 `aiohttp.ClientSession`（原来每次上传开 3 个新 session），进程退出时 `close_session()` 收尾 |
 | #16 索引 | ✅ | `idx_tasks_status`、`idx_tasks_created` |
 | #17 异步 RPC | ⏳ 未做 | 长期项 |
 | #18 CI | ✅ | 新增 test workflow；deploy 依赖 test job，服务器端补 `pip install` 和 web 重启 |
 | #19 测试补全 | ✅ | 新增 web/auth、conf_editor、TaskRepo 测试（42 个用例） |
-| #20 Docker | 部分 | `.dockerignore` ✅、去掉 compose `version` ✅；非 root 用户未做（会与现有 root 属主的挂载目录冲突，需迁移步骤配合） |
-| #21 依赖升级 | ⏳ 未做 | 建议加 Dependabot |
-| #22 ruff | ⏳ 未做 | 可后续加 |
+| #20 Docker | ✅ | `.dockerignore`、去掉 compose `version`；非 root 用户（UID/GID 1000，跟 aria2 的 PUID/PGID 对齐）——`install.sh` 新装机自动 `chown` 好 bind mount 目录/`.env`，旧部署升级需要手动跑一次 `chown`（README 已写明），未在真实 Docker 环境里跑通全流程（沙箱没有 docker daemon），建议合并后在真实环境验证一次 |
+| #21 依赖升级 | ✅ | 新增 `.github/dependabot.yml`（pip / github-actions / docker，每周检查） |
+| #22 ruff | ✅ | 新增 `pyproject.toml`（E/F/I/B/UP 规则集，行长交给软限制不强拆），修了 42 处历史违规（大多是 `datetime.UTC` 别名、import 排序这类风格问题），CI 新增 `ruff check` 步骤；`ruff format` 的全量重排风格差异太大，未启用 |

@@ -95,6 +95,14 @@ docker compose restart bot
 docker compose down
 ```
 
+**从旧版本升级**：`bot`/`web` 容器现在以非 root 用户（UID/GID 1000，跟 `aria2` 容器的 `PUID`/`PGID` 一致）运行，权限最小化。全新安装（`install.sh`）会自动把 `downloads/`、`data/`、`aria2-config/`、`.env` 的属主设成 1000:1000，不用手动处理；如果是从更早的、容器内以 root 运行的版本升级上来（这几个文件/目录当初是用 root 创建的），容器会因为 `Permission denied` 起不来或设置回写失败，先在宿主机上执行一次：
+
+```bash
+sudo chown -R 1000:1000 downloads data aria2-config .env
+```
+
+（也可以直接重新跑一遍 `sudo ./install.sh --mode docker ...`，脚本本身现在会做这一步。）
+
 ### bare 模式
 
 ```bash
