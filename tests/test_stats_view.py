@@ -41,6 +41,26 @@ class TestRenderStatsView(unittest.IsolatedAsyncioTestCase):
         text, markup = await render_stats_view(self.repo, "0")
         self.assertIn("全部", text)
 
+    async def _create(self, gid: str, user_id: int):
+        await self.repo.create_task(
+            gid=gid, user_id=user_id, chat_id=1, reply_message_id=None,
+            source_type="url", source_ref=gid, file_name=f"{gid}.bin",
+            file_size=10, payload="https://example.com/f.bin",
+        )
+        await self.repo.update_status(gid, "COMPLETED")
+
+    async def test_scoped_to_owner(self):
+        await self._create("g1", user_id=1)
+        await self._create("g2", user_id=2)
+        text, _ = await render_stats_view(self.repo, "0", user_id=1)
+        self.assertIn("新增任务：1", text)
+
+    async def test_admin_sees_all(self):
+        await self._create("g1", user_id=1)
+        await self._create("g2", user_id=2)
+        text, _ = await render_stats_view(self.repo, "0", user_id=None)
+        self.assertIn("新增任务：2", text)
+
 
 if __name__ == "__main__":
     unittest.main()

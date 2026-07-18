@@ -21,7 +21,7 @@ def _period_since(days: str) -> str | None:
     return (datetime.now(UTC) - timedelta(days=n)).strftime("%Y-%m-%d %H:%M:%S")
 
 
-async def render_stats_view(repo, days: str) -> tuple[str, InlineKeyboardMarkup]:
-    stats = await repo.get_period_stats(_period_since(days))
+async def render_stats_view(repo, days: str, *, user_id: int | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    stats = await repo.get_period_stats(_period_since(days), user_id=user_id)
     label = PERIOD_LABELS.get(days, "全部")
     return render_stats(label, stats), stats_period_keyboard(days)

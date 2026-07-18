@@ -86,7 +86,8 @@ async def _current_node_label(query: CallbackQuery, repo, nodes) -> str | None:
 @router.callback_query(F.data == "nav:start")
 @router.callback_query(F.data == "sys:status")  # legacy alias: status page merged into home
 async def nav_start(query: CallbackQuery, repo, nodes):
-    counts = await repo.count_by_status()
+    scope = settings.scope_for(query.from_user.id) if query.from_user else None
+    counts = await repo.count_by_status(user_id=scope)
     # 首页速度取 default 节点（本机）；多节点的分节点速度在节点选择器/统计里看，
     # 首页保持轻量不逐个节点拉 RPC
     try:
@@ -122,7 +123,8 @@ async def node_use(query: CallbackQuery, repo, nodes):
         # 离线节点允许选中（可能马上就恢复了），但提示用户当前状态
         await query.answer(f"⚠️ {node.display_name} 当前离线，任务会在它恢复后才能添加", show_alert=True)
     await repo.set_current_node(query.from_user.id, name)
-    counts = await repo.count_by_status()
+    scope = settings.scope_for(query.from_user.id) if query.from_user else None
+    counts = await repo.count_by_status(user_id=scope)
     try:
         stats = await nodes.get("default").global_stat()
     except Exception:
@@ -374,14 +376,16 @@ async def list_filter(query: CallbackQuery, repo, nodes):
         page = int(parts[2])
     except ValueError:
         page = 0
-    text, markup = await render_task_list(repo, nodes, status_key, page)
+    scope = settings.scope_for(query.from_user.id) if query.from_user else None
+    text, markup = await render_task_list(repo, nodes, status_key, page, user_id=scope)
     await _edit(query, text, reply_markup=markup, parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("stats:"))
 async def show_stats(query: CallbackQuery, repo):
     days = query.data.split(":", 1)[1]
-    text, markup = await render_stats_view(repo, days)
+    scope = settings.scope_for(query.from_user.id) if query.from_user else None
+    text, markup = await render_stats_view(repo, days, user_id=scope)
     await _edit(query, text, reply_markup=markup, parse_mode="HTML")
 
 
@@ -440,7 +444,8 @@ async def handle_pending(query: CallbackQuery, repo, nodes):
 
     if action == "cancel":
         await repo.delete_pending(token)
-        await _edit(query, "已取消添加任务。", reply_markup=main_inline_keyboard(await repo.count_by_status()))
+        scope = settings.scope_for(query.from_user.id) if query.from_user else None
+        await _edit(query, "已取消添加任务。", reply_markup=main_inline_keyboard(await repo.count_by_status(user_id=scope)))
         return
     if action == "nodes":
         # 确认卡片上的临时切换：只改这一条任务的目标节点
@@ -593,9 +598,10 @@ async def _handle_batch_cancel(query: CallbackQuery, repo, *, batch_id: str):
         await query.answer("⛔ 只能操作自己创建的批量任务。", show_alert=True)
         return
     deleted = await repo.delete_pending_batch(batch_id)
+    scope = settings.scope_for(query.from_user.id) if query.from_user else None
     await _edit(
         query, f"已取消批量任务（{deleted} 个）。",
-        reply_markup=main_inline_keyboard(await repo.count_by_status()),
+        reply_markup=main_inline_keyboard(await repo.count_by_status(user_id=scope)),
     )
 
 
@@ -820,7 +826,10 @@ async def bulk_action(query: CallbackQuery, repo, nodes):
                 changed += 1
         except Exception:
             log.exception("bulk task action failed: %s %s", action, gid)
-    text, markup = await render_task_list(repo, nodes, "ACTIVE" if action == "pause" else "PAUSED", 0)
+    scope = settings.scope_for(query.from_user.id) if query.from_user else None
+    text, markup = await render_task_list(
+        repo, nodes, "ACTIVE" if action == "pause" else "PAUSED", 0, user_id=scope
+    )
     await _edit(query, text, answer_text=f"已处理 {changed} 个任务", reply_markup=markup, parse_mode="HTML")
 
 

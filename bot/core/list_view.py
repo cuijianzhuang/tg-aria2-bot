@@ -44,16 +44,19 @@ def _row_node_suffix(nodes, row) -> str:
     return f" · 📍{escape(label)}" if label else ""
 
 
-async def render_task_list(repo, nodes, status_key: str = "ALL", page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+async def render_task_list(
+    repo, nodes, status_key: str = "ALL", page: int = 0, *, user_id: int | None = None
+) -> tuple[str, InlineKeyboardMarkup]:
     """One-page task browser: filter tabs on top (segmented-control style),
-    task rows as buttons, pagination + bulk actions + footer below."""
-    counts = await repo.count_by_status()
+    task rows as buttons, pagination + bulk actions + footer below.
+    user_id=None（管理员）看全部任务；否则只看这个用户自己的。"""
+    counts = await repo.count_by_status(user_id=user_id)
     status = LIST_STATUS_MAP.get(status_key)
     page = max(0, page)
     offset = page * LIST_LIMIT
     # 多取 1 条来判断"是否还有下一页"，避免任务数恰好是 LIST_LIMIT 整数倍时
     # 显示一个空白的下一页（旧逻辑用 len(rows)==LIST_LIMIT 判断，这种情况会误判）
-    fetched = await repo.list_recent(LIST_LIMIT + 1, offset=offset, status=status)
+    fetched = await repo.list_recent(LIST_LIMIT + 1, offset=offset, status=status, user_id=user_id)
     has_next_page = len(fetched) > LIST_LIMIT
     rows = fetched[:LIST_LIMIT]
 
@@ -109,11 +112,14 @@ async def render_task_list(repo, nodes, status_key: str = "ALL", page: int = 0) 
 SEARCH_LIMIT = 15
 
 
-async def render_search_results(repo, nodes, keyword: str) -> tuple[str, InlineKeyboardMarkup]:
+async def render_search_results(
+    repo, nodes, keyword: str, *, user_id: int | None = None
+) -> tuple[str, InlineKeyboardMarkup]:
     """/find 关键词的结果页。不做分页 —— 结果数上限较高（15 条），关键词不够
     精确时提示缩小范围，比再实现一套搜索分页要划算。搜索用的 callback_data
-    没法直接塞中文关键词进去（64 字节很快超），所以干脆不留"下一页"入口。"""
-    fetched = await repo.search_tasks(keyword, limit=SEARCH_LIMIT)
+    没法直接塞中文关键词进去（64 字节很快超），所以干脆不留"下一页"入口。
+    user_id=None（管理员）搜全部；否则只搜这个用户自己的任务。"""
+    fetched = await repo.search_tasks(keyword, limit=SEARCH_LIMIT, user_id=user_id)
     truncated = len(fetched) > SEARCH_LIMIT
     rows = fetched[:SEARCH_LIMIT]
 

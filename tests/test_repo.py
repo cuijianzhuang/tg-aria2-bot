@@ -228,5 +228,46 @@ class TestPeriodStats(RepoTestCase):
         self.assertEqual(stats, {"total": 0, "completed": 0, "failed": 0, "cancelled": 0, "total_bytes": 0})
 
 
+class TestUserScoping(RepoTestCase):
+    """user_id=None（管理员）看全部；否则只看这个用户自己的任务。"""
+
+    async def _two_users_tasks(self):
+        await self._create("g1", user_id=1, source_ref="a", file_name="mine.mkv")
+        await self._create("g2", user_id=2, source_ref="b", file_name="theirs.mkv")
+
+    async def test_list_recent_scoped_to_owner(self):
+        await self._two_users_tasks()
+        rows = await self.repo.list_recent(10, user_id=1)
+        self.assertEqual([r["gid"] for r in rows], ["g1"])
+        rows = await self.repo.list_recent(10, user_id=None)
+        self.assertEqual({r["gid"] for r in rows}, {"g1", "g2"})
+
+    async def test_count_tasks_scoped_to_owner(self):
+        await self._two_users_tasks()
+        self.assertEqual(await self.repo.count_tasks(user_id=1), 1)
+        self.assertEqual(await self.repo.count_tasks(user_id=None), 2)
+
+    async def test_count_by_status_scoped_to_owner(self):
+        await self._two_users_tasks()
+        counts = await self.repo.count_by_status(user_id=1)
+        self.assertEqual(counts, {"PENDING": 1})
+        counts = await self.repo.count_by_status(user_id=None)
+        self.assertEqual(counts, {"PENDING": 2})
+
+    async def test_search_tasks_scoped_to_owner(self):
+        await self._two_users_tasks()
+        results = await self.repo.search_tasks("mkv", user_id=1)
+        self.assertEqual([r["gid"] for r in results], ["g1"])
+        results = await self.repo.search_tasks("mkv", user_id=None)
+        self.assertEqual({r["gid"] for r in results}, {"g1", "g2"})
+
+    async def test_get_period_stats_scoped_to_owner(self):
+        await self._two_users_tasks()
+        stats = await self.repo.get_period_stats(None, user_id=1)
+        self.assertEqual(stats["total"], 1)
+        stats = await self.repo.get_period_stats(None, user_id=None)
+        self.assertEqual(stats["total"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()
