@@ -78,6 +78,10 @@ MIGRATIONS = [
     # 多节点支持：旧行全部归 default 节点（升级前只有这一个节点，语义正确）
     "ALTER TABLE tasks ADD COLUMN node TEXT NOT NULL DEFAULT 'default'",
     "ALTER TABLE pending_tasks ADD COLUMN node TEXT NOT NULL DEFAULT 'default'",
+    # 按用户过滤任务列表/统计上线后的高频查询：WHERE user_id = ? ORDER BY
+    # created_at（列表/搜索）和 WHERE user_id = ? [AND status = ?]（计数/统计）
+    "CREATE INDEX IF NOT EXISTS idx_tasks_user_created ON tasks(user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_user_status ON tasks(user_id, status)",
 ]
 
 # Valid status values, kept here as the single source of truth for the state machine.
