@@ -190,3 +190,12 @@ aria2p 是同步库，每次调用都要 `to_thread`。aria2 的 JSON-RPC 极简
 | #20 Docker | ✅ | `.dockerignore`、去掉 compose `version`；非 root 用户（UID/GID 1000，跟 aria2 的 PUID/PGID 对齐）——`install.sh` 新装机自动 `chown` 好 bind mount 目录/`.env`，旧部署升级需要手动跑一次 `chown`（README 已写明），未在真实 Docker 环境里跑通全流程（沙箱没有 docker daemon），建议合并后在真实环境验证一次 |
 | #21 依赖升级 | ✅ | 新增 `.github/dependabot.yml`（pip / github-actions / docker，每周检查） |
 | #22 ruff | ✅ | 新增 `pyproject.toml`（E/F/I/B/UP 规则集，行长交给软限制不强拆），修了 42 处历史违规（大多是 `datetime.UTC` 别名、import 排序这类风格问题），CI 新增 `ruff check` 步骤；`ruff format` 的全量重排风格差异太大，未启用 |
+
+## 实施记录（2026-07-27，本分支）
+
+在按用户过滤任务列表/统计（`user_id` 可见范围隔离）上线后追加的两处收尾：
+
+| 项 | 状态 | 说明 |
+|----|------|------|
+| #16 索引补充 | ✅ | 新增 `idx_tasks_user_created(user_id, created_at DESC)`、`idx_tasks_user_status(user_id, status)`，覆盖按用户过滤后的列表/搜索排序查询和计数/统计查询；原有 `idx_tasks_status`/`idx_tasks_created` 继续覆盖管理员的全量查询 |
+| `Aria2Client.remove` 冗余往返 | ✅ | 原来无论 `files` 参数是否为真都会先 `tellStatus` 拿一次 dir/files，只有 `files=True` 且是本地节点才用得上；改成只在真需要删文件时才发这次 RPC，顺带修了一个小回归：之前对一个已经不存在的 gid 调用 `remove(gid, files=False)`（比如取消已被外部清理的任务）会被这次多余的 `tellStatus` 提前抛错，现在会正常走到 `forceRemove`/`removeDownloadResult` 的兜底逻辑 |

@@ -201,6 +201,13 @@ class TestRemove(Aria2ClientRpcTestCase):
         self.assertIn("forceRemove", called_methods)
         self.assertNotIn("removeDownloadResult", called_methods)
 
+    async def test_skips_tell_status_when_not_deleting_files(self):
+        client, mock_call = self._client_with_mock_rpc()
+        mock_call.side_effect = lambda method, *params: "OK"
+        await client.remove("g1", files=False)
+        called_methods = [c.args[0] for c in mock_call.await_args_list]
+        self.assertNotIn("tellStatus", called_methods)
+
     async def test_terminal_download_falls_back_to_remove_download_result(self):
         from bot.core.aria2_rpc import Aria2RpcError
 
