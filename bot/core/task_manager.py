@@ -39,6 +39,11 @@ TG_MAX_SEND_BYTES = 2 * 1000 * 1024 * 1024
 # 重复刷屏；只有回升到阈值以上再次跌破时才会重新计时。
 DISK_ALERT_COOLDOWN_SECONDS = 6 * 3600
 
+# 节点连续不可达超过这个时长才告警一次（见 docs/MULTI_NODE_DESIGN.md §七）；
+# 5 秒轮询本身就会偶尔因为网络抖动/aria2 重启瞬间连不上，10 分钟的门槛过滤掉
+# 这类瞬时抖动，只对真正掉线的节点报警。
+NODE_OFFLINE_ALERT_SECONDS = 10 * 60
+
 
 class TaskManager:
     """Polls every enabled aria2 node for in-flight tasks and throttles Telegram progress edits."""
@@ -55,6 +60,11 @@ class TaskManager:
         # time.monotonic() 的起点是系统/容器启动时刻，刚启动时它本身就可能小于
         # 冷却时长，会导致 `now - 0.0 < COOLDOWN` 恒为真，把第一次告警也吞掉。
         self._last_disk_alert: float | None = None
+        # 节点离线告警：node name -> 首次探测到不可达的 monotonic 时间戳；
+        # 已经告警过的节点进这个集合，恢复后清掉，跟磁盘告警同一套"跌破一次
+        # 提醒、冷却期内不重复、恢复后重置"的语义
+        self._node_unhealthy_since: dict[str, float] = {}
+        self._node_alerted: set[str] = set()
         # Strong refs to fire-and-forget pipeline tasks: the event loop only
         # keeps weak references, so an unreferenced task can be GC'd mid-flight.
         self._bg_tasks: set[asyncio.Task] = set()
@@ -190,29 +200,62 @@ class TaskManager:
                 log.warning("failed to send disk alert to user %s", uid)
 
     async def _poll_once(self):
-        # 逐节点轮询，错误隔离：一个节点断线只跳过它自己，不影响其它节点，
-        # 更不能把它的任务标 FAILED（节点不可达 ≠ 任务丢失）
-        for node in self._nodes.enabled_nodes():
-            try:
-                downloads = {d.gid: d for d in await self._nodes.get(node.name).get_all_downloads()}
-            except Exception:
-                if self._nodes.is_healthy(node.name):
-                    # 只在 在线→离线 的边沿记一条日志，避免每 5 秒刷一次
-                    log.warning("node %s unreachable, skipping this poll round", node.name)
-                self._nodes.mark_health(node.name, False)
-                continue
-            self._nodes.mark_health(node.name, True)
+        # 逐节点轮询并发展开：每次 RPC 调用都有 10s 超时兜底（aria2_rpc.py），
+        # 但串行 for 循环仍然会让排在后面的健康节点等前一个卡住的节点等满这
+        # 10 秒——节点一多，一个离线节点就拖累了整轮轮询的延迟。改成 gather
+        # 后每个节点互不阻塞；return_exceptions=True 确保一个节点内部的
+        # 非预期异常（不是 RPC 层已经处理的连接失败）也不会打断其它节点。
+        nodes = self._nodes.enabled_nodes()
+        results = await asyncio.gather(*(self._poll_node(node) for node in nodes), return_exceptions=True)
+        for node, result in zip(nodes, results, strict=True):
+            if isinstance(result, Exception):
+                log.exception("poll failed for node %s", node.name, exc_info=result)
 
-            rows = await self._repo.get_unfinished(node=node.name)
-            for row in rows:
-                gid = row["gid"]
-                if not gid:
-                    continue
-                download = downloads.get(gid)
-                if download is None:
-                    await self._mark_lost(row, gid, is_local=node.is_local)
-                    continue
-                await self._handle_download_state(row, download, node_is_local=node.is_local)
+    async def _poll_node(self, node):
+        # 一个节点断线只跳过它自己，不影响其它节点，更不能把它的任务标
+        # FAILED（节点不可达 ≠ 任务丢失）
+        try:
+            downloads = {d.gid: d for d in await self._nodes.get(node.name).get_all_downloads()}
+        except Exception:
+            await self._handle_node_health(node, False)
+            return
+        await self._handle_node_health(node, True)
+
+        rows = await self._repo.get_unfinished(node=node.name)
+        for row in rows:
+            gid = row["gid"]
+            if not gid:
+                continue
+            download = downloads.get(gid)
+            if download is None:
+                await self._mark_lost(row, gid, is_local=node.is_local)
+                continue
+            await self._handle_download_state(row, download, node_is_local=node.is_local)
+
+    async def _handle_node_health(self, node, ok: bool):
+        """更新健康缓存 + 离线超过 NODE_OFFLINE_ALERT_SECONDS 才告警一次。"""
+        was_healthy = self._nodes.is_healthy(node.name)
+        self._nodes.mark_health(node.name, ok)
+        if ok:
+            self._node_unhealthy_since.pop(node.name, None)
+            self._node_alerted.discard(node.name)
+            return
+        if was_healthy:
+            # 只在 在线→离线 的边沿记一条日志，避免每 5 秒刷一次
+            log.warning("node %s unreachable, skipping this poll round", node.name)
+        # dict.setdefault 的默认值参数无论 key 是否已存在都会先求值，不能直接
+        # 塞 time.monotonic() 进去（那样每次调用都会多耗一次时间戳，且第二次
+        # 调用起 since 会被错误地重新赋成"当前时间"）——先取一次时间戳存局部变量复用
+        now = time.monotonic()
+        since = self._node_unhealthy_since.setdefault(node.name, now)
+        if node.name in self._node_alerted:
+            return  # 已经告警过，冷却到恢复为止，不重复刷屏
+        if now - since >= NODE_OFFLINE_ALERT_SECONDS:
+            self._node_alerted.add(node.name)
+            await self._notify_admins(
+                f"🔴 <b>节点离线告警</b>\n节点「{node.display_name}」已连续 "
+                f"{NODE_OFFLINE_ALERT_SECONDS // 60} 分钟无法访问，请检查该节点的 aria2 服务。"
+            )
 
     async def _mark_lost(self, row, gid: str, *, is_local: bool = True):
         """aria2 no longer knows this gid. Usually a real loss (restart without a
@@ -482,7 +525,7 @@ class TaskManager:
                 # 启动时节点连不上：不动它的任务（可能只是还没起来），交给
                 # 轮询循环后续处理
                 log.warning("node %s unreachable during startup reconcile, leaving its tasks as-is", node.name)
-                self._nodes.mark_health(node.name, False)
+                await self._handle_node_health(node, False)
                 continue
             for row in rows:
                 gid = row["gid"]

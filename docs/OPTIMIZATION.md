@@ -181,7 +181,7 @@ aria2p 是同步库，每次调用都要 `to_thread`。aria2 的 JSON-RPC 极简
 | #11 双击竞态 | ✅ | `pop_pending` 原子化（DELETE..RETURNING，含降级路径），失败可 `restore_pending` |
 | #12 原子写 | ✅ | temp + `os.replace`，对单文件 bind mount 回退原地写 |
 | #13 429 退避 | ✅ | 最小编辑间隔 3s→10s；捕获 `TelegramRetryAfter` 按 chat 退避 |
-| #14 RPC 超时 | ✅ | aria2p Client timeout=10s |
+| #14 RPC 超时 | ✅（后续随 #17 重写为原生异步后更新，见 2026-07-27 记录） | 当时是 aria2p Client timeout=10s；`aria2_rpc.py` 重写后改成 `aiohttp.ClientTimeout(total=10)`，同一超时兜底 |
 | #15 小项 | ✅ | `tell_active`→`get_all_downloads`；`/pause` `/resume` 同步 DB 状态；gofile 模块改用进程级复用的 `aiohttp.ClientSession`（原来每次上传开 3 个新 session），进程退出时 `close_session()` 收尾 |
 | #16 索引 | ✅ | `idx_tasks_status`、`idx_tasks_created` |
 | #17 异步 RPC | ✅ | 新增 `bot/core/aria2_rpc.py`（纯 aiohttp JSON-RPC + WebSocket 事件订阅），`aria2_client.py` 全部重写为原生异步（不再是 aria2p+to_thread），移除 aria2p 依赖；TaskManager 每个节点常驻一条 WS 连接，收到 onDownloadComplete/onBtDownloadComplete/onDownloadError 立即处理那个 gid，5 秒轮询降级为兜底而非唯一路径；顺带修了一个真实 bug：`remove(files=True)` 在远程节点上不再误删 bot 本机同名路径的文件 |
@@ -190,3 +190,14 @@ aria2p 是同步库，每次调用都要 `to_thread`。aria2 的 JSON-RPC 极简
 | #20 Docker | ✅ | `.dockerignore`、去掉 compose `version`；非 root 用户（UID/GID 1000，跟 aria2 的 PUID/PGID 对齐）——`install.sh` 新装机自动 `chown` 好 bind mount 目录/`.env`，旧部署升级需要手动跑一次 `chown`（README 已写明），未在真实 Docker 环境里跑通全流程（沙箱没有 docker daemon），建议合并后在真实环境验证一次 |
 | #21 依赖升级 | ✅ | 新增 `.github/dependabot.yml`（pip / github-actions / docker，每周检查） |
 | #22 ruff | ✅ | 新增 `pyproject.toml`（E/F/I/B/UP 规则集，行长交给软限制不强拆），修了 42 处历史违规（大多是 `datetime.UTC` 别名、import 排序这类风格问题），CI 新增 `ruff check` 步骤；`ruff format` 的全量重排风格差异太大，未启用 |
+
+## 实施记录（2026-07-27，本分支）
+
+在按用户过滤任务列表/统计（`user_id` 可见范围隔离）上线后追加的两处收尾：
+
+| 项 | 状态 | 说明 |
+|----|------|------|
+| #16 索引补充 | ✅ | 新增 `idx_tasks_user_created(user_id, created_at DESC)`、`idx_tasks_user_status(user_id, status)`，覆盖按用户过滤后的列表/搜索排序查询和计数/统计查询；原有 `idx_tasks_status`/`idx_tasks_created` 继续覆盖管理员的全量查询 |
+| `Aria2Client.remove` 冗余往返 | ✅ | 原来无论 `files` 参数是否为真都会先 `tellStatus` 拿一次 dir/files，只有 `files=True` 且是本地节点才用得上；改成只在真需要删文件时才发这次 RPC，顺带修了一个小回归：之前对一个已经不存在的 gid 调用 `remove(gid, files=False)`（比如取消已被外部清理的任务）会被这次多余的 `tellStatus` 提前抛错，现在会正常走到 `forceRemove`/`removeDownloadResult` 的兜底逻辑 |
+| #14 补充：轮询串行拖慢 | ✅ | `_poll_once` 原来是逐节点 `for` 循环——单次 RPC 有 10s 超时兜底没错，但串行意味着一个卡住的节点会让排在它后面的健康节点也多等最多 10s，节点越多越明显；改成 `asyncio.gather` 并发展开各节点，同时 `return_exceptions=True` 顺带修了另一个问题：某节点处理某个任务行时抛出非 RPC 层异常，以前会打断当轮循环里排在它后面的其它节点，现在互不影响 |
+| 节点离线告警 | ✅ | `TaskManager._handle_node_health`：节点连续不可达超过 10 分钟（`NODE_OFFLINE_ALERT_SECONDS`）才告警一次管理员，跟磁盘告警同一套冷却/重置语义；见 `docs/MULTI_NODE_DESIGN.md` §七 |

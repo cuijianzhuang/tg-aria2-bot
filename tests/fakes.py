@@ -45,6 +45,9 @@ class FakeAria2:
             raise KeyError(f"unknown gid: {gid}")
         return self.statuses[gid]
 
+    async def get_all_downloads(self):
+        return list(self.statuses.values())
+
     async def remove(self, gid, *, files=False, is_local=True):
         self.removed.append((gid, files, is_local))
 

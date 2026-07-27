@@ -205,6 +205,125 @@ class TestDiskAlert(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.sent_messages, [])
 
 
+class TestNodeOfflineAlert(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.bot = FakeBot()
+        self.nodes = FakeNodePool()
+        self.tm = TaskManager(bot=self.bot, nodes=self.nodes, repo=None)
+        self.node = self.nodes.get_node("default")
+        self._orig_admin = settings.admin_user_ids
+        self._orig_allowed = settings.allowed_user_ids
+        settings.admin_user_ids = "111"
+        settings.allowed_user_ids = ""
+
+    async def asyncTearDown(self):
+        settings.admin_user_ids = self._orig_admin
+        settings.allowed_user_ids = self._orig_allowed
+
+    async def test_no_alert_before_threshold(self):
+        with patch("bot.core.task_manager.time.monotonic", side_effect=[0.0, 100.0]):
+            await self.tm._handle_node_health(self.node, False)
+            await self.tm._handle_node_health(self.node, False)
+        self.assertEqual(self.bot.sent_messages, [])
+        self.assertFalse(self.nodes.is_healthy("default"))
+
+    async def test_alerts_after_sustained_outage(self):
+        # _handle_node_health(..., False) 每次调用只取一次 time.monotonic()
+        # （见实现里的注释：setdefault 的默认值参数会无条件求值，所以要先存
+        # 局部变量复用，不能直接调两次）——每个 False 调用对应一个时间戳
+        with patch("bot.core.task_manager.time.monotonic", side_effect=[0.0, 601.0]):
+            await self.tm._handle_node_health(self.node, False)
+            await self.tm._handle_node_health(self.node, False)
+        self.assertEqual(len(self.bot.sent_messages), 1)
+        chat_id, text = self.bot.sent_messages[0]
+        self.assertEqual(chat_id, 111)
+        self.assertIn("节点离线告警", text)
+
+    async def test_no_repeat_alert_while_still_down(self):
+        with patch("bot.core.task_manager.time.monotonic", side_effect=[0.0, 601.0, 900.0]):
+            await self.tm._handle_node_health(self.node, False)
+            await self.tm._handle_node_health(self.node, False)  # 触发告警
+            await self.tm._handle_node_health(self.node, False)  # 仍然离线，不重复
+        self.assertEqual(len(self.bot.sent_messages), 1)
+
+    async def test_realerts_after_recovery(self):
+        with patch(
+            "bot.core.task_manager.time.monotonic",
+            side_effect=[1000.0, 1601.0, 2000.0, 2601.0],
+        ):
+            await self.tm._handle_node_health(self.node, False)
+            await self.tm._handle_node_health(self.node, False)  # 第一次告警
+            await self.tm._handle_node_health(self.node, True)   # 恢复，重置状态（不耗时间戳）
+            await self.tm._handle_node_health(self.node, False)
+            await self.tm._handle_node_health(self.node, False)  # 再次跌破满 10 分钟，重新告警
+        self.assertEqual(len(self.bot.sent_messages), 2)
+
+    async def test_recovery_clears_unhealthy_state_without_notifying(self):
+        with patch("bot.core.task_manager.time.monotonic", side_effect=[0.0, 100.0]):
+            await self.tm._handle_node_health(self.node, False)
+            await self.tm._handle_node_health(self.node, True)
+        self.assertEqual(self.bot.sent_messages, [])
+        self.assertTrue(self.nodes.is_healthy("default"))
+        self.assertNotIn("default", self.tm._node_unhealthy_since)
+
+
+class TestPollOnceIsolation(unittest.IsolatedAsyncioTestCase):
+    """_poll_once 现在并发展开各节点（见 task_manager.py 里的改动说明）：
+    一个节点在处理某个任务行时抛出意料之外的异常，不该连带打断同一轮里
+    其它节点的处理——旧的串行 for 循环版本会。"""
+
+    async def asyncSetUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = TaskRepo(os.path.join(self._dir.name, "t.db"))
+        await self.repo.connect()
+        remote = Node(
+            name="remote", rpc_url="http://remote:6800/jsonrpc", secret="s",
+            download_dir="/dl", is_local=False,
+        )
+        self.pool = FakeNodePool(extra_nodes=[remote])
+        self.bot = FakeBot()
+        self.tm = TaskManager(bot=self.bot, nodes=self.pool, repo=self.repo)
+
+    async def asyncTearDown(self):
+        await self.repo.close()
+        self._dir.cleanup()
+
+    async def _create_row(self, gid: str, *, node: str):
+        await self.repo.create_task(
+            gid=gid, user_id=1, chat_id=1, reply_message_id=None,
+            source_type="url", source_ref=gid, file_name="f.bin",
+            file_size=10, payload="https://example.com/f.bin", node=node,
+        )
+        await self.repo.update_status(gid, "ACTIVE")
+
+    @staticmethod
+    def _download(gid: str) -> Download:
+        return Download(
+            gid=gid, status="active", total_length=10, completed_length=1,
+            download_speed=1, upload_speed=0, connections=1, error_message=None,
+            dir=Path("/dl"), files=[],
+        )
+
+    async def test_one_node_exception_does_not_block_other_nodes(self):
+        await self._create_row("bad", node="default")
+        await self._create_row("good", node="remote")
+        self.pool.get("default").statuses["bad"] = self._download("bad")
+        self.pool.get("remote").statuses["good"] = self._download("good")
+
+        processed = []
+
+        async def flaky(row, download, *, node_is_local=True):
+            if row["gid"] == "bad":
+                raise RuntimeError("boom")
+            processed.append(row["gid"])
+
+        self.tm._handle_download_state = flaky
+        await self.tm._poll_once()  # 不应该抛出去，也不该漏掉 remote 节点
+
+        # remote 节点没有因为 default 节点抛异常而被跳过
+        self.assertEqual(processed, ["good"])
+
+
 class TestWebSocketEvents(unittest.IsolatedAsyncioTestCase):
     """WS 推送让 TaskManager 不用等 5 秒轮询就能处理下载完成/出错——测试
     覆盖事件路由（gid/节点匹配）和监听任务的动态增减，不测真实网络连接

@@ -226,7 +226,9 @@ class Aria2Client:
         错的（会尝试删 bot 机器上偶然同名的路径），所以这里显式按节点归属
         禁用，而不是延续这个潜在的误删风险。
         """
-        status = await self.get_status(gid)
+        # 只有真要删文件时才需要先取 files/dir；不删文件的取消路径没必要
+        # 多打这一次 tellStatus
+        status = await self.get_status(gid) if files and is_local else None
         try:
             await self._rpc.call("forceRemove", gid)
         except Aria2RpcError:
@@ -237,7 +239,7 @@ class Aria2Client:
             except Aria2RpcError:
                 pass  # 两个都失败：gid 已经彻底不存在了，没什么好清的
 
-        if files and is_local:
+        if status is not None:
             for path in _root_paths(status.files, status.dir):
                 await asyncio.to_thread(remove_path, str(path))
 
