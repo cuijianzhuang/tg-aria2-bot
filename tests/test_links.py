@@ -29,6 +29,22 @@ class TestExtractLinks(unittest.TestCase):
     def test_no_links_returns_empty(self):
         self.assertEqual(_extract_links("just chatting, no links here"), [])
 
+    def test_bare_infohash_converted_to_magnet(self):
+        text = "570AB003E4A8B22017DDE562DD2B694349C26645"
+        self.assertEqual(
+            _extract_links(text),
+            [("magnet", "magnet:?xt=urn:btih:570AB003E4A8B22017DDE562DD2B694349C26645")],
+        )
+
+    def test_lowercase_infohash_also_matches(self):
+        text = "570ab003e4a8b22017dde562dd2b694349c26645"
+        self.assertEqual(len(_extract_links(text)), 1)
+        self.assertEqual(_extract_links(text)[0][0], "magnet")
+
+    def test_wrong_length_hash_is_not_treated_as_infohash(self):
+        self.assertEqual(_extract_links("570AB003E4A8B22017DDE562DD2B694349C266"), [])
+        self.assertEqual(_extract_links("570AB003E4A8B22017DDE562DD2B694349C266450"), [])
+
 
 class TestIsMultiLinkMessage(unittest.TestCase):
     def _msg(self, text):
@@ -41,6 +57,13 @@ class TestIsMultiLinkMessage(unittest.TestCase):
     def test_single_link_is_not_batch(self):
         # 单条链接交给上面精确匹配的单行 handler，不进批量流程
         self.assertFalse(_is_multi_link_message(self._msg("https://example.com/a.zip")))
+
+    def test_single_infohash_is_not_batch(self):
+        self.assertFalse(_is_multi_link_message(self._msg("570AB003E4A8B22017DDE562DD2B694349C26645")))
+
+    def test_url_and_infohash_together_is_batch(self):
+        text = "https://example.com/a.zip\n570AB003E4A8B22017DDE562DD2B694349C26645"
+        self.assertTrue(_is_multi_link_message(self._msg(text)))
 
     def test_plain_text_is_not_batch(self):
         self.assertFalse(_is_multi_link_message(self._msg("你好，在吗？")))
