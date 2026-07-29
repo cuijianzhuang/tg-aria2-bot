@@ -69,6 +69,11 @@ class Download:
     dir: Path
     files: list[File] = field(default_factory=list)
     _bittorrent_name: str | None = None
+    # 磁力/裸 infohash 任务会先单独跑一次"元数据下载"（几十 KB 的种子信息），
+    # 抓完就把这个 gid 标 complete，然后 aria2 自动另起一个新 gid 去下载真正
+    # 的文件内容——tellStatus 用 followedBy 关联这两个 gid。不是元数据阶段时
+    # 这个字段是空的。
+    followed_by: list[str] = field(default_factory=list)
 
     @classmethod
     def from_struct(cls, struct: dict) -> Download:
@@ -85,6 +90,7 @@ class Download:
             error_message=struct.get("errorMessage") or None,
             dir=Path(struct.get("dir", "")),
             files=[File.from_struct(f) for f in struct.get("files", [])],
+            followed_by=list(struct.get("followedBy") or []),
             _bittorrent_name=bt_info.get("name") or None,
         )
 
