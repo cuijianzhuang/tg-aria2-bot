@@ -497,5 +497,63 @@ class TestTerminalDeduplication(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("g1", self.tm._terminal_in_flight)
 
 
+class TestMagnetMetadataFollow(unittest.IsolatedAsyncioTestCase):
+    """磁力/裸 infohash 任务的元数据下载阶段 complete 时带 followedBy——
+    不能当成真正完成（旧 bug：会误触发 gofile/发送 TG，且真正的文件内容
+    下载完全没人跟踪，见用户反馈"下载完后没有继续下载文件"）。"""
+
+    async def asyncSetUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = TaskRepo(os.path.join(self._dir.name, "t.db"))
+        await self.repo.connect()
+        self.bot = FakeBot()
+        self.tm = TaskManager(bot=self.bot, nodes=FakeNodePool(), repo=self.repo)
+        self.task_id = await self.repo.create_task(
+            gid="meta-gid", user_id=1, chat_id=1, reply_message_id=None,
+            source_type="magnet", source_ref="m1", file_name="磁力链接任务",
+            file_size=None, payload="magnet:?xt=urn:btih:abc",
+        )
+        await self.repo.update_status("meta-gid", "ACTIVE")
+
+    async def asyncTearDown(self):
+        await self.repo.close()
+        self._dir.cleanup()
+
+    @staticmethod
+    def _metadata_download(followed_by: list[str]) -> Download:
+        return Download(
+            gid="meta-gid", status="complete", total_length=24000, completed_length=24000,
+            download_speed=0, upload_speed=0, connections=0, error_message=None,
+            dir=Path("/dl"), files=[], followed_by=followed_by,
+        )
+
+    async def test_metadata_completion_follows_to_new_gid_instead_of_finishing(self):
+        row = dict(await self.repo.get_by_gid("meta-gid"))
+        await self.tm._handle_download_state(row, self._metadata_download(["real-gid"]), node_is_local=True)
+
+        # gid 接到了真正的内容下载上，状态打回 PENDING（不是 COMPLETED），
+        # 交给下一轮轮询/WS 继续追踪
+        updated = await self.repo.get_by_gid("real-gid")
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated["status"], "PENDING")
+        self.assertIsNone(await self.repo.get_by_gid("meta-gid"))
+
+    async def test_metadata_completion_does_not_trigger_notify_or_gofile(self):
+        row = dict(await self.repo.get_by_gid("meta-gid"))
+        await self.tm._handle_download_state(row, self._metadata_download(["real-gid"]), node_is_local=True)
+        # 元数据阶段不该推送"下载完成"消息——那是留给真正内容下载完成时的
+        self.assertEqual(self.bot.sent_messages, [])
+
+    async def test_real_completion_without_followed_by_finishes_normally(self):
+        row = dict(await self.repo.get_by_gid("meta-gid"))
+        real = Download(
+            gid="meta-gid", status="complete", total_length=10, completed_length=10,
+            download_speed=0, upload_speed=0, connections=0, error_message=None,
+            dir=Path("/dl"), files=[], followed_by=[],
+        )
+        await self.tm._handle_download_state(row, real, node_is_local=True)
+        self.assertEqual((await self.repo.get_by_gid("meta-gid"))["status"], "COMPLETED")
+
+
 if __name__ == "__main__":
     unittest.main()

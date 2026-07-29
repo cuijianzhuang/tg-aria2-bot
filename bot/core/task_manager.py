@@ -306,7 +306,10 @@ class TaskManager:
                 if current is None or current["status"] not in ("PENDING", "ACTIVE", "PAUSED"):
                     return
                 if status == "COMPLETE":
-                    await self._handle_complete(row, download, node_is_local=node_is_local)
+                    if download.followed_by:
+                        await self._handle_metadata_resolved(row, download)
+                    else:
+                        await self._handle_complete(row, download, node_is_local=node_is_local)
                 else:
                     await self._handle_error(row, download)
             finally:
@@ -321,6 +324,18 @@ class TaskManager:
                     await self._update_keyboard(row, gid, mapped)
             if status == "ACTIVE":
                 await self._maybe_report_progress(row, download)
+
+    async def _handle_metadata_resolved(self, row, download):
+        """磁力/裸 infohash 任务的"元数据下载"阶段结束——这个 gid 抓到的只是
+        种子信息本身（几十 KB），不是真正要下载的内容。aria2 已经自动另起
+        了 download.followed_by[0] 这个新 gid 去下载真正的文件，这里把任务
+        接到新 gid 上、状态打回 PENDING，交给下一轮轮询/WS 事件接着追踪；
+        不触发 gofile/发送 TG 那一套（那是留给真正内容下载完成时的）。"""
+        gid = row["gid"]
+        new_gid = download.followed_by[0]
+        log.info("gid %s finished metadata download, following to %s", gid, new_gid)
+        await self._repo.retry_task(row["id"], new_gid)
+        self._last_edit.pop(gid, None)
 
     async def _handle_complete(self, row, download, *, node_is_local: bool):
         gid = row["gid"]
