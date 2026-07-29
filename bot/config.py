@@ -66,8 +66,15 @@ class Settings(BaseSettings):
     # `docker compose restart bot`/`aria2` manually instead). The client only ever
     # sends the literal string "bot" or "aria2", never a raw unit name, so this
     # mapping is what keeps the restart endpoint from executing arbitrary input.
+    #
+    # aria2_service_name 默认值必须匹配 scripts/install_bare.sh 实际装的那个
+    # unit —— 它是 `systemctl enable --now aria2`（aria2.sh 自己起的名字），
+    # 不是这个项目自己的 tg-aria2-bot-* 命名习惯。之前默认值写成
+    # "tg-aria2-bot-aria2"，裸机部署下这个 unit 根本不存在，"🔄 重启 aria2"
+    # 按钮开箱即用就会失败（docker 模式本来就没有 systemctl，这个按钮天生
+    # 不可用，不受这个默认值影响）。
     bot_service_name: str = "tg-aria2-bot"
-    aria2_service_name: str = "tg-aria2-bot-aria2"
+    aria2_service_name: str = "aria2"
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
