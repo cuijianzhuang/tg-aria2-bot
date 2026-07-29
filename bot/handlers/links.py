@@ -17,6 +17,10 @@ router = Router(name="links")
 
 URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
 MAGNET_RE = re.compile(r"^magnet:\?xt=urn:btih:\S+$", re.IGNORECASE)
+# 裸 BT infohash（种子站常见的复制粘贴格式，没有 magnet: 前缀）：40 位十六进制。
+# 只认这一种格式——BEP3 也允许 32 位 base32，但那跟普通随机字符串太像，
+# 误判风险不值得，用户真要用 base32 hash 自己拼成完整 magnet 链接即可。
+INFOHASH_RE = re.compile(r"^[a-fA-F0-9]{40}$")
 
 # 一条消息最多同时处理这么多条链接，超出的部分提示用户分批发送，避免一条
 # 消息就把待确认队列灌满
@@ -107,9 +111,7 @@ async def handle_url(message: Message, repo, nodes):
     )
 
 
-@router.message(F.text.regexp(MAGNET_RE.pattern))
-async def handle_magnet(message: Message, repo, nodes):
-    magnet = message.text.strip()
+async def _handle_single_magnet(message: Message, repo, nodes, magnet: str):
     existing = await repo.get_completed_by_source("magnet", storage.url_hash(magnet))
     if existing:
         await message.reply(
@@ -130,6 +132,17 @@ async def handle_magnet(message: Message, repo, nodes):
     )
 
 
+@router.message(F.text.regexp(MAGNET_RE.pattern))
+async def handle_magnet(message: Message, repo, nodes):
+    await _handle_single_magnet(message, repo, nodes, message.text.strip())
+
+
+@router.message(F.text.regexp(INFOHASH_RE.pattern))
+async def handle_infohash(message: Message, repo, nodes):
+    magnet = f"magnet:?xt=urn:btih:{message.text.strip()}"
+    await _handle_single_magnet(message, repo, nodes, magnet)
+
+
 def _extract_links(text: str) -> list[tuple[str, str]]:
     """把消息按行拆开，挑出能识别成 url/magnet 的行；顺序无关的其它行
     （空行、说明文字等）直接忽略，不当错误处理。"""
@@ -140,6 +153,8 @@ def _extract_links(text: str) -> list[tuple[str, str]]:
             continue
         if MAGNET_RE.match(line):
             links.append(("magnet", line))
+        elif INFOHASH_RE.match(line):
+            links.append(("magnet", f"magnet:?xt=urn:btih:{line}"))
         elif URL_RE.match(line):
             links.append(("url", line))
     return links

@@ -1,6 +1,6 @@
 # tg-aria2-bot
 
-Telegram 下载机器人：给机器人发送 **HTTP(S) 链接 / 磁力链接 / .torrent 文件 / 转发媒体消息**，
+Telegram 下载机器人：给机器人发送 **HTTP(S) 链接 / 磁力链接 / 裸 BT infohash / .torrent 文件 / 转发媒体消息**，
 由服务器上的 aria2（[P3TERX 完美配置](https://github.com/P3TERX/aria2.conf)）执行下载，
 机器人以卡片形式实时回报进度，并可选压缩上传 GoFile 网盘。附带 Web 管理后台 + AriaNg 面板。
 
@@ -45,7 +45,7 @@ Telegram 下载机器人：给机器人发送 **HTTP(S) 链接 / 磁力链接 / 
 | `/addnode 名称 rpc地址 密钥 [目录]` | 注册额外的 aria2 节点（仅管理员，见下方多节点说明） |
 | `/admin` | `/settings` 的别名（历史遗留） |
 
-发送多行链接（一行一个 URL/磁力）会自动识别成批量任务，生成一张汇总确认卡片，"▶️ 全部开始"一键添加。
+发送多行链接（一行一个 URL/磁力/裸 infohash）会自动识别成批量任务，生成一张汇总确认卡片，"▶️ 全部开始"一键添加。
 
 ## 多节点（一个 bot 控制多个 aria2 实例）
 
