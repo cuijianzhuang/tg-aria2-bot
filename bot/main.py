@@ -12,7 +12,7 @@ from bot.core import gofile
 from bot.core.node_pool import NodePool
 from bot.core.task_manager import TaskManager
 from bot.db.repo import TaskRepo
-from bot.handlers import admin, callbacks, commands, links, media
+from bot.handlers import admin, callbacks, commands, links, media, settings_menu
 from bot.middlewares.auth import AuthMiddleware
 
 BOT_COMMANDS = [
@@ -57,6 +57,7 @@ async def main():
     dp.callback_query.middleware(AuthMiddleware())
     dp.include_router(commands.router)
     dp.include_router(admin.router)
+    dp.include_router(settings_menu.router)
     dp.include_router(callbacks.router)
     dp.include_router(links.router)
     dp.include_router(media.router)

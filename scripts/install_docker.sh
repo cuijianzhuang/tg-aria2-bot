@@ -10,6 +10,9 @@ for arg in "$@"; do
   [[ "$arg" == "--no-web" ]] && NO_WEB=1
 done
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$SCRIPT_DIR"
+
 log()  { printf '\033[1;32m[docker]\033[0m %s\n' "$1"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$1"; }
 
@@ -38,7 +41,6 @@ fi
 # 不重新 build 镜像：直接在宿主机装官方 rclone 静态二进制（已验证纯静态链接、无 glibc
 # 依赖），再只读挂载进 aria2 容器同一路径即可，容器内的 upload.sh 就能直接调用它。
 # 好处：升级 rclone 只需要更新宿主机这一份，不用重新 build 镜像。
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "$WITH_RCLONE" -eq 1 ]]; then
   bash "$SCRIPT_DIR/scripts/install_rclone.sh"
   RCLONE_BIN="$(command -v rclone)"
@@ -56,13 +58,11 @@ else
   rm -f docker-compose.override.yml
 fi
 
-# web/ariang 两个服务标了 profiles: ["web"]，默认 docker compose up 不会启动它们，
-# 只有传 --profile web 才会一起拉起。--no-web 时保持默认（即不启动）。
-PROFILE_FLAG=()
-[[ "$NO_WEB" -eq 0 ]] && PROFILE_FLAG=(--profile web)
-
-log "启动服务 (docker compose up -d)"
-docker compose "${PROFILE_FLAG[@]}" up -d --build
+# web/ariang 两个服务标了 profiles: ["web"]。是否启用由 install.sh 写进 .env 的
+# COMPOSE_PROFILES 决定（docker compose 会自动读取），这样之后手敲的
+# docker compose up/restart/logs 也会带上它们，不用每次记得加 --profile web。
+log "启动服务 (docker compose up -d --build)"
+docker compose up -d --build
 
 log "等待容器就绪..."
 sleep 5
@@ -75,15 +75,22 @@ cat <<EOF
   docker compose logs -f aria2          查看 aria2 / 钩子脚本日志
   docker compose restart bot            重启机器人
   docker compose down                   停止全部服务
+  sudo ./update.sh                      升级到最新版本（自动备份、失败自动回滚）
+  sudo tg-aria2                         交互式管理菜单（状态/日志/重启/改配置/备份恢复）
 
 move.sh / upload.sh 默认未接入任何 aria2 钩子（on-download-complete 只调用 clean.sh），
 不会自动移动或上传文件，无需额外操作；如需启用见 aria2-config/script.conf 顶部说明。
 EOF
 
 if [[ "$NO_WEB" -eq 0 ]]; then
-  cat <<'EOF'
-
-Web 管理后台: http://127.0.0.1:8080  (仅监听本机，远程访问需要 SSH 隧道或反向代理+TLS)
-AriaNg:       http://127.0.0.1:6880  (首次打开需要手动填 RPC 地址/密钥，之后记在浏览器本地)
-EOF
+  WEB_BIND_VALUE="$(grep -m1 '^WEB_BIND=' .env 2>/dev/null | cut -d= -f2- || true)"
+  WEB_BIND_VALUE="${WEB_BIND_VALUE:-0.0.0.0}"
+  echo
+  echo "Web 管理后台: http://<服务器IP>:8080   AriaNg: http://<服务器IP>:6880"
+  if [[ "$WEB_BIND_VALUE" == "0.0.0.0" ]]; then
+    warn "这两个端口当前对公网开放且是明文 HTTP。建议在 .env 里设 WEB_BIND=127.0.0.1 后"
+    warn "docker compose up -d，再通过 SSH 隧道或带 TLS 的反向代理访问。"
+  else
+    echo "（仅监听 ${WEB_BIND_VALUE}，远程访问需要 SSH 隧道或反向代理+TLS）"
+  fi
 fi

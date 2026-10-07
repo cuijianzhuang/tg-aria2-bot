@@ -10,12 +10,12 @@ Telegram 下载机器人：给机器人发送 **HTTP(S) 链接 / 磁力链接 / 
 
 - **确认后下载**：发送链接/种子后先出确认卡片（文件名/大小/保存位置），点「▶️ 开始下载」才真正入队，防误触
 - **实时任务卡片**：进度条、速度、剩余时间、连接数、保存路径，原地刷新不刷屏（3 秒/5% 节流）
-- **任务列表**：单页浏览，顶部分段式筛选 tab（全部/下载中/等待/暂停/完成/失败）带实时数量，翻页、批量暂停/继续
-- **每任务操作按钮**：按状态显示——暂停/继续/详情/保存位置/获取链接/重试/删除记录
-- **危险操作二次确认**：取消任务时可选「仅取消」或「取消并删除文件」，删除文件需再次确认；清理记录先显示条数再确认
+- **任务列表**：单页浏览，顶部分段式筛选 tab（全部/下载中/等待/暂停/完成/失败）带实时数量，每行带状态图标；翻页、刷新，「下载中」tab 一键全部暂停、「已暂停」tab 一键全部继续。从列表点开任务后，「⬅️ 返回列表」回到原来的 tab 和页码（中途进限速、选择文件、取消确认等子菜单也不会丢）
+- **每任务操作按钮**：按状态显示——下载中：暂停/刷新/选择文件（仅多文件任务）/单任务限速/取消；已完成：打开 GoFile 链接（直接跳转）/保存位置/发送到 TG/删除；失败：重试/删除；已取消：重新下载/删除记录
+- **危险操作二次确认**：取消任务时可选「仅取消」或「取消并删除文件」；删除已完成任务时可选「仅删除记录」或「删除记录和文件」，删文件都要再确认一次（只会删下载目录里面的东西）；清理记录先显示条数再确认
 - **失败可重试**：原始来源（URL/磁力/种子文件）持久化在数据库，失败任务一键「🔄 重试」；重复发送已下载过的内容会提示并提供「重新下载」
-- **主页即仪表盘**：`/start` 一屏看全任务统计、实时网速、磁盘空间，带刷新按钮
-- **设置即管理**：`/settings` 集中了限速调整（预设值即点即生效）、白名单管理、GoFile 开关、rclone 开关、远程重启服务
+- **主页即仪表盘**：`/start` 一屏看全任务统计、实时网速、磁盘空间；按钮直达下载中/任务列表/统计，有失败任务时多一个「⚠️ 失败 N」入口
+- **设置即管理**（仅管理员）：`/settings` 集中了限速调整（预设值即点即生效，当前值高亮）、白名单管理、GoFile 开关、rclone 开关、远程重启服务；普通用户的主菜单不显示「设置」按钮
 
 **下载与后处理**
 
@@ -82,9 +82,77 @@ sudo ./install.sh \
 ```
 
 `--mode` 支持 `docker` 或 `bare`，其余参数(`--token` `--api-id` `--api-hash` `--allowed-ids` `--download-dir`)缺省会交互式询问。
+重复运行是安全的：已有 `.env` 时凭据/模式/密钥自动沿用（不用重新输入，`ARIA2_SECRET`、`ADMIN_PASSWORD` 不会被重新生成），
+而且**只改脚本自己管理的那几个键**，你在设置菜单/Web 后台里改过的配置（同时下载数、GoFile、自动清理……）原样保留。
 `API_ID` / `API_HASH` 在 https://my.telegram.org 申请。
 加 `--with-rclone` 可选安装 rclone（网盘上传，默认不装，见下方"可选：rclone"一节）。
 Web 管理后台默认启用，`--admin-password <PW>` 指定密码，不指定则自动生成并在安装结束时打印一次；`--no-web` 完全跳过（见下方"Web 管理后台"一节）。
+
+## 管理菜单
+
+安装完成后会自动注册快捷命令 `tg-aria2`，日常运维不用记各种 docker / systemctl 命令：
+
+```bash
+sudo tg-aria2          # 或者在仓库目录里 sudo ./manage.sh
+```
+
+```
+========== tg-aria2-bot 管理菜单 ==========
+ 部署模式: docker    版本: 0135c05（2026-10-07）
+ bot ● 运行中   web ● 运行中   aria2 ● 运行中   telegram-bot-api ● 运行中   ariang ● 运行中
+ 下载目录: ./downloads  剩余 120G
+
+ —— 运行 ——
+   1. 服务状态
+   2. 查看日志
+   3. 重启服务
+   4. 启动 / 停止全部服务
+ —— 配置 ——
+   5. 修改常用配置（白名单/管理员/密码/并发/代理…）
+   6. Web 后台访问信息
+ —— 升级与备份 ——
+   7. 检查更新
+   8. 升级到最新版本
+   9. 立即备份
+  10. 从备份恢复（.env / 数据库）
+  11. 回退到历史版本
+ —— 其它 ——
+  12. 安装 / 重新安装
+  13. 安装快捷命令 tg-aria2
+   0. 退出
+```
+
+- 自动识别 docker / bare 模式，同一套菜单操作两种部署（bare 混合模式下的 telegram-bot-api 独立容器也能管）
+- **修改常用配置**：白名单、管理员、Web 后台密码（留空自动生成，改完旧登录会话全部失效）、同时下载数、磁盘告警、自动清理、代理、Web 端口监听地址；输入会校验格式，改完询问是否立即重启生效；也可以直接用编辑器打开 `.env`
+- **从备份恢复**：从 `backups/` 里选一份，恢复 `.env` 和数据库（恢复前会先把当前状态再备份一次，防止误操作）
+- **回退到历史版本**：列出最近 15 个版本选择，或输入任意提交号/标签；走 `update.sh --to`，同样有备份、健康检查和自动回滚
+
+也可以带子命令直接运行，不进菜单：`tg-aria2 status`、`tg-aria2 logs aria2`、`tg-aria2 restart bot`、`tg-aria2 backup`、`tg-aria2 update`……（`tg-aria2 --help` 查看全部）
+
+## 升级
+
+```bash
+cd tg-aria2-bot
+sudo ./update.sh --check   # 只看有没有新版本、有哪些更新，不做任何改动
+sudo ./update.sh           # 升级（列出新提交，确认后执行）
+sudo ./update.sh -y        # 不询问直接升级，适合放进 cron
+```
+
+`update.sh` 自动识别部署模式（docker / bare），一条命令完成整个流程：
+
+1. `git fetch` 并列出将要更新的提交；提示依赖、`.env.example`、`aria2-config/` 模板是否有变化
+2. **备份**到 `backups/<时间戳>/`：`.env`、数据库（SQLite 在线备份，运行中也是一致的快照）、当前版本号，保留最近 10 份
+3. 更新代码（fast-forward）。`aria2-config/` 里被运行时改写过的配置（RPC 密钥、rclone 钩子……）会先存起来、更新后原样放回——不会再因为"本地有改动"导致 `git pull` 失败，也不会被上游模板覆盖
+4. 应用：
+   - docker：`docker compose build` + `up -d`，顺带把 bind mount 目录属主对齐到容器用户 1000（从老的 root 容器版本升级时必需）；加 `--pull-images` 同时更新 telegram-bot-api / aria2 / Python 基础镜像
+   - bare：requirements.txt 有变化才重装依赖 → **重启前**先做编译 + 导入校验 → systemd 单元模板有变化才同步（原文件先备份）→ 重启 bot / web
+5. **健康检查**：观察 20 秒，服务挂掉或被 systemd/docker 反复拉起都算失败
+6. 任何一步失败**自动回滚**到升级前的版本并重新拉起服务（数据库迁移只增不删，旧代码可以直接用新 schema）；`--no-rollback` 可以保留现场排查
+
+其它选项：`--to <版本>`（回退/切换到指定提交或标签）、`--backup-only`（只备份）、`--force`（没有新提交也重新应用一遍）、`--reset`（本地分支和远端分叉时强制对齐远端）、`--branch NAME`。`update.sh --help` 查看全部。
+升级、回退、恢复在管理菜单里都有对应入口。
+
+升级后如果提示 `.env.example` 有新配置项，按需用 `git diff <旧版本> <新版本> -- .env.example` 对照添加；不加也能正常运行（都有默认值），`.env` 里多出旧版本不认识的键也不会导致启动失败。
 
 ## 两种部署方式的差异
 
@@ -111,13 +179,12 @@ docker compose restart bot
 docker compose down
 ```
 
-**从旧版本升级**：`bot`/`web` 容器现在以非 root 用户（UID/GID 1000，跟 `aria2` 容器的 `PUID`/`PGID` 一致）运行，权限最小化。全新安装（`install.sh`）会自动把 `downloads/`、`data/`、`aria2-config/`、`.env` 的属主设成 1000:1000，不用手动处理；如果是从更早的、容器内以 root 运行的版本升级上来（这几个文件/目录当初是用 root 创建的），容器会因为 `Permission denied` 起不来或设置回写失败，先在宿主机上执行一次：
+是否启动 Web 后台由 `.env` 里的 `COMPOSE_PROFILES=web` 决定，手敲 `docker compose up -d` 也会带上 `web`/`ariang`，不用每次加 `--profile web`。
+下载目录、Web 端口监听地址也在 `.env` 里配置（`HOST_DOWNLOAD_DIR`、`WEB_BIND`），见 [`.env.example`](.env.example) 末尾。
+所有容器日志都做了轮转（单文件 10MB × 3），长期运行不会撑满磁盘。
 
-```bash
-sudo chown -R 1000:1000 downloads data aria2-config .env
-```
-
-（也可以直接重新跑一遍 `sudo ./install.sh --mode docker ...`，脚本本身现在会做这一步。）
+`bot`/`web` 容器以非 root 用户（UID/GID 1000，跟 `aria2` 容器的 `PUID`/`PGID` 一致）运行。`install.sh` 和 `update.sh` 都会自动把
+`data/`、`aria2-config/`、`.env` 和下载目录的属主对齐成 1000:1000；从很早的 root 容器版本升级上来，直接跑 `sudo ./update.sh` 即可。
 
 ### bare 模式
 
@@ -153,12 +220,17 @@ systemctl status aria2
 
 ## Web 管理后台
 
-默认启用两个 Web 界面（都只监听 `127.0.0.1`，不映射公网端口；远程访问用 SSH 隧道 `ssh -L 8080:localhost:8080 -L 6880:localhost:6880 user@server`，或自己套一层带 TLS+认证的反向代理）：
+默认启用两个 Web 界面。监听范围随部署模式不同：
+
+- **bare 模式**：只监听 `127.0.0.1`
+- **docker 模式**：默认 `0.0.0.0`（对公网开放，**明文 HTTP**）。建议在 `.env` 里设 `WEB_BIND=127.0.0.1` 后 `docker compose up -d`，改为只监听本机
+
+只监听本机时，远程访问用 SSH 隧道 `ssh -L 8080:localhost:8080 -L 6880:localhost:6880 user@server`，或自己套一层带 TLS 的反向代理（Caddy 两行配置即可自动签证书）：
 
 | | 地址 | 作用 | 认证 |
 |---|---|---|---|
 | **自建管理后台** | http://127.0.0.1:8080 | 机器人自己的业务数据：任务列表（暂停/恢复/取消）、全局限速、白名单用户管理、GoFile/rclone 配置、磁盘用量、修改密码、远程重启 | 单一管理密码（`ADMIN_PASSWORD`），登录后签发 HMAC 签名的 cookie，7 天有效；改密码自动失效所有旧会话 |
-| **AriaNg** | http://127.0.0.1:6880 | 现成的 aria2 可视化面板：完整任务详情、BT 分享率、连接数等 aria2 原生信息 | 无内建认证，靠只监听 127.0.0.1 这一层挡住外部访问；首次打开在设置页填 RPC 地址 `http://127.0.0.1:6800/jsonrpc` 和密钥（`.env` 里的 `ARIA2_SECRET`），之后记在浏览器 localStorage |
+| **AriaNg** | http://127.0.0.1:6880 | 现成的 aria2 可视化面板：完整任务详情、BT 分享率、连接数等 aria2 原生信息 | 无内建认证（aria2 RPC 密钥本身是一道门槛）；首次打开在设置页填 RPC 地址 `http://127.0.0.1:6800/jsonrpc` 和密钥（`.env` 里的 `ARIA2_SECRET`），之后记在浏览器 localStorage |
 
 两者分工不重叠：AriaNg 只管 aria2 层面的任务，看不到 Telegram 用户、白名单这些机器人自己的数据；自建后台反过来不重复 AriaNg 已经做得很好的 aria2 任务详情展示。
 
@@ -174,7 +246,7 @@ systemctl status aria2
 sudo ./install.sh --no-web ...
 ```
 
-docker 模式下 `web`/`ariang` 两个服务标了 compose profile `web`，不传 `--profile web` 就不会启动，`docker compose ps` 也看不到它们，没有额外的镜像/端口占用。bare 模式下直接不注册对应的 systemd 服务。之后想重新开启，`ADMIN_PASSWORD` 不为空时重新跑一次 `docker compose --profile web up -d`（docker）或重新跑 `install_bare.sh`（bare）即可，不用整个重装。
+docker 模式下 `web`/`ariang` 两个服务标了 compose profile `web`，`--no-web` 会把 `.env` 里的 `COMPOSE_PROFILES` 置空，它们就不会启动，没有额外的镜像/端口占用。bare 模式下直接不注册对应的 systemd 服务。之后想重新开启：docker 模式在 `.env` 里设好 `ADMIN_PASSWORD` 和 `COMPOSE_PROFILES=web` 后 `docker compose up -d`；bare 模式重新跑 `install_bare.sh`，不用整个重装。
 
 ## 可选：GoFile 自动上传
 
@@ -187,7 +259,7 @@ GOFILE_COMPRESS=true         # 上传前 zip（多文件目录必压缩，与此
 GOFILE_DELETE_LOCAL=false    # 上传成功后删除本地文件（确认上传成功才删）
 ```
 
-管线由 bot 进程执行（非 aria2 钩子），在后台任务中运行，不阻塞其他任务的进度更新；上传链接回写到任务卡片和数据库。Telegram 设置页的开关**即时生效**（同进程改内存 + 写回 `.env`）；直接手改 `.env` 则需要重启 bot。
+管线由 bot 进程执行（非 aria2 钩子），在后台任务中运行，不阻塞其他任务的进度更新；上传链接回写到任务卡片和数据库。Telegram 设置页的开关**即时生效**（同进程改内存 + 写回 `.env`），重启后也会保持；直接手改 `.env` 则需要重启 bot（管理菜单「重启服务」）。
 
 ## 可选：rclone（网盘自动上传，默认不装）
 
@@ -212,24 +284,25 @@ rclone config                                    # bare 模式
 
 - `.env` 中的 `ARIA2_SECRET`：脚本会自动生成或从 aria2.sh 已生成的配置里同步，不要用默认值。
 - `.env` 中的 `ADMIN_PASSWORD`：安装时没指定会自动生成并只打印一次，确认已经记下来了；忘记了就直接改 `.env` 重启 `tg-aria2-web`（bare）或 `docker compose restart web`（docker）。
-- 两种模式下 `telegram-bot-api`、`aria2`、web 管理后台、AriaNg 的端口都只监听内网或 `127.0.0.1`，不要映射到公网；要远程访问用 SSH 隧道或自己套反向代理+TLS。
+- `telegram-bot-api`、`aria2` RPC 端口只在 docker 内网 / `127.0.0.1` 上，不要映射到公网。docker 模式下 web 后台(8080)/AriaNg(6880) 默认对公网开放，确认这是你想要的；否则设 `WEB_BIND=127.0.0.1`（见上方"Web 管理后台"）。
 - `move.sh` / `upload.sh`：这两个脚本**默认没有接入任何 aria2 钩子**（`aria2.conf` 里 `on-download-complete` 只指向 `clean.sh`，`clean.sh` 只做 `.aria2`/`.torrent`/空目录清理，不会移动或上传文件），不需要手动关闭。要启用网盘自动上传见上面 rclone 一节。
 
 ## 开发与运维
 
-### 更新部署
+### 三种更新方式
 
-```bash
-./deploy.sh                # 同步 bot/ + requirements.txt → 服务器端编译/导入校验 → 重启服务
-./deploy.sh --no-restart   # 只同步和校验，不重启
-```
+| 方式 | 适用场景 | 做了什么 |
+|---|---|---|
+| `sudo ./update.sh`（服务器上） | **日常升级，推荐** | 见上方"升级"一节：备份 → 拉代码 → 装依赖/重建 → 健康检查 → 失败自动回滚 |
+| 推送到 `master`（GitHub Actions） | 自己维护 fork、想推完代码自动上线 | CI 全部通过后 SSH 到服务器执行 `update.sh --reset`，同样有备份和自动回滚 |
+| `./deploy.sh`（开发机上） | 开发调试，把**未提交**的本地改动直接推上去验证 | tar 同步 `bot/` + `requirements.txt` → 装依赖 → 编译/导入校验 → 重启 bot/web。没有回滚，不要用于正式发布 |
 
-服务器地址/SSH key/目录/服务名写在脚本开头，按自己的环境改。脚本**永远不会覆盖服务器上的 `.env`**（真实密钥只存在于服务器）。
+`deploy.sh` 的服务器地址/SSH key/目录可以用环境变量 `DEPLOY_HOST` / `DEPLOY_KEY` / `DEPLOY_DIR` 覆盖。三种方式都**不会覆盖服务器上的 `.env`**。
 
 ### 自动部署（GitHub Actions）
 
-推到 `master` 会自动部署：[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) 通过 SSH 登录服务器执行
-`git fetch && git reset --hard origin/master` → 编译/导入/单测校验 → `systemctl restart tg-aria2-bot`，任何一步失败整个 job 失败，不会重启到半吊子状态。
+- [`test.yml`](.github/workflows/test.yml)：PR 和非 master 分支的推送触发——ruff、编译 + 导入检查、全部单元测试（Python 3.11 和 3.14 两个版本，分别对应 bare 模式最低版本和 docker 镜像版本）、shellcheck 检查安装/升级脚本
+- [`deploy.yml`](.github/workflows/deploy.yml)：推到 `master`（或在 Actions 页面手动触发）时先复用 `test.yml` 跑一遍，全部通过后 SSH 登录服务器执行 `update.sh --reset --yes`。用的是 `origin/master` 上最新的 `update.sh`，所以升级脚本本身的改进第一次部署就生效；多次推送会排队，不会并发部署。手动触发时带 `--force`，没有新提交也会重新部署一遍
 
 前提是服务器上的 `/root/tg-aria2-bot` 是这个仓库的 git clone（不是 `deploy.sh` 那种文件同步），且以下三个仓库 Secret 已配置（`Settings → Secrets and variables → Actions`）：
 
@@ -239,14 +312,17 @@ rclone config                                    # bare 模式
 | `DEPLOY_HOST` | 服务器地址 |
 | `DEPLOY_USER` | SSH 用户名 |
 
-`git reset --hard` 只会动 git 跟踪的文件——`.env`、`data/`、`.venv/`、`aria2-bare/`（bare 模式下真实运行的 aria2 配置/会话数据）、`downloads/`（实际下载内容）这些运行时目录都在 `.gitignore` 里，不会被覆盖或删除。想临时关掉自动部署，去 Actions 页面禁用这个 workflow，或者删掉 `.github/workflows/deploy.yml`。
+`--reset` 会让服务器上 git 跟踪的文件和 `origin/master` 完全一致，但 `.env`、`data/`、`.venv/`、`downloads/`、`backups/` 这些运行时文件都在 `.gitignore` 里，不受影响；`aria2-config/` 里的本地配置由 `update.sh` 备份后原样恢复。想临时关掉自动部署，去 Actions 页面禁用这个 workflow。
 
 ### 测试
 
-纯函数渲染层（卡片文案、HTML 转义、进度条、键盘结构）有单元测试，在有有效 `.env` 的机器上跑：
+单元测试覆盖卡片/键盘渲染、aria2 RPC 客户端、任务状态机（TaskManager）、数据库仓储、多节点、Web 鉴权、配置读写等，全部不依赖真实网络和 aria2：
 
 ```bash
-.venv/bin/python -m unittest discover tests -v
+pip install -r requirements.txt ruff
+export BOT_TOKEN=test API_ID=1 API_HASH=test ARIA2_SECRET=test   # 没有 .env 时给配置项塞假值
+python -m unittest discover tests -v
+ruff check .
 ```
 
 ### 数据库
@@ -257,21 +333,24 @@ SQLite（默认 `data/tasks.db`，`aiosqlite` 异步访问）。schema 在 [`bot
 
 ```
 tg-aria2-bot/
-├── install.sh                  # 一键安装入口
-├── deploy.sh                   # 更新部署（同步 → 校验 → 重启）
+├── install.sh                  # 一键安装入口（可重复运行，只改自己管理的 .env 键）
+├── update.sh                   # 一键升级（备份 → 拉代码 → 应用 → 健康检查 → 失败自动回滚）
+├── manage.sh                   # 交互式管理菜单（快捷命令 tg-aria2）：状态/日志/重启/改配置/备份恢复/回退
+├── deploy.sh                   # 开发调试用：把本地工作区直接同步到服务器
 ├── scripts/
 │   ├── install_docker.sh
 │   ├── install_bare.sh
-│   └── install_rclone.sh         # 两种模式共用：把 rclone 装在宿主机（--with-rclone 时调用）
+│   ├── install_rclone.sh         # 两种模式共用：把 rclone 装在宿主机（--with-rclone 时调用）
+│   └── env_lib.sh                # install/update 共用的 .env 读写函数（就地改单个键）
 ├── systemd/                    # bare 模式用的 unit 模板（含 tg-aria2-web、tg-ariang）
 ├── docker-compose.yml
 ├── Dockerfile
 ├── Dockerfile.ariang            # nginx + 官方 AriaNg 静态构建产物（docker 模式）
 ├── requirements.txt
 ├── .env.example
-├── tests/                      # 渲染层单元测试
+├── tests/                      # 单元测试（无需网络/aria2）
 ├── aria2-config/                # 预置的 P3TERX/aria2.conf 文件，路径已适配本项目（docker 模式用）
-│   ├── aria2.conf                # dir=/downloads, rpc-secret 由 install.sh 自动写入
+│   ├── aria2.conf                # dir=/downloads, rpc-secret 由 install.sh 自动写入（升级时本地改动会保留）
 │   ├── script.conf
 │   ├── rclone.env                 # 默认未接入钩子，见"可选：rclone"一节
 │   └── script/upload.sh           # 必须放在这里，见下方说明
@@ -283,21 +362,25 @@ tg-aria2-bot/
     ├── config.py                 # pydantic-settings，全部配置项及注释
     ├── handlers/                 # aiogram 路由
     │   ├── commands.py             # /start /list /pause 等命令
-    │   ├── callbacks.py            # 全部按钮回调（导航/列表/任务操作/设置）
-    │   ├── admin.py                # 设置页管理功能（白名单/GoFile/rclone/重启）
+    │   ├── callbacks.py            # 按钮回调：导航/列表/任务操作/待确认任务
+    │   ├── settings_menu.py        # 设置页（限速/并发/目录/清理/通知等，仅管理员）
+    │   ├── admin.py                # 设置页管理功能（白名单/GoFile/rclone/重启/节点）
     │   ├── links.py                # URL / 磁力 / .torrent 消息
     │   └── media.py                # 转发的媒体文件
     ├── core/
-    │   ├── aria2_client.py         # aria2p 的异步封装
-    │   ├── task_manager.py         # 轮询进度、节流编辑、GoFile 管线
+    │   ├── aria2_rpc.py            # aria2 JSON-RPC + WebSocket 事件订阅（纯 aiohttp）
+    │   ├── aria2_client.py         # 在 RPC 之上封装 Download/File/Stats 对象
+    │   ├── node_pool.py            # 多节点（多个 aria2 实例）管理
+    │   ├── task_manager.py         # WS 事件 + 5 秒轮询兜底、进度节流编辑、GoFile 管线、告警
     │   ├── cards.py                # 所有卡片文案渲染
     │   ├── keyboards.py            # 所有 InlineKeyboard 构建
     │   ├── list_view.py            # tab 式任务列表渲染
-    │   ├── pending_tasks.py        # 待确认任务（内存 TTL 30 分钟）
+    │   ├── pending_tasks.py        # 待确认任务（存 SQLite，TTL 30 分钟，重启不丢）
     │   ├── gofile.py               # gofile.io API（含游客 token 自动创建）
     │   ├── compress.py             # zip 压缩/删除
     │   ├── storage.py              # 目录归类、磁盘检查、URL 哈希
     │   ├── telegram_files.py       # 本地 bot-api 绝对路径 → file:// URI 适配
+    │   ├── sysinfo.py / stats_view.py  # 服务器状态、下载统计
     │   └── conf_editor.py          # .env / aria2.conf / script.conf 读写
     ├── db/                       # SQLite：schema + 迁移 + 仓储
     ├── middlewares/auth.py       # 白名单校验（env 种子 + DB 动态名单）
@@ -315,4 +398,4 @@ tg-aria2-bot/
 ## 致谢
 
 - [P3TERX/aria2.conf](https://github.com/P3TERX/aria2.conf) / [P3TERX/aria2.sh](https://github.com/P3TERX/aria2.sh) — aria2 完美配置与安装脚本（MIT）
-- [aiogram](https://github.com/aiogram/aiogram) · [aria2p](https://github.com/pawamoy/aria2p) · [AriaNg](https://github.com/mayswind/AriaNg)
+- [aiogram](https://github.com/aiogram/aiogram) · [AriaNg](https://github.com/mayswind/AriaNg) · [aria2p](https://github.com/pawamoy/aria2p)（早期版本使用，现已换成自带的异步 RPC 客户端）

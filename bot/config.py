@@ -69,7 +69,11 @@ class Settings(BaseSettings):
     bot_service_name: str = "tg-aria2-bot"
     aria2_service_name: str = "tg-aria2-bot-aria2"
 
-    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
+    # extra="ignore"：.env 里出现本版本不认识的键（docker compose 自己读的
+    # COMPOSE_PROFILES/HOST_DOWNLOAD_DIR、新版本才有的配置项、update.sh 回滚到
+    # 旧版本后残留的新键）时忽略而不是启动即崩——pydantic-settings 对 env_file
+    # 的默认策略是 forbid，升级/回滚场景下这等于一颗定时炸弹。
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
 
     @staticmethod
     def _parse_ids(raw: str) -> set[int]:
