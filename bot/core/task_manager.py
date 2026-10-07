@@ -45,6 +45,12 @@ DISK_ALERT_COOLDOWN_SECONDS = 6 * 3600
 NODE_OFFLINE_ALERT_SECONDS = 10 * 60
 
 
+def _multi_file(download) -> bool | None:
+    """跟 callbacks._multi_file 同义：只有确定是单文件时才隐藏「选择文件」按钮。"""
+    real = [f for f in download.files if not f.is_metadata]
+    return len(real) > 1 if real else None
+
+
 class TaskManager:
     """Polls every enabled aria2 node for in-flight tasks and throttles Telegram progress edits."""
 
@@ -376,6 +382,7 @@ class TaskManager:
         """compress (required for multi-file torrent directories, optional
         otherwise) -> upload to gofile.io -> delete the local copy if configured.
         Deletion only happens after a confirmed successful upload."""
+        link = None  # 上传前就失败时，下面的完成通知也要能正常发出
         try:
             need_compress = settings.gofile_compress or os.path.isdir(path)
             if need_compress:
@@ -408,7 +415,7 @@ class TaskManager:
             log.exception("gofile pipeline failed for gid %s", gid)
             text = f"✅ 下载完成: {row['file_name'] or gid}\n⚠️ 上传 gofile 失败: {e}"
 
-        await self._notify(row, text, gid=gid, status="COMPLETED")
+        await self._notify(row, text, gid=gid, status="COMPLETED", link=link or None)
 
     async def _auto_send_to_tg(self, row, gid: str, path: str):
         ok, msg = await self.send_file_to_tg(row, gid, path)
@@ -457,7 +464,7 @@ class TaskManager:
             try:
                 await self._bot.edit_message_text(
                     chat_id=chat_id, message_id=row["reply_message_id"], text=text,
-                    reply_markup=task_keyboard(gid, "ACTIVE"),
+                    reply_markup=task_keyboard(gid, "ACTIVE", multi_file=_multi_file(download)),
                     parse_mode="HTML",
                 )
             except TelegramRetryAfter as e:
@@ -487,8 +494,9 @@ class TaskManager:
         status: str | None = None,
         parse_mode: str | None = None,
         local: bool = True,
+        link: str | None = None,
     ):
-        markup = task_keyboard(gid, status, local=local) if gid and status else None
+        markup = task_keyboard(gid, status, local=local, link=link) if gid and status else None
         if row["reply_message_id"]:
             try:
                 await self._bot.edit_message_text(

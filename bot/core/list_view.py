@@ -45,11 +45,18 @@ def _row_node_suffix(nodes, row) -> str:
 
 
 async def render_task_list(
-    repo, nodes, status_key: str = "ALL", page: int = 0, *, user_id: int | None = None
+    repo, nodes, status_key: str = "ALL", page: int = 0, *, user_id: int | None = None,
+    is_admin: bool | None = None,
 ) -> tuple[str, InlineKeyboardMarkup]:
     """One-page task browser: filter tabs on top (segmented-control style),
     task rows as buttons, pagination + bulk actions + footer below.
-    user_id=None（管理员）看全部任务；否则只看这个用户自己的。"""
+    user_id=None（管理员）看全部任务；否则只看这个用户自己的。
+    is_admin 决定是否显示「清理已完成」（仅管理员可用）；不传时按 user_id
+    推断——管理员的可见范围就是 None。"""
+    if is_admin is None:
+        is_admin = user_id is None
+    if status_key not in LIST_STATUS_MAP:
+        status_key = "ALL"
     counts = await repo.count_by_status(user_id=user_id)
     status = LIST_STATUS_MAP.get(status_key)
     page = max(0, page)
@@ -82,7 +89,9 @@ async def render_task_list(
             sub += _row_node_suffix(nodes, row)
             lines.append(f"<b>{index}.</b> {escape(name)}\n{sub}")
             if row["gid"]:
-                keyboard_rows.append(task_open_button(index, row["gid"], name))
+                keyboard_rows.append(task_open_button(
+                    index, row["gid"], name, status=row["status"], back=f"{status_key}:{page}",
+                ))
 
         if page > 0 or has_next_page:
             controls = []
@@ -93,17 +102,19 @@ async def render_task_list(
                 controls.append(InlineKeyboardButton(text="➡️", callback_data=f"list:{status_key}:{page + 1}"))
             keyboard_rows.append(controls)
 
+        # 批量操作只出现在对应的 tab 里：「下载中」只给全部暂停，「已暂停」
+        # 只给全部继续（以前「全部继续」挂在下载中 tab 上，那里根本没有可继续的任务）
         if status_key == "ACTIVE":
-            keyboard_rows.append(
-                [
-                    InlineKeyboardButton(text="⏸ 全部暂停", callback_data="bulk:pause:ACTIVE"),
-                    InlineKeyboardButton(text="▶️ 全部继续", callback_data="bulk:resume:PAUSED"),
-                ]
-            )
+            keyboard_rows.append([InlineKeyboardButton(text="⏸ 全部暂停", callback_data="bulk:pause:ACTIVE")])
+        elif status_key == "PAUSED":
+            keyboard_rows.append([InlineKeyboardButton(text="▶️ 全部继续", callback_data="bulk:resume:PAUSED")])
 
-    footer = [InlineKeyboardButton(text="⬅️ 主菜单", callback_data="nav:start")]
-    if counts.get("COMPLETED", 0):
-        footer.insert(0, InlineKeyboardButton(text="🧹 清理已完成", callback_data="list:cleanup:0"))
+    footer = [
+        InlineKeyboardButton(text="🔄 刷新", callback_data=f"list:{status_key}:{page}"),
+        InlineKeyboardButton(text="⬅️ 主菜单", callback_data="nav:start"),
+    ]
+    if counts.get("COMPLETED", 0) and is_admin:
+        footer.insert(1, InlineKeyboardButton(text="🧹 清理已完成", callback_data="list:cleanup:0"))
     keyboard_rows.append(footer)
 
     return "\n\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
@@ -143,7 +154,7 @@ async def render_search_results(
             sub += _row_node_suffix(nodes, row)
             lines.append(f"<b>{index}.</b> {escape(name)}\n{sub}")
             if row["gid"]:
-                keyboard_rows.append(task_open_button(index, row["gid"], name))
+                keyboard_rows.append(task_open_button(index, row["gid"], name, status=row["status"]))
 
         if truncated:
             lines.append(f"\n<i>结果超过 {SEARCH_LIMIT} 条，只显示最新的部分，请用更精确的关键词缩小范围。</i>")
