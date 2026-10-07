@@ -21,6 +21,7 @@
 # (settings changed from the bot/web admin, extra options) is kept as-is.
 #
 # To upgrade an existing deployment to the latest code, use ./update.sh instead.
+# Day-to-day management (status/logs/restart/config/backup): sudo ./manage.sh
 
 set -euo pipefail
 
@@ -220,4 +221,8 @@ elif [[ "$ADMIN_PASSWORD_GENERATED" -eq 1 ]]; then
   echo
 fi
 
-log "完成。以后升级到最新版本：sudo ./update.sh"
+# 管理菜单快捷命令：之后在任何目录 sudo tg-aria2 就能打开（状态/日志/重启/
+# 改配置/升级/备份恢复都在里面）
+ln -sf "$SCRIPT_DIR/manage.sh" /usr/local/bin/tg-aria2 2>/dev/null || true
+
+log "完成。日常管理（状态/日志/重启/改配置/升级/备份）运行：sudo tg-aria2"

@@ -76,6 +76,7 @@ cat <<EOF
   docker compose restart bot            重启机器人
   docker compose down                   停止全部服务
   sudo ./update.sh                      升级到最新版本（自动备份、失败自动回滚）
+  sudo tg-aria2                         交互式管理菜单（状态/日志/重启/改配置/备份恢复）
 
 move.sh / upload.sh 默认未接入任何 aria2 钩子（on-download-complete 只调用 clean.sh），
 不会自动移动或上传文件，无需额外操作；如需启用见 aria2-config/script.conf 顶部说明。

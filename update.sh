@@ -6,7 +6,10 @@
 #   sudo ./update.sh                 # 交互式：列出新提交，确认后升级
 #   sudo ./update.sh --check         # 只看有没有新版本、有哪些提交，不做任何改动
 #   sudo ./update.sh -y              # 不询问，直接升级（适合 cron / CI）
+#   sudo ./update.sh --to 1a2b3c4    # 回退（或切换）到指定版本，同样有备份/健康检查/自动回滚
+#   sudo ./update.sh --backup-only   # 只做一次备份（.env + 数据库 + 版本号），不升级
 #
+# 日常管理（状态/日志/重启/改配置/备份恢复）用交互式菜单：sudo ./manage.sh
 # 选项：
 #   -y, --yes          不询问确认
 #   --check            只检查更新，不升级
@@ -14,6 +17,8 @@
 #   --reset            用 git reset --hard 对齐远端，而不是 fast-forward
 #                      （本地对 git 跟踪文件有改动时也会被丢弃，aria2-config/ 除外）
 #   --force            没有新提交也照样重新应用一遍（重装依赖/重建镜像/重启）
+#   --to REF           切到指定的提交/标签而不是远端最新（用于回退版本）
+#   --backup-only      只备份，不做其它任何事
 #   --pull-images      docker 模式：顺带拉取 telegram-bot-api / aria2 / 基础镜像的新版本
 #   --no-rollback      健康检查失败时不自动回滚（留着现场排查）
 #   --dir PATH         仓库目录（默认脚本所在目录；CI 从临时文件运行时用）
@@ -40,6 +45,8 @@ RESET=0
 FORCE=0
 PULL_IMAGES=0
 ROLLBACK=1
+TARGET_REF=""
+BACKUP_ONLY=0
 REPO_DIR=""
 # 第二阶段（内部用）：--_apply <旧提交> <备份目录>
 APPLY_FROM=""
@@ -49,7 +56,7 @@ IS_ROLLBACK=0
 # 第一阶段确实更新了代码、需要进入第二阶段时置 1
 UPDATE_READY=0
 
-BACKUP_KEEP=5
+BACKUP_KEEP=10
 HEALTH_WAIT_SECONDS="${UPDATE_HEALTH_WAIT:-20}"
 
 parse_args() {
@@ -62,6 +69,8 @@ parse_args() {
       --force) FORCE=1; shift ;;
       --pull-images) PULL_IMAGES=1; shift ;;
       --no-rollback) ROLLBACK=0; shift ;;
+      --to) TARGET_REF="$2"; shift 2 ;;
+      --backup-only) BACKUP_ONLY=1; shift ;;
       --dir) REPO_DIR="$2"; shift 2 ;;
       --_apply) APPLY_FROM="$2"; BACKUP_DIR="$3"; shift 3 ;;
       --_rollback) IS_ROLLBACK=1; shift ;;
@@ -131,6 +140,18 @@ prune_backups() {
   fi
 }
 
+# make_backup <备注> —— 备份 .env / 数据库 / 当前版本号，结果目录写进 BACKUP_DIR
+make_backup() {
+  BACKUP_DIR="$REPO_DIR/backups/$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$BACKUP_DIR"
+  chmod 700 "$REPO_DIR/backups" "$BACKUP_DIR"
+  [[ -f .env ]] && cp -p .env "$BACKUP_DIR/.env"
+  backup_db "$(host_db_path)" "$BACKUP_DIR/tasks.db"
+  git rev-parse HEAD > "$BACKUP_DIR/COMMIT" 2>/dev/null || true
+  echo "$1" > "$BACKUP_DIR/NOTE"
+  log "已备份 .env / 数据库 / 当前版本号到 ${BACKUP_DIR#"$REPO_DIR"/}"
+}
+
 # ---------------------------------------------------------------- 第一阶段：拉代码
 
 phase_fetch() {
@@ -139,12 +160,20 @@ phase_fetch() {
   BRANCH="${BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
   [[ "$BRANCH" != "HEAD" ]] || die "当前处于 detached HEAD，请用 --branch 指定要跟踪的分支"
 
-  log "检查更新（origin/${BRANCH}）..."
-  git fetch --quiet origin "$BRANCH" || die "git fetch 失败，检查网络或远端地址：$(git remote get-url origin)"
-
   local old new
   old="$(git rev-parse HEAD)"
-  new="$(git rev-parse "origin/${BRANCH}")"
+  if [[ -n "$TARGET_REF" ]]; then
+    # 目标版本本地没有时才需要联网（比如要切到一个还没 fetch 过的新标签）
+    git rev-parse --quiet --verify "${TARGET_REF}^{commit}" >/dev/null \
+      || git fetch --quiet origin "$BRANCH" --tags \
+      || die "git fetch 失败，检查网络或远端地址：$(git remote get-url origin)"
+    new="$(git rev-parse --quiet --verify "${TARGET_REF}^{commit}")" || die "找不到版本 ${TARGET_REF}"
+    RESET=1   # 回退不是快进，只能 reset
+  else
+    log "检查更新（origin/${BRANCH}）..."
+    git fetch --quiet origin "$BRANCH" || die "git fetch 失败，检查网络或远端地址：$(git remote get-url origin)"
+    new="$(git rev-parse "origin/${BRANCH}")"
+  fi
 
   if [[ "$old" == "$new" ]]; then
     log "已经是最新版本（$(git log -1 --format='%h %s' HEAD)）"
@@ -152,8 +181,13 @@ phase_fetch() {
       return 0
     fi
     log "--force：没有新提交，照样重新应用一遍"
+  elif [[ -n "$TARGET_REF" ]] && git merge-base --is-ancestor "$new" "$old"; then
+    echo
+    warn "将回退到 $(git log -1 --format='%h %s (%cr)' "$new")，撤销以下 $(git rev-list --count "${new}..${old}") 个提交："
+    git --no-pager log --format='  %C(yellow)%h%Creset %s %C(dim)(%cr)%Creset' "${new}..${old}" | head -30
+    echo
   else
-    if ! git merge-base --is-ancestor "$old" "$new"; then
+    if [[ -z "$TARGET_REF" ]] && ! git merge-base --is-ancestor "$old" "$new"; then
       if [[ "$RESET" -eq 0 ]]; then
         die "本地分支和 origin/${BRANCH} 已经分叉（本地有远端没有的提交），无法快进。
 确认本地提交可以丢弃的话加 --reset 强制对齐远端。"
@@ -176,18 +210,12 @@ phase_fetch() {
 
   if [[ "$ASSUME_YES" -eq 0 ]]; then
     local ans
-    read -rp "现在升级？[y/N] " ans
+    read -rp "确认执行？[y/N] " ans
     [[ "$ans" =~ ^[Yy]$ ]] || { log "已取消"; return 0; }
   fi
 
   # ---- 备份 ----
-  BACKUP_DIR="$REPO_DIR/backups/$(date +%Y%m%d-%H%M%S)"
-  mkdir -p "$BACKUP_DIR"
-  chmod 700 "$REPO_DIR/backups" "$BACKUP_DIR"
-  [[ -f .env ]] && cp -p .env "$BACKUP_DIR/.env"
-  backup_db "$(host_db_path)" "$BACKUP_DIR/tasks.db"
-  echo "$old" > "$BACKUP_DIR/COMMIT"
-  log "已备份 .env / 数据库 / 当前版本号到 ${BACKUP_DIR#"$REPO_DIR"/}"
+  make_backup "升级前自动备份（${old:0:7} → ${new:0:7}）"
 
   # ---- aria2-config/：git 跟踪的模板，但运行时会被改写 ----
   # （install.sh 写入 rpc-secret、aria2-pro 容器启动时改写、设置菜单切换
@@ -207,7 +235,7 @@ phase_fetch() {
 
   # ---- 更新代码 ----
   if [[ "$RESET" -eq 1 ]]; then
-    git reset --quiet --hard "origin/${BRANCH}"
+    git reset --quiet --hard "$new"
   else
     if ! git diff --quiet HEAD; then
       restore_conf
@@ -414,7 +442,7 @@ phase_apply() {
     exit 1
   fi
   prune_backups
-  log "升级完成：$(git log -1 --format='%h %s (%cr)' HEAD)"
+  log "完成，当前版本：$(git log -1 --format='%h %s (%cr)' HEAD)"
   if [[ "$MODE" == "docker" ]]; then
     log "查看日志：docker compose logs -f bot"
   else
@@ -444,6 +472,12 @@ main() {
 
   MODE="$(detect_mode)"
   [[ -n "$MODE" ]] || die "无法从 .env 的 BOT_API_URL 识别部署模式（docker/bare）"
+
+  if [[ "$BACKUP_ONLY" -eq 1 ]]; then
+    make_backup "手动备份"
+    prune_backups
+    exit 0
+  fi
 
   if [[ -z "$APPLY_FROM" && "$IS_ROLLBACK" -eq 0 ]]; then
     log "部署模式：$MODE，仓库：$REPO_DIR"

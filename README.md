@@ -88,6 +88,47 @@ sudo ./install.sh \
 加 `--with-rclone` 可选安装 rclone（网盘上传，默认不装，见下方"可选：rclone"一节）。
 Web 管理后台默认启用，`--admin-password <PW>` 指定密码，不指定则自动生成并在安装结束时打印一次；`--no-web` 完全跳过（见下方"Web 管理后台"一节）。
 
+## 管理菜单
+
+安装完成后会自动注册快捷命令 `tg-aria2`，日常运维不用记各种 docker / systemctl 命令：
+
+```bash
+sudo tg-aria2          # 或者在仓库目录里 sudo ./manage.sh
+```
+
+```
+========== tg-aria2-bot 管理菜单 ==========
+ 部署模式: docker    版本: 0135c05（2026-10-07）
+ bot ● 运行中   web ● 运行中   aria2 ● 运行中   telegram-bot-api ● 运行中   ariang ● 运行中
+ 下载目录: ./downloads  剩余 120G
+
+ —— 运行 ——
+   1. 服务状态
+   2. 查看日志
+   3. 重启服务
+   4. 启动 / 停止全部服务
+ —— 配置 ——
+   5. 修改常用配置（白名单/管理员/密码/并发/代理…）
+   6. Web 后台访问信息
+ —— 升级与备份 ——
+   7. 检查更新
+   8. 升级到最新版本
+   9. 立即备份
+  10. 从备份恢复（.env / 数据库）
+  11. 回退到历史版本
+ —— 其它 ——
+  12. 安装 / 重新安装
+  13. 安装快捷命令 tg-aria2
+   0. 退出
+```
+
+- 自动识别 docker / bare 模式，同一套菜单操作两种部署（bare 混合模式下的 telegram-bot-api 独立容器也能管）
+- **修改常用配置**：白名单、管理员、Web 后台密码（留空自动生成，改完旧登录会话全部失效）、同时下载数、磁盘告警、自动清理、代理、Web 端口监听地址；输入会校验格式，改完询问是否立即重启生效；也可以直接用编辑器打开 `.env`
+- **从备份恢复**：从 `backups/` 里选一份，恢复 `.env` 和数据库（恢复前会先把当前状态再备份一次，防止误操作）
+- **回退到历史版本**：列出最近 15 个版本选择，或输入任意提交号/标签；走 `update.sh --to`，同样有备份、健康检查和自动回滚
+
+也可以带子命令直接运行，不进菜单：`tg-aria2 status`、`tg-aria2 logs aria2`、`tg-aria2 restart bot`、`tg-aria2 backup`、`tg-aria2 update`……（`tg-aria2 --help` 查看全部）
+
 ## 升级
 
 ```bash
@@ -100,7 +141,7 @@ sudo ./update.sh -y        # 不询问直接升级，适合放进 cron
 `update.sh` 自动识别部署模式（docker / bare），一条命令完成整个流程：
 
 1. `git fetch` 并列出将要更新的提交；提示依赖、`.env.example`、`aria2-config/` 模板是否有变化
-2. **备份**到 `backups/<时间戳>/`：`.env`、数据库（SQLite 在线备份，运行中也是一致的快照）、当前版本号，保留最近 5 份
+2. **备份**到 `backups/<时间戳>/`：`.env`、数据库（SQLite 在线备份，运行中也是一致的快照）、当前版本号，保留最近 10 份
 3. 更新代码（fast-forward）。`aria2-config/` 里被运行时改写过的配置（RPC 密钥、rclone 钩子……）会先存起来、更新后原样放回——不会再因为"本地有改动"导致 `git pull` 失败，也不会被上游模板覆盖
 4. 应用：
    - docker：`docker compose build` + `up -d`，顺带把 bind mount 目录属主对齐到容器用户 1000（从老的 root 容器版本升级时必需）；加 `--pull-images` 同时更新 telegram-bot-api / aria2 / Python 基础镜像
@@ -108,7 +149,8 @@ sudo ./update.sh -y        # 不询问直接升级，适合放进 cron
 5. **健康检查**：观察 20 秒，服务挂掉或被 systemd/docker 反复拉起都算失败
 6. 任何一步失败**自动回滚**到升级前的版本并重新拉起服务（数据库迁移只增不删，旧代码可以直接用新 schema）；`--no-rollback` 可以保留现场排查
 
-其它选项：`--force`（没有新提交也重新应用一遍）、`--reset`（本地分支和远端分叉时强制对齐远端）、`--branch NAME`。`update.sh --help` 查看全部。
+其它选项：`--to <版本>`（回退/切换到指定提交或标签）、`--backup-only`（只备份）、`--force`（没有新提交也重新应用一遍）、`--reset`（本地分支和远端分叉时强制对齐远端）、`--branch NAME`。`update.sh --help` 查看全部。
+升级、回退、恢复在管理菜单里都有对应入口。
 
 升级后如果提示 `.env.example` 有新配置项，按需用 `git diff <旧版本> <新版本> -- .env.example` 对照添加；不加也能正常运行（都有默认值），`.env` 里多出旧版本不认识的键也不会导致启动失败。
 
@@ -217,7 +259,7 @@ GOFILE_COMPRESS=true         # 上传前 zip（多文件目录必压缩，与此
 GOFILE_DELETE_LOCAL=false    # 上传成功后删除本地文件（确认上传成功才删）
 ```
 
-管线由 bot 进程执行（非 aria2 钩子），在后台任务中运行，不阻塞其他任务的进度更新；上传链接回写到任务卡片和数据库。Telegram 设置页的开关**即时生效**（同进程改内存 + 写回 `.env`）；直接手改 `.env` 则需要重启 bot。
+管线由 bot 进程执行（非 aria2 钩子），在后台任务中运行，不阻塞其他任务的进度更新；上传链接回写到任务卡片和数据库。Telegram 设置页的开关**即时生效**（同进程改内存 + 写回 `.env`），重启后也会保持；直接手改 `.env` 则需要重启 bot（管理菜单「重启服务」）。
 
 ## 可选：rclone（网盘自动上传，默认不装）
 
@@ -293,6 +335,7 @@ SQLite（默认 `data/tasks.db`，`aiosqlite` 异步访问）。schema 在 [`bot
 tg-aria2-bot/
 ├── install.sh                  # 一键安装入口（可重复运行，只改自己管理的 .env 键）
 ├── update.sh                   # 一键升级（备份 → 拉代码 → 应用 → 健康检查 → 失败自动回滚）
+├── manage.sh                   # 交互式管理菜单（快捷命令 tg-aria2）：状态/日志/重启/改配置/备份恢复/回退
 ├── deploy.sh                   # 开发调试用：把本地工作区直接同步到服务器
 ├── scripts/
 │   ├── install_docker.sh

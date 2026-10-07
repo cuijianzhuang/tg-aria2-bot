@@ -173,6 +173,7 @@ cat <<EOF
   journalctl -u tg-aria2-bot -f        查看机器人日志
   systemctl status aria2               查看 aria2 状态
   sudo ./update.sh                     升级到最新版本（自动备份、失败自动回滚）
+  sudo tg-aria2                        交互式管理菜单（状态/日志/重启/改配置/备份恢复）
 EOF
 
 if [[ "$NO_WEB" -eq 0 ]]; then

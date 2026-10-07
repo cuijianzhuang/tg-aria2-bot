@@ -214,3 +214,5 @@ aria2p 是同步库，每次调用都要 `to_thread`。aria2 的 JSON-RPC 极简
 | CI/CD | deploy 复用 test.yml（以前 deploy 自带的测试 job 漏了 ruff 和导入检查），服务器端改走 `update.sh --reset`，加 `concurrency` 防并发部署；test 增加 Python 3.14（docker 镜像实际版本）矩阵和 shellcheck |
 | `deploy.sh` | 同步了 `requirements.txt` 却从不 `pip install`、不重启 web；补上，目标服务器可用环境变量覆盖 |
 | docker | 所有服务日志轮转（10MB×3）；`COMPOSE_PROFILES` 写进 `.env`，手敲 `docker compose up` 不再漏掉 web；`WEB_BIND` 可把 8080/6880 改为只监听本机；README 里"只监听 127.0.0.1"的说法与 docker 实际（对公网开放）不符，已更正 |
+| 交互式管理菜单 | 新增 `manage.sh`（安装时注册快捷命令 `tg-aria2`）：服务状态/日志/重启/启停、常用配置修改（带校验，改密码同时轮换会话密钥）、Web 访问信息、检查更新/升级、备份/恢复、回退历史版本；docker/bare 两种模式同一套操作，也支持子命令非交互调用。`update.sh` 配套新增 `--to`（回退到指定版本，复用备份/健康检查/自动回滚）和 `--backup-only` |
+| docker 下设置被重启还原 | bot/web 容器同时用 `env_file: .env`（创建时冻结成环境变量）和挂载的 `/app/.env`，而 pydantic-settings 中环境变量优先于 .env 文件——设置菜单写回 .env 的开关（GoFile、自动发送等）在 `docker compose restart` 后被创建时的旧值盖掉、悄悄还原。去掉 bot/web 的 `env_file`，只从挂载文件读配置 |
