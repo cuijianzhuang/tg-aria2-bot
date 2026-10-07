@@ -2,8 +2,11 @@ name: Tests
 
 on:
   push:
-    branches: [master]
+    # master 的 push 由 deploy.yml 通过 workflow_call 复用本 workflow 跑测试，
+    # 这里排除掉，避免同一个提交跑两遍
+    branches-ignore: [master]
   pull_request: {}
+  workflow_call: {}
 
 env:
   # bot.config.Settings requires these at import time; dummies are fine for tests
@@ -15,11 +18,17 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11：bare 模式支持的最低版本（pyproject target-version）；
+        # 3.14：docker 镜像（Dockerfile）实际运行的版本
+        python-version: ["3.11", "3.14"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
       - run: pip install -r requirements.txt
       - uses: astral-sh/ruff-action@v3
@@ -28,3 +37,9 @@ jobs:
       - run: python -m compileall -q bot
       - run: python -c 'import bot.main, bot.web.app'
       - run: python -m unittest discover tests -v
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: shellcheck -x -S warning install.sh update.sh scripts/*.sh

@@ -201,3 +201,16 @@ aria2p 是同步库，每次调用都要 `to_thread`。aria2 的 JSON-RPC 极简
 | `Aria2Client.remove` 冗余往返 | ✅ | 原来无论 `files` 参数是否为真都会先 `tellStatus` 拿一次 dir/files，只有 `files=True` 且是本地节点才用得上；改成只在真需要删文件时才发这次 RPC，顺带修了一个小回归：之前对一个已经不存在的 gid 调用 `remove(gid, files=False)`（比如取消已被外部清理的任务）会被这次多余的 `tellStatus` 提前抛错，现在会正常走到 `forceRemove`/`removeDownloadResult` 的兜底逻辑 |
 | #14 补充：轮询串行拖慢 | ✅ | `_poll_once` 原来是逐节点 `for` 循环——单次 RPC 有 10s 超时兜底没错，但串行意味着一个卡住的节点会让排在它后面的健康节点也多等最多 10s，节点越多越明显；改成 `asyncio.gather` 并发展开各节点，同时 `return_exceptions=True` 顺带修了另一个问题：某节点处理某个任务行时抛出非 RPC 层异常，以前会打断当轮循环里排在它后面的其它节点，现在互不影响 |
 | 节点离线告警 | ✅ | `TaskManager._handle_node_health`：节点连续不可达超过 10 分钟（`NODE_OFFLINE_ALERT_SECONDS`）才告警一次管理员，跟磁盘告警同一套冷却/重置语义；见 `docs/MULTI_NODE_DESIGN.md` §七 |
+
+## 实施记录（2026-10-07）：部署与升级流程
+
+| 项 | 说明 |
+|----|------|
+| `.env` 未知键导致启动即崩 | pydantic-settings 对 `env_file` 默认 `extra="forbid"`：`.env` 里只要出现当前版本不认识的键（新版本的配置项、回滚到旧版本后残留的键、给 compose 用的变量）bot 直接起不来。改为 `extra="ignore"`，补了回归测试 |
+| `install.sh` 重跑冲掉运行时配置 | 以前每次整个重写 `.env`，设置菜单/Web 后台写回的 `MAX_CONCURRENT`、`GOFILE_*`、`AUTO_CLEANUP_DAYS` 等全部丢失。改为首次从 `.env.example` 生成、之后只就地改脚本管理的键（`scripts/env_lib.sh`）；重跑时凭据/模式从 `.env` 预填，不用再输入 |
+| bare 模式服务名/钩子路径错位 | `.env` 默认 `ARIA2_SERVICE_NAME=tg-aria2-bot-aria2`、钩子路径是 docker 的 `/config/script/`，但 aria2.sh 注册的服务名是 `aria2`、配置在 `/root/.aria2c`——"重启 aria2"按钮和 rclone 钩子切换在 bare 模式下都指向不存在的东西。首次 bare 安装时写入正确值 |
+| docker `--download-dir` 不生效 | compose 里写死 `./downloads`，`--download-dir` 只是在宿主机建了个没挂载的目录。改为 `${HOST_DOWNLOAD_DIR:-./downloads}` |
+| 新增 `update.sh` | 一键升级：fetch → 列出提交 → 备份（.env、SQLite 在线备份、版本号）→ 保存/恢复 `aria2-config/` 本地改动（以前它们会让 `git pull` 直接失败）→ ff 更新 → 两阶段 exec 新版脚本应用 → 健康检查（20s 内是否崩溃重启）→ 失败自动回滚。bare 模式重启前先做导入校验，systemd 单元只在模板变化时同步且先备份。在沙箱里模拟了正常升级/导入失败/运行时崩溃/从无 update.sh 的老版本首次升级四种场景 |
+| CI/CD | deploy 复用 test.yml（以前 deploy 自带的测试 job 漏了 ruff 和导入检查），服务器端改走 `update.sh --reset`，加 `concurrency` 防并发部署；test 增加 Python 3.14（docker 镜像实际版本）矩阵和 shellcheck |
+| `deploy.sh` | 同步了 `requirements.txt` 却从不 `pip install`、不重启 web；补上，目标服务器可用环境变量覆盖 |
+| docker | 所有服务日志轮转（10MB×3）；`COMPOSE_PROFILES` 写进 `.env`，手敲 `docker compose up` 不再漏掉 web；`WEB_BIND` 可把 8080/6880 改为只监听本机；README 里"只监听 127.0.0.1"的说法与 docker 实际（对公网开放）不符，已更正 |

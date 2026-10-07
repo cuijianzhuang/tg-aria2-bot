@@ -13,3 +13,6 @@ data/
 # IDE
 .idea/
 .vscode/
+
+# update.sh 的升级备份（.env / 数据库快照）
+backups/

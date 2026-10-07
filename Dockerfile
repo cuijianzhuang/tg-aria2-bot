@@ -2,6 +2,12 @@ FROM python:3.14-slim
 
 WORKDIR /app
 
+# 不生成 .pyc（容器里没有意义，还会在只读层外留垃圾）；日志不缓冲，
+# docker compose logs 能实时看到
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

@@ -1,3 +1,10 @@
+# 日志轮转：docker 默认的 json-file 驱动不限大小，长期运行会把磁盘吃满
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   telegram-bot-api:
     image: aiogram/telegram-bot-api:latest
@@ -8,6 +15,7 @@ services:
       TELEGRAM_LOCAL: "true"
     volumes:
       - botapi-data:/var/lib/telegram-bot-api
+    logging: *default-logging
     networks: [internal]
 
   aria2:
@@ -20,7 +28,7 @@ services:
       PUID: 1000
       PGID: 1000
     volumes:
-      - ./downloads:/downloads
+      - ${HOST_DOWNLOAD_DIR:-./downloads}:/downloads
       - ./aria2-config:/config
     # No host port published: bot/web reach this over the internal docker network
     # (aria2:6800), and ariang proxies /jsonrpc to it server-side (see
@@ -29,6 +37,7 @@ services:
     # that was never actually given in those exact terms — reverted rather than
     # left live on an unconfirmed risk.)
     logging:
+      driver: json-file
       options:
         max-size: "1m"
     networks: [internal]
@@ -39,12 +48,13 @@ services:
     env_file: .env
     depends_on: [telegram-bot-api, aria2]
     volumes:
-      - ./downloads:/downloads
+      - ${HOST_DOWNLOAD_DIR:-./downloads}:/downloads
       - ./data:/app/data
       # settings edited at runtime (gofile toggles) are written back to .env;
       # mount the host file so those writes survive restarts and are visible
       # to the web container too (env_file alone only injects at start)
       - ./.env:/app/.env
+    logging: *default-logging
     networks: [internal]
 
   web:
@@ -58,13 +68,15 @@ services:
       # session cookie (bot/web/auth.py) + per-IP login rate limiting (bot/web/app.py,
       # 5 attempts / 5 min then a 5 min lockout). Still plain HTTP — no TLS — so treat
       # ADMIN_PASSWORD as sent in the clear on every login.
-      - "8080:8080"
+      # 在 .env 里设 WEB_BIND=127.0.0.1 可改成只监听本机（配合 SSH 隧道/反向代理）。
+      - "${WEB_BIND:-0.0.0.0}:8080:8080"
     volumes:
       - ./data:/app/data
       - ./aria2-config:/aria2-config
       # web writes ADMIN_PASSWORD / GOFILE_* here — without this mount those
       # writes landed on the container's own filesystem and vanished on restart
       - ./.env:/app/.env
+    logging: *default-logging
     networks: [internal]
     profiles: ["web"]
 
@@ -78,7 +90,8 @@ services:
       # Exposed publicly at the user's request, same posture as `web` above. Only
       # this port needs to be public — aria2's RPC port itself stays internal-only,
       # nginx proxies /jsonrpc to it server-side.
-      - "6880:80"
+      - "${WEB_BIND:-0.0.0.0}:6880:80"
+    logging: *default-logging
     networks: [internal]
     profiles: ["web"]
 
