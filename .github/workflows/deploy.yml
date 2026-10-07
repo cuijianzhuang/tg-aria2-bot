@@ -5,25 +5,15 @@ on:
     branches: [master]
   workflow_dispatch: {}
 
-env:
-  BOT_TOKEN: test-token
-  API_ID: "1"
-  API_HASH: test-hash
-  ARIA2_SECRET: test-secret
+# 连续推送时不并发部署：后一次排队等前一次结束，而不是两个 update.sh 同时改服务器
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
 
 jobs:
-  # Gate the deploy on tests passing in CI — running them on the server AFTER
-  # `git reset --hard` means a red test suite already left the checkout half-updated.
+  # 复用 test.yml（ruff + 导入检查 + 单测 + shellcheck），全部通过才部署
   test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.11"
-          cache: pip
-      - run: pip install -r requirements.txt
-      - run: python -m unittest discover tests
+    uses: ./.github/workflows/test.yml
 
   deploy:
     runs-on: ubuntu-latest
@@ -36,14 +26,14 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script_stop: true
+          # 服务器端走 update.sh：备份 .env/数据库 → 对齐 origin/master → 装依赖 →
+          # 导入校验 → 重启 → 健康检查，任一步失败自动回滚到部署前的版本并让
+          # 这个 job 失败。update.sh 取自 origin/master 而不是服务器当前的
+          # checkout，这样脚本本身的改进第一次部署就能生效。手动触发
+          # （workflow_dispatch）时加 --force：没有新提交也重新应用+重启一遍。
           script: |
+            set -e
             cd /root/tg-aria2-bot
-            git fetch origin
-            git reset --hard origin/master
-            .venv/bin/pip install -q -r requirements.txt
-            .venv/bin/python -m compileall -q bot
-            .venv/bin/python -c 'import bot.main'
-            systemctl restart tg-aria2-bot
-            systemctl try-restart tg-aria2-web 2>/dev/null || true
-            sleep 2
-            systemctl is-active tg-aria2-bot
+            git fetch -q origin master
+            git show origin/master:update.sh > /tmp/tg-aria2-update.sh
+            bash /tmp/tg-aria2-update.sh --dir /root/tg-aria2-bot --branch master --reset --yes ${{ github.event_name == 'workflow_dispatch' && '--force' || '' }}

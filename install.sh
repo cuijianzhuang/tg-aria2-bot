@@ -16,7 +16,12 @@
 #   --admin-password PW   set the web admin password (auto-generated + printed once if omitted)
 #   --no-web               skip the web admin entirely (AriaNg + custom backend both off)
 #
-# Any flag omitted is asked for interactively. Re-run any time to update .env in place.
+# Any flag omitted is asked for interactively (re-runs prefill from the existing .env).
+# Re-running only rewrites the keys this script manages; everything else in .env
+# (settings changed from the bot/web admin, extra options) is kept as-is.
+#
+# To upgrade an existing deployment to the latest code, use ./update.sh instead.
+# Day-to-day management (status/logs/restart/config/backup): sudo ./manage.sh
 
 set -euo pipefail
 
@@ -37,6 +42,9 @@ log()  { printf '\033[1;32m[install]\033[0m %s\n' "$1"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$1"; }
 die()  { printf '\033[1;31m[error]\033[0m %s\n' "$1"; exit 1; }
 
+# shellcheck source=scripts/env_lib.sh
+source "$SCRIPT_DIR/scripts/env_lib.sh"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode) MODE="$2"; shift 2 ;;
@@ -55,6 +63,30 @@ done
 
 if [[ "$EUID" -ne 0 ]]; then
   die "请用 root 权限运行 (sudo ./install.sh ...)"
+fi
+
+# ---- idempotency guard: re-running this script must never silently rotate
+# secrets or switch an existing deployment's mode out from under it. Both of
+# those have actually happened (rotated ADMIN_PASSWORD/ARIA2_SECRET on rerun;
+# switching --mode overwrote a live docker deployment's .env with bare-mode
+# host paths) — so pull forward whatever already exists in .env first.
+EXISTING_ARIA2_SECRET=""
+EXISTING_ADMIN_PASSWORD=""
+EXISTING_MODE=""
+if [[ -f .env ]]; then
+  EXISTING_ARIA2_SECRET="$(env_get ARIA2_SECRET)"
+  EXISTING_ADMIN_PASSWORD="$(env_get ADMIN_PASSWORD)"
+  # docker mode always sets BOT_API_URL to the compose service name; bare mode
+  # rewrites it to 127.0.0.1. Use that as the fingerprint of the deployed mode.
+  EXISTING_BOT_API_URL="$(env_get BOT_API_URL)"
+  [[ "$EXISTING_BOT_API_URL" == "http://telegram-bot-api:8081" ]] && EXISTING_MODE="docker"
+  [[ "$EXISTING_BOT_API_URL" == "http://127.0.0.1:8081" ]] && EXISTING_MODE="bare"
+  # 重跑时凭据默认沿用 .env 里的值，不用再交互输入一遍
+  [[ -z "$MODE" ]]        && MODE="$EXISTING_MODE"
+  [[ -z "$BOT_TOKEN" ]]   && BOT_TOKEN="$(env_get BOT_TOKEN)"
+  [[ -z "$API_ID" ]]      && API_ID="$(env_get API_ID)"
+  [[ -z "$API_HASH" ]]    && API_HASH="$(env_get API_HASH)"
+  [[ -z "$ALLOWED_IDS" ]] && ALLOWED_IDS="$(env_get ALLOWED_USER_IDS)"
 fi
 
 # ---- interactive fallback for anything not passed as a flag ----
@@ -79,24 +111,6 @@ fi
 [[ -n "$BOT_TOKEN" ]] || die "Bot Token 不能为空"
 [[ -n "$API_ID" ]]    || die "API ID 不能为空"
 [[ -n "$API_HASH" ]]  || die "API Hash 不能为空"
-
-# ---- idempotency guard: re-running this script must never silently rotate
-# secrets or switch an existing deployment's mode out from under it. Both of
-# those have actually happened (rotated ADMIN_PASSWORD/ARIA2_SECRET on rerun;
-# switching --mode overwrote a live docker deployment's .env with bare-mode
-# host paths) — so pull forward whatever already exists in .env first.
-EXISTING_ARIA2_SECRET=""
-EXISTING_ADMIN_PASSWORD=""
-EXISTING_MODE=""
-if [[ -f .env ]]; then
-  EXISTING_ARIA2_SECRET="$(grep -m1 '^ARIA2_SECRET=' .env | cut -d= -f2- || true)"
-  EXISTING_ADMIN_PASSWORD="$(grep -m1 '^ADMIN_PASSWORD=' .env | cut -d= -f2- || true)"
-  # docker mode always sets BOT_API_URL to the compose service name; bare mode
-  # rewrites it to 127.0.0.1. Use that as the fingerprint of the deployed mode.
-  EXISTING_BOT_API_URL="$(grep -m1 '^BOT_API_URL=' .env | cut -d= -f2- || true)"
-  [[ "$EXISTING_BOT_API_URL" == "http://telegram-bot-api:8081" ]] && EXISTING_MODE="docker"
-  [[ "$EXISTING_BOT_API_URL" == "http://127.0.0.1:8081" ]] && EXISTING_MODE="bare"
-fi
 
 if [[ -n "$EXISTING_MODE" && "$EXISTING_MODE" != "$MODE" ]]; then
   die "检测到当前 .env 是 ${EXISTING_MODE} 模式的部署，你这次选的是 ${MODE} 模式。
@@ -124,27 +138,51 @@ fi
 
 mkdir -p "$DOWNLOAD_DIR" data aria2-config
 
-# ---- write .env (idempotent, always regenerated from current answers) ----
-cat > .env <<EOF
-BOT_TOKEN=${BOT_TOKEN}
-API_ID=${API_ID}
-API_HASH=${API_HASH}
-BOT_API_URL=http://telegram-bot-api:8081
+# ---- write .env: only the keys this script manages; everything else is kept ----
+FRESH_ENV=0
+if [[ ! -f .env ]]; then
+  cp .env.example .env
+  chmod 600 .env
+  FRESH_ENV=1
+fi
+env_set BOT_TOKEN "$BOT_TOKEN"
+env_set API_ID "$API_ID"
+env_set API_HASH "$API_HASH"
+env_set ARIA2_SECRET "$ARIA2_SECRET"
+env_set ALLOWED_USER_IDS "$ALLOWED_IDS"
+env_set ADMIN_PASSWORD "$ADMIN_PASSWORD"
 
-ARIA2_RPC=http://aria2:6800/jsonrpc
-ARIA2_SECRET=${ARIA2_SECRET}
-
-ALLOWED_USER_IDS=${ALLOWED_IDS}
-DOWNLOAD_DIR=/downloads
-MAX_FILE_SIZE=2147483648
-MAX_CONCURRENT=3
-PROXY_URL=
-DB_PATH=/app/data/tasks.db
-
-ADMIN_PASSWORD=${ADMIN_PASSWORD}
-WEB_PORT=8080
-EOF
-log ".env 已生成 (aria2 密钥已自动生成)"
+if [[ "$MODE" == "docker" ]]; then
+  env_set BOT_API_URL "http://telegram-bot-api:8081"
+  env_set ARIA2_RPC "http://aria2:6800/jsonrpc"
+  env_set DOWNLOAD_DIR "/downloads"
+  env_set DB_PATH "/app/data/tasks.db"
+  # 下面两个只给 docker compose 自己读（变量插值 / 默认启用的 profile），
+  # bot 进程会忽略它们
+  env_set HOST_DOWNLOAD_DIR "$DOWNLOAD_DIR"
+  if [[ "$NO_WEB" -eq 1 ]]; then env_set COMPOSE_PROFILES ""; else env_set COMPOSE_PROFILES "web"; fi
+else
+  # bare mode: no compose network, everything on the host
+  env_set BOT_API_URL "http://127.0.0.1:8081"
+  env_set ARIA2_RPC "http://127.0.0.1:6800/jsonrpc"
+  env_set DOWNLOAD_DIR "$(realpath "$DOWNLOAD_DIR")"
+  env_set DB_PATH "$(realpath data)/tasks.db"
+  if [[ "$FRESH_ENV" -eq 1 ]]; then
+    # .env.example 里这几项是 docker 模式的默认值；bare 模式下 aria2.sh 把
+    # 配置/钩子脚本装在 /root/.aria2c、服务名是 aria2，不改的话设置菜单里的
+    # "重启 aria2"、rclone 钩子切换都会指向不存在的东西。只在首次生成 .env
+    # 时写，重跑不覆盖用户自己改过的值。
+    env_set ARIA2_SERVICE_NAME "aria2"
+    env_set ARIA2_CONFIG_DIR "/root/.aria2c"
+    env_set ARIA2_CLEAN_HOOK "/root/.aria2c/clean.sh"
+    env_set ARIA2_UPLOAD_HOOK "/root/.aria2c/upload.sh"
+  fi
+fi
+if [[ "$FRESH_ENV" -eq 1 ]]; then
+  log ".env 已生成 (aria2 密钥已自动生成)"
+else
+  log ".env 已更新（只改了凭据/路径相关的键，其它配置保持不变）"
+fi
 
 # docker 模式下 aria2-config/ 已预置真实的 P3TERX/aria2.conf 文件（离线可用），
 # 只需要把生成的密钥写进占位符；bare 模式走 aria2.sh 自己的安装流程，不涉及这份预置文件。
@@ -171,11 +209,6 @@ if [[ "$MODE" == "docker" ]]; then
   bash scripts/install_docker.sh "${EXTRA_FLAGS[@]}"
 else
   log "部署方式: bare metal"
-  # bare mode still needs http://127.0.0.1:8081 style URL (no compose network)
-  sed -i 's#BOT_API_URL=.*#BOT_API_URL=http://127.0.0.1:8081#' .env
-  sed -i 's#ARIA2_RPC=.*#ARIA2_RPC=http://127.0.0.1:6800/jsonrpc#' .env
-  sed -i "s#DOWNLOAD_DIR=.*#DOWNLOAD_DIR=$(realpath "$DOWNLOAD_DIR")#" .env
-  sed -i "s#DB_PATH=.*#DB_PATH=$(realpath data)/tasks.db#" .env
   bash scripts/install_bare.sh "${EXTRA_FLAGS[@]}"
 fi
 
@@ -188,4 +221,8 @@ elif [[ "$ADMIN_PASSWORD_GENERATED" -eq 1 ]]; then
   echo
 fi
 
-log "完成。"
+# 管理菜单快捷命令：之后在任何目录 sudo tg-aria2 就能打开（状态/日志/重启/
+# 改配置/升级/备份恢复都在里面）
+ln -sf "$SCRIPT_DIR/manage.sh" /usr/local/bin/tg-aria2 2>/dev/null || true
+
+log "完成。日常管理（状态/日志/重启/改配置/升级/备份）运行：sudo tg-aria2"

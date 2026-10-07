@@ -55,7 +55,9 @@ ARIA2_CONF_DIR="/root/.aria2c"
 ARIA2_RPC_SECRET_LINE="$(grep -oP '(?<=rpc-secret=).*' "$ARIA2_CONF_DIR/aria2.conf" 2>/dev/null || true)"
 if [[ -n "$ARIA2_RPC_SECRET_LINE" ]]; then
   log "检测到 aria2.sh 已生成的 RPC secret，同步到 .env"
-  sed -i "s#ARIA2_SECRET=.*#ARIA2_SECRET=${ARIA2_RPC_SECRET_LINE}#" .env
+  # shellcheck source=scripts/env_lib.sh
+  source "$SCRIPT_DIR/scripts/env_lib.sh"
+  env_set ARIA2_SECRET "$ARIA2_RPC_SECRET_LINE"
 fi
 log "move.sh / upload.sh 默认未接入 aria2 钩子（on-download-complete 只调用 clean.sh），不会自动生效，无需额外操作"
 systemctl enable --now aria2 2>/dev/null || true
@@ -170,7 +172,8 @@ cat <<EOF
   systemctl status tg-aria2-bot        查看机器人状态
   journalctl -u tg-aria2-bot -f        查看机器人日志
   systemctl status aria2               查看 aria2 状态
-  aria2p -p 6800 --secret \$(grep rpc-secret ${ARIA2_CONF_DIR}/aria2.conf | cut -d= -f2)  # 可选 CLI 查看任务
+  sudo ./update.sh                     升级到最新版本（自动备份、失败自动回滚）
+  sudo tg-aria2                        交互式管理菜单（状态/日志/重启/改配置/备份恢复）
 EOF
 
 if [[ "$NO_WEB" -eq 0 ]]; then

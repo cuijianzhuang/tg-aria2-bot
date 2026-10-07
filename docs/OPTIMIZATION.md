@@ -201,3 +201,30 @@ aria2p 是同步库，每次调用都要 `to_thread`。aria2 的 JSON-RPC 极简
 | `Aria2Client.remove` 冗余往返 | ✅ | 原来无论 `files` 参数是否为真都会先 `tellStatus` 拿一次 dir/files，只有 `files=True` 且是本地节点才用得上；改成只在真需要删文件时才发这次 RPC，顺带修了一个小回归：之前对一个已经不存在的 gid 调用 `remove(gid, files=False)`（比如取消已被外部清理的任务）会被这次多余的 `tellStatus` 提前抛错，现在会正常走到 `forceRemove`/`removeDownloadResult` 的兜底逻辑 |
 | #14 补充：轮询串行拖慢 | ✅ | `_poll_once` 原来是逐节点 `for` 循环——单次 RPC 有 10s 超时兜底没错，但串行意味着一个卡住的节点会让排在它后面的健康节点也多等最多 10s，节点越多越明显；改成 `asyncio.gather` 并发展开各节点，同时 `return_exceptions=True` 顺带修了另一个问题：某节点处理某个任务行时抛出非 RPC 层异常，以前会打断当轮循环里排在它后面的其它节点，现在互不影响 |
 | 节点离线告警 | ✅ | `TaskManager._handle_node_health`：节点连续不可达超过 10 分钟（`NODE_OFFLINE_ALERT_SECONDS`）才告警一次管理员，跟磁盘告警同一套冷却/重置语义；见 `docs/MULTI_NODE_DESIGN.md` §七 |
+
+## 实施记录（2026-10-07）：部署与升级流程
+
+| 项 | 说明 |
+|----|------|
+| `.env` 未知键导致启动即崩 | pydantic-settings 对 `env_file` 默认 `extra="forbid"`：`.env` 里只要出现当前版本不认识的键（新版本的配置项、回滚到旧版本后残留的键、给 compose 用的变量）bot 直接起不来。改为 `extra="ignore"`，补了回归测试 |
+| `install.sh` 重跑冲掉运行时配置 | 以前每次整个重写 `.env`，设置菜单/Web 后台写回的 `MAX_CONCURRENT`、`GOFILE_*`、`AUTO_CLEANUP_DAYS` 等全部丢失。改为首次从 `.env.example` 生成、之后只就地改脚本管理的键（`scripts/env_lib.sh`）；重跑时凭据/模式从 `.env` 预填，不用再输入 |
+| bare 模式服务名/钩子路径错位 | `.env` 默认 `ARIA2_SERVICE_NAME=tg-aria2-bot-aria2`、钩子路径是 docker 的 `/config/script/`，但 aria2.sh 注册的服务名是 `aria2`、配置在 `/root/.aria2c`——"重启 aria2"按钮和 rclone 钩子切换在 bare 模式下都指向不存在的东西。首次 bare 安装时写入正确值 |
+| docker `--download-dir` 不生效 | compose 里写死 `./downloads`，`--download-dir` 只是在宿主机建了个没挂载的目录。改为 `${HOST_DOWNLOAD_DIR:-./downloads}` |
+| 新增 `update.sh` | 一键升级：fetch → 列出提交 → 备份（.env、SQLite 在线备份、版本号）→ 保存/恢复 `aria2-config/` 本地改动（以前它们会让 `git pull` 直接失败）→ ff 更新 → 两阶段 exec 新版脚本应用 → 健康检查（20s 内是否崩溃重启）→ 失败自动回滚。bare 模式重启前先做导入校验，systemd 单元只在模板变化时同步且先备份。在沙箱里模拟了正常升级/导入失败/运行时崩溃/从无 update.sh 的老版本首次升级四种场景 |
+| CI/CD | deploy 复用 test.yml（以前 deploy 自带的测试 job 漏了 ruff 和导入检查），服务器端改走 `update.sh --reset`，加 `concurrency` 防并发部署；test 增加 Python 3.14（docker 镜像实际版本）矩阵和 shellcheck |
+| `deploy.sh` | 同步了 `requirements.txt` 却从不 `pip install`、不重启 web；补上，目标服务器可用环境变量覆盖 |
+| docker | 所有服务日志轮转（10MB×3）；`COMPOSE_PROFILES` 写进 `.env`，手敲 `docker compose up` 不再漏掉 web；`WEB_BIND` 可把 8080/6880 改为只监听本机；README 里"只监听 127.0.0.1"的说法与 docker 实际（对公网开放）不符，已更正 |
+| 交互式管理菜单 | 新增 `manage.sh`（安装时注册快捷命令 `tg-aria2`）：服务状态/日志/重启/启停、常用配置修改（带校验，改密码同时轮换会话密钥）、Web 访问信息、检查更新/升级、备份/恢复、回退历史版本；docker/bare 两种模式同一套操作，也支持子命令非交互调用。`update.sh` 配套新增 `--to`（回退到指定版本，复用备份/健康检查/自动回滚）和 `--backup-only` |
+| docker 下设置被重启还原 | bot/web 容器同时用 `env_file: .env`（创建时冻结成环境变量）和挂载的 `/app/.env`，而 pydantic-settings 中环境变量优先于 .env 文件——设置菜单写回 .env 的开关（GoFile、自动发送等）在 `docker compose restart` 后被创建时的旧值盖掉、悄悄还原。去掉 bot/web 的 `env_file`，只从挂载文件读配置 |
+
+## 实施记录（2026-10-07）：Telegram 按钮交互
+
+| 项 | 说明 |
+|----|------|
+| 🔴 设置页越权 | 主菜单「⚙️ 设置」进入的全局设置回调（限速、并发、单文件上限、下载目录、自动清理、通知/自动发送）都挂在普通 router 上，没有管理员校验：`/settings` 命令是管理员专属，但任何白名单用户点按钮就能改全局配置、触发清理。拆到 `handlers/settings_menu.py` 并整体挂 `AdminMiddleware`，非管理员的主菜单不再显示「设置」，任务列表不显示「清理已完成」 |
+| 返回列表丢位置 | 列表里点开任务后「返回列表」固定回「全部」第一页；在卡片上暂停/刷新一下返回按钮就消失。列表行改为 `topen:<tab>:<页>:<gid>`，返回按钮在卡片和各级子菜单之间一路保留 |
+| 任务卡片按钮 | 「ℹ️ 详情」实为刷新，改名「🔄 刷新」；「📂 位置」实为选择文件，改名「🗂 选择文件」且确定是单文件时不显示；已完成任务的 GoFile 链接改为直接打开的 URL 按钮，去掉与「保存位置」重复的「获取链接」；失败卡片去掉「查看原因」（原因已在正文）；已取消任务可「重新下载」 |
+| 删除确认 | 「删除」以前一点就删、无确认。改为确认页：仅删记录 / 删记录和文件（本机节点、路径确实在下载目录内才出现，删文件二次确认；伪造回调也无法删到下载目录之外或目录本身）。从列表进来的删完回到列表原位置 |
+| 列表/主菜单 | 列表行带状态图标、加刷新按钮；批量「全部暂停/继续」分别只出现在对应 tab；主菜单加「📊 统计」，有失败任务时加「⚠️ 失败 N」直达 |
+| 选择器 | 全局限速选择器标出当前值（aria2 返回字节数，换算后对上预设）；限速/单文件上限按钮改为多列排布，少占屏幕 |
+| GoFile 流水线 | 上传前就失败时完成通知会因 `link` 未定义抛 NameError（新加的链接按钮会触发），先初始化 |

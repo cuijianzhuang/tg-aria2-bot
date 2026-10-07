@@ -21,22 +21,43 @@ STATUS_LABEL = {
 }
 
 
-def main_inline_keyboard(counts: dict[str, int] | None = None, *, node_label: str | None = None) -> InlineKeyboardMarkup:
-    """node_label 仅多节点部署时传入（当前节点显示名），单节点不显示该行。"""
-    active = (counts or {}).get("ACTIVE", 0)
-    active_label = f"⬇️ 下载中 {active}" if active else "⬇️ 下载中"
-    rows = [
-        [
-            InlineKeyboardButton(text=active_label, callback_data="list:ACTIVE:0"),
-            InlineKeyboardButton(text="📋 任务列表", callback_data="list:ALL:0"),
-        ],
+# 从任务列表打开任务卡片时附在卡片底部的返回按钮文案。callbacks.py 靠这段
+# 文案 + "list:" 前缀从当前消息里认出它，在任务卡片的各级子菜单（限速、取消
+# 确认、删除确认……）之间一路带着走，返回时回到原来的 tab 和页码
+BACK_TO_LIST_TEXT = "⬅️ 返回列表"
+
+
+def _chunk(buttons: list[InlineKeyboardButton], size: int) -> list[list[InlineKeyboardButton]]:
+    return [buttons[i:i + size] for i in range(0, len(buttons), size)]
+
+
+def _mark(label: str, selected: bool) -> str:
+    """选择器里标记当前值（Telegram 按钮没法加样式，只能改文字）。"""
+    return f"·{label}·" if selected else label
+
+
+def main_inline_keyboard(
+    counts: dict[str, int] | None = None, *, node_label: str | None = None, is_admin: bool = True,
+) -> InlineKeyboardMarkup:
+    """node_label 仅多节点部署时传入（当前节点显示名），单节点不显示该行。
+    is_admin=False 时不显示「设置」——那里全是全局配置，非管理员点了也只会被拒。"""
+    c = counts or {}
+    active = c.get("ACTIVE", 0)
+    first = [
+        InlineKeyboardButton(text=f"⬇️ 下载中 {active}" if active else "⬇️ 下载中", callback_data="list:ACTIVE:0"),
+        InlineKeyboardButton(text="📋 任务列表", callback_data="list:ALL:0"),
     ]
+    # 有失败任务时给个直达入口，不用进列表再切 tab
+    if c.get("FAILED", 0):
+        first.append(InlineKeyboardButton(text=f"⚠️ 失败 {c['FAILED']}", callback_data="list:FAILED:0"))
+    rows = [first]
     if node_label:
         rows.append([InlineKeyboardButton(text=f"🖥 节点: {node_label} ▾", callback_data="node:pick")])
-    rows.append([
-        InlineKeyboardButton(text="⚙️ 设置", callback_data="nav:settings"),
-        InlineKeyboardButton(text="🔄 刷新", callback_data="nav:start"),
-    ])
+    bottom = [InlineKeyboardButton(text="📊 统计", callback_data="stats:7")]
+    if is_admin:
+        bottom.append(InlineKeyboardButton(text="⚙️ 设置", callback_data="nav:settings"))
+    bottom.append(InlineKeyboardButton(text="🔄 刷新", callback_data="nav:start"))
+    rows.append(bottom)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -101,75 +122,80 @@ def batch_pending_keyboard(batch_id: str) -> InlineKeyboardMarkup:
     )
 
 
-def _action_buttons(gid: str, status: str, prefix: str, label_prefix: str = "") -> list[list[InlineKeyboardButton]]:
-    """Action buttons for one task, using the given callback_data prefix so the
-    handler can tell single-task messages ("task:") apart from a /list row
-    ("ltask:") — the latter needs to re-render the whole list on tap, not just
-    edit its own row, since one Telegram message has one shared keyboard.
-    label_prefix (e.g. "#3 ") disambiguates rows when several sit in one keyboard.
+def _action_buttons(
+    gid: str, status: str, *, local: bool = True, multi_file: bool | None = None,
+) -> list[list[InlineKeyboardButton]]:
+    """单个任务卡片上的操作按钮，按状态给不同组合。
+
+    - 卡片本身就是详情页，原来的「ℹ️ 详情」实际作用是刷新，直接叫「🔄 刷新」
+    - 「🗂 选择文件」只对多文件任务有意义；multi_file=False（明确知道是单文件）
+      时不显示，None（不知道，比如磁力还在抓元数据）时照常显示
+    - 远程节点（local=False）不显示依赖本机文件系统的「发送到 TG」
     """
+    refresh = ("🔄 刷新", "detail")
+    pick_files = ("🗂 选择文件", "files") if multi_file is not False else None
     if status == "PENDING":
-        rows = [
-            [("ℹ️ 详情", "detail")],
-            [("🗑 取消任务", "cancel")],
-        ]
+        rows = [[refresh, ("🗑 取消任务", "cancel")]]
     elif status == "ACTIVE":
         rows = [
-            [("⏸ 暂停", "pause"), ("ℹ️ 详情", "detail")],
-            [("📂 位置", "files"), ("🚀 限速", "limit")],
+            [("⏸ 暂停", "pause"), refresh],
+            [b for b in (pick_files, ("🚀 限速", "limit")) if b],
             [("🗑 取消任务", "cancel")],
         ]
     elif status == "PAUSED":
         rows = [
-            [("▶️ 继续", "resume"), ("ℹ️ 详情", "detail")],
-            [("📂 位置", "files"), ("🗑 取消任务", "cancel")],
+            [("▶️ 继续", "resume"), refresh],
+            [b for b in (pick_files, ("🗑 取消任务", "cancel")) if b],
         ]
     elif status == "COMPLETED":
         rows = [
-            [("📂 保存位置", "files"), ("🔗 获取链接", "link")],
-            [("📤 发送到 TG", "sendtg")],  # 远程节点任务由 task_keyboard 的 local 开关移除
-            [("🗑 删除记录", "delete")],
+            [b for b in (("📂 保存位置", "files"), ("📤 发送到 TG", "sendtg") if local else None) if b],
+            [("🗑 删除", "delete")],
         ]
     elif status == "FAILED":
-        rows = [
-            [("🔄 重试", "retry"), ("ℹ️ 查看原因", "detail")],
-            [("🗑 删除记录", "delete")],
-        ]
+        # 失败原因已经写在卡片正文里了，不再单独占一个按钮
+        rows = [[("🔄 重试", "retry"), ("🗑 删除", "delete")]]
     elif status == "CANCELLED":
-        rows = [[("🗑 删除记录", "delete")]]
+        rows = [[("🔄 重新下载", "retry"), ("🗑 删除记录", "delete")]]
     else:
         return []
     return [
-        [
-            InlineKeyboardButton(text=f"{label_prefix}{label}", callback_data=f"{prefix}:{action}:{gid}")
-            for label, action in row
-        ]
-        for row in rows
+        [InlineKeyboardButton(text=label, callback_data=f"task:{action}:{gid}") for label, action in row]
+        for row in rows if row
     ]
 
 
-def task_keyboard(gid: str, status: str, *, with_back: bool = False, local: bool = True) -> InlineKeyboardMarkup | None:
-    """Buttons for a single task's own progress message; None if the status is
-    unrecognized (there's always at least a delete option once terminal).
-    with_back appends a 返回列表 row for cards opened from the task list.
-    local=False（任务在远程节点上）时移除依赖本机文件系统的按钮（发送到 TG）
-    ——按钮直接不渲染，而不是点了再报错。"""
-    rows = _action_buttons(gid, status, "task")
-    if not local:
-        filtered = []
-        for row in rows:
-            kept = [b for b in row if not b.callback_data.startswith("task:sendtg:")]
-            if kept:
-                filtered.append(kept)
-        rows = filtered
-    if with_back:
-        rows.append([InlineKeyboardButton(text="⬅️ 返回列表", callback_data="list:ALL:0")])
-    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+def task_keyboard(
+    gid: str, status: str, *,
+    with_back: bool = False, back: str | None = None,
+    local: bool = True, multi_file: bool | None = None, link: str | None = None,
+) -> InlineKeyboardMarkup | None:
+    """单个任务卡片的键盘；状态不认识时返回 None。
+
+    back：返回按钮的 callback_data（从列表打开时是 "list:<tab>:<页>"，回到
+    原来的位置）；with_back=True 是旧写法，等价于 back="list:ALL:0"。
+    link：已完成任务的 GoFile 链接，有就放一个直接打开的 URL 按钮，不用再
+    点开弹窗复制。"""
+    rows = _action_buttons(gid, status, local=local, multi_file=multi_file)
+    if not rows:
+        return None
+    if link and status == "COMPLETED" and link.startswith(("http://", "https://")):
+        rows.insert(0, [InlineKeyboardButton(text="☁️ 打开 GoFile 链接", url=link)])
+    if back is None and with_back:
+        back = "list:ALL:0"
+    if back:
+        rows.append([InlineKeyboardButton(text=BACK_TO_LIST_TEXT, callback_data=back)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def task_open_button(index: int, gid: str, name: str) -> list[InlineKeyboardButton]:
-    text = f"{index}. {name[:30]}"
-    return [InlineKeyboardButton(text=text, callback_data=f"task:open:{gid}")]
+def task_open_button(index: int, gid: str, name: str, *, status: str | None = None,
+                     back: str | None = None) -> list[InlineKeyboardButton]:
+    """列表里的一行任务。带状态图标，扫一眼就知道哪些在下载/失败；
+    back 是 "<tab>:<页>"，让打开的卡片能返回到原来的列表位置。"""
+    icon = STATUS_EMOJI.get(status, "") if status else ""
+    text = f"{icon} {index}. {name[:30]}".strip()
+    data = f"topen:{back}:{gid}" if back else f"task:open:{gid}"
+    return [InlineKeyboardButton(text=text, callback_data=data)]
 
 
 def file_selection_keyboard(gid: str, download) -> InlineKeyboardMarkup:
@@ -196,6 +222,23 @@ def redownload_keyboard(gid: str | None) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="🔄 重新下载", callback_data=f"task:retry:{gid}")]]
     )
+
+
+def task_delete_confirm_keyboard(gid: str, *, can_delete_files: bool = False,
+                                 destructive: bool = False) -> InlineKeyboardMarkup:
+    """「🗑 删除」的确认：仅删记录 / 连同磁盘文件一起删（本机节点且有保存
+    路径时才给这个选项），删文件还要再确认一次——跟取消任务同一套两步确认。"""
+    if destructive:
+        rows = [
+            [InlineKeyboardButton(text="⚠️ 确认永久删除文件", callback_data=f"task:purge:{gid}")],
+            [InlineKeyboardButton(text="⬅️ 返回任务", callback_data=f"task:detail:{gid}")],
+        ]
+    else:
+        rows = [[InlineKeyboardButton(text="🗑 仅删除记录", callback_data=f"task:delete_record:{gid}")]]
+        if can_delete_files:
+            rows.append([InlineKeyboardButton(text="🗑 删除记录和文件", callback_data=f"task:confirm_purge:{gid}")])
+        rows.append([InlineKeyboardButton(text="⬅️ 返回任务", callback_data=f"task:detail:{gid}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def task_cancel_confirm_keyboard(gid: str, *, destructive: bool = False) -> InlineKeyboardMarkup:
@@ -293,11 +336,31 @@ LIMIT_PRESETS = (
 )
 
 
-def limit_chooser_keyboard() -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text=label, callback_data=f"setlimit:{value}")]
+def _limit_value_key(raw: str | None) -> str | None:
+    """aria2 返回的限速是字节数（"2097152"），预设是 "2M" 这种写法——换算
+    成同一种形式才能标出当前选中的是哪个预设。"""
+    if raw is None:
+        return None
+    if raw in {v for _, v in LIMIT_PRESETS}:
+        return raw
+    try:
+        n = int(raw)
+    except ValueError:
+        return None
+    if n == 0:
+        return "0"
+    if n % (1024 * 1024) == 0:
+        return f"{n // (1024 * 1024)}M"
+    return None
+
+
+def limit_chooser_keyboard(current: str | None = None) -> InlineKeyboardMarkup:
+    cur = _limit_value_key(current)
+    buttons = [
+        InlineKeyboardButton(text=_mark(label, value == cur), callback_data=f"setlimit:{value}")
         for label, value in LIMIT_PRESETS
     ]
+    rows = [[buttons[0]], *_chunk(buttons[1:], 2)]
     rows.append([InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -331,13 +394,10 @@ MAXSIZE_PRESETS = (
 
 
 def maxsize_chooser_keyboard(current_mb: str | None = None) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(
-            text=f"·{label}·" if value == current_mb else label,
-            callback_data=f"setmaxsize:{value}",
-        )]
+    rows = _chunk([
+        InlineKeyboardButton(text=_mark(label, value == current_mb), callback_data=f"setmaxsize:{value}")
         for label, value in MAXSIZE_PRESETS
-    ]
+    ], 3)
     rows.append([InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -368,13 +428,12 @@ def cleanup_chooser_keyboard(current_days: int) -> InlineKeyboardMarkup:
 
 def task_limit_chooser_keyboard(gid: str, current: str | None = None) -> InlineKeyboardMarkup:
     """跟全局限速用同一套预设，callback_data 里带 gid 区分是哪个任务。"""
-    rows = [
-        [InlineKeyboardButton(
-            text=f"·{label}·" if value == current else label,
-            callback_data=f"tasklimit:{gid}:{value}",
-        )]
+    cur = _limit_value_key(current)
+    buttons = [
+        InlineKeyboardButton(text=_mark(label, value == cur), callback_data=f"tasklimit:{gid}:{value}")
         for label, value in LIMIT_PRESETS
     ]
+    rows = [[buttons[0]], *_chunk(buttons[1:], 2)]
     rows.append([InlineKeyboardButton(text="⬅️ 返回任务", callback_data=f"task:detail:{gid}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

@@ -84,5 +84,22 @@ class TestScopeFor(unittest.TestCase):
         self.assertIsNone(settings.scope_for(None))
 
 
+class TestUnknownEnvKeys(unittest.TestCase):
+    def test_unknown_keys_in_env_file_are_ignored(self):
+        # 升级/回滚后 .env 里常会多出当前版本不认识的键（COMPOSE_PROFILES、
+        # HOST_DOWNLOAD_DIR、新版本的配置项），不能因此启动即崩
+        import os
+        import tempfile
+
+        from bot.config import Settings
+
+        with tempfile.TemporaryDirectory() as d:
+            env_path = os.path.join(d, ".env")
+            with open(env_path, "w") as f:
+                f.write("COMPOSE_PROFILES=web\nHOST_DOWNLOAD_DIR=/srv/dl\nSOME_FUTURE_OPTION=1\n")
+            s = Settings(_env_file=env_path)
+        self.assertFalse(hasattr(s, "compose_profiles"))
+
+
 if __name__ == "__main__":
     unittest.main()

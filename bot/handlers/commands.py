@@ -28,7 +28,10 @@ async def cmd_start(message: Message, repo, nodes):
         node_label = nodes.resolve(preferred).display_name
     await message.reply(
         render_home(counts, stats),
-        reply_markup=main_inline_keyboard(counts, node_label=node_label),
+        reply_markup=main_inline_keyboard(
+            counts, node_label=node_label,
+            is_admin=settings.is_admin(message.from_user.id if message.from_user else None),
+        ),
         parse_mode="HTML",
     )
 
