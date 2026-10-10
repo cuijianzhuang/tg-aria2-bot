@@ -25,15 +25,18 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script_stop: true
           # 服务器端走 tg-aria2.sh update：备份 .env/数据库 → 对齐 origin/master → 装依赖 →
           # 导入校验 → 重启 → 健康检查，任一步失败自动回滚到部署前的版本并让
           # 这个 job 失败。脚本取自 origin/master 而不是服务器当前的
           # checkout，这样脚本本身的改进第一次部署就能生效。手动触发
           # （workflow_dispatch）时加 --force：没有新提交也重新应用+重启一遍。
+          # 仓库在服务器上的路径默认 /root/tg-aria2-bot，装在别处（比如
+          # /opt/tg-aria2-bot）就在仓库 Variables 里设 DEPLOY_PATH。
           script: |
             set -e
-            cd /root/tg-aria2-bot
+            DIR="${{ vars.DEPLOY_PATH || '/root/tg-aria2-bot' }}"
+            [ -d "$DIR/.git" ] || { echo "错误：服务器上的 $DIR 不是 git 仓库。装在别处的话，在仓库 Variables 里设置 DEPLOY_PATH"; exit 1; }
+            cd "$DIR"
             git fetch -q origin master
             git show origin/master:tg-aria2.sh > /tmp/tg-aria2.sh
-            bash /tmp/tg-aria2.sh update --dir /root/tg-aria2-bot --branch master --reset --yes ${{ github.event_name == 'workflow_dispatch' && '--force' || '' }}
+            bash /tmp/tg-aria2.sh update --dir "$DIR" --branch master --reset --yes ${{ github.event_name == 'workflow_dispatch' && '--force' || '' }}

@@ -317,13 +317,15 @@ rclone config                                    # bare 模式
 - [`test.yml`](.github/workflows/test.yml)：PR 和非 master 分支的推送触发——ruff、编译 + 导入检查、全部单元测试（Python 3.11 和 3.14 两个版本，分别对应 bare 模式最低版本和 docker 镜像版本）、shellcheck 检查安装/升级脚本
 - [`deploy.yml`](.github/workflows/deploy.yml)：推到 `master`（或在 Actions 页面手动触发）时先复用 `test.yml` 跑一遍，全部通过后 SSH 登录服务器执行 `tg-aria2.sh update --reset --yes`。用的是 `origin/master` 上最新的 `tg-aria2.sh`，所以升级脚本本身的改进第一次部署就生效；多次推送会排队，不会并发部署。手动触发时带 `--force`，没有新提交也会重新部署一遍
 
-前提是服务器上的 `/root/tg-aria2-bot` 是这个仓库的 git clone（不是 `deploy.sh` 那种文件同步），且以下三个仓库 Secret 已配置（`Settings → Secrets and variables → Actions`）：
+前提是服务器上的仓库目录是这个仓库的 git clone（不是 `deploy.sh` 那种文件同步），默认路径 `/root/tg-aria2-bot`；装在别处（比如 `/opt/tg-aria2-bot`）的话，在 `Settings → Secrets and variables → Actions → Variables` 里加一个仓库变量 `DEPLOY_PATH`。以下三个仓库 Secret 也要配置（`Settings → Secrets and variables → Actions → Secrets`）：
 
 | Secret | 说明 |
 |---|---|
 | `DEPLOY_SSH_KEY` | 部署专用私钥（不要用你日常登录用的私钥） |
 | `DEPLOY_HOST` | 服务器地址 |
 | `DEPLOY_USER` | SSH 用户名 |
+
+部署失败时在 Actions 日志里看「SSH deploy」这一步：`ssh: unable to authenticate` 说明 GitHub 用的密钥被服务器拒绝了——检查 `DEPLOY_SSH_KEY` 是完整的私钥（含 `-----BEGIN` / `-----END` 两行、不带密码短语），对应的公钥在服务器上 `DEPLOY_USER` 的 `~/.ssh/authorized_keys` 里，`DEPLOY_HOST` 指向的是这台服务器；服务器上 `journalctl -u ssh -n 20`（或 `tail /var/log/auth.log`）能看到拒绝的具体原因。
 
 `--reset` 会让服务器上 git 跟踪的文件和 `origin/master` 完全一致，但 `.env`、`data/`、`.venv/`、`downloads/`、`backups/` 这些运行时文件都在 `.gitignore` 里，不受影响；`aria2-config/` 里的本地配置由升级流程备份后原样恢复。想临时关掉自动部署，去 Actions 页面禁用这个 workflow。
 
