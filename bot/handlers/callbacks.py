@@ -70,6 +70,21 @@ async def _current_node_label(query: CallbackQuery, repo, nodes) -> str | None:
     return nodes.resolve(preferred).display_name
 
 
+# 打开后会盖住任务卡片的子菜单：用户在里面操作时不能让自动刷新把它冲掉
+_SUBMENU_ACTIONS = {"cancel", "confirm_delete_files", "delete", "confirm_purge", "files", "limit"}
+
+
+def _attend(task_manager, gid: str, *, submenu: bool = False):
+    """告诉 TaskManager 用户正在和这张卡片互动：普通操作 → 接下来一段时间
+    快速刷新；打开子菜单 → 暂停自动刷新直到用户返回。"""
+    if task_manager is None:
+        return
+    if submenu:
+        task_manager.hold(gid)
+    else:
+        task_manager.watch(gid)
+
+
 def _is_admin(query: CallbackQuery) -> bool:
     return settings.is_admin(query.from_user.id if query.from_user else None)
 
@@ -211,7 +226,7 @@ async def node_use(query: CallbackQuery, repo, nodes):
 
 
 @router.callback_query(F.data.startswith("tasklimit:"))
-async def apply_task_limit(query: CallbackQuery, repo, nodes):
+async def apply_task_limit(query: CallbackQuery, repo, nodes, task_manager=None):
     _, gid, value = query.data.split(":", 2)
     if value not in {v for _, v in LIMIT_PRESETS}:
         await query.answer("无效的限速值", show_alert=True)
@@ -231,6 +246,7 @@ async def apply_task_limit(query: CallbackQuery, repo, nodes):
         await query.answer("设置失败，请稍后再试", show_alert=True)
         return
     name = row["file_name"] or row["source_ref"] or gid
+    _attend(task_manager, gid, submenu=True)
     await _edit(
         query, render_task_limit_chooser(name, value),
         answer_text="✅ 已生效" if value != "0" else "✅ 已取消限速",
@@ -320,7 +336,7 @@ async def _add_source(nodes, node_name: str, kind: str, payload: str, file_name:
 
 
 @router.callback_query(F.data.startswith("pending:"))
-async def handle_pending(query: CallbackQuery, repo, nodes):
+async def handle_pending(query: CallbackQuery, repo, nodes, task_manager=None):
     _, action, token = query.data.split(":", 2)
 
     # 批量确认（一条消息贴了多条链接）走独立分支 —— token 这里实际是 batch_id，
@@ -407,6 +423,7 @@ async def handle_pending(query: CallbackQuery, repo, nodes):
         node=pending.node,
     )
     row = await repo.get_by_id(task_id)
+    _attend(task_manager, gid)  # 刚添加的任务：用户多半在盯着看，先快速刷新一阵
     await _edit(
         query,
         render_task_card(row, status="PENDING", node_label=nodes.label(pending.node)),
@@ -541,6 +558,8 @@ async def _task_action(query: CallbackQuery, repo, nodes, task_manager, action: 
         await query.answer("⛔ 只能操作自己的任务。", show_alert=True)
         return
 
+    _attend(task_manager, gid, submenu=action in _SUBMENU_ACTIONS)
+
     # 所有 RPC 操作走任务自己的归属节点；节点被删/停用时 aria2 为 None，
     # 查看类操作降级为纯 DB 展示，操作类直接提示
     try:
@@ -583,6 +602,7 @@ async def _task_action(query: CallbackQuery, repo, nodes, task_manager, action: 
             reply_message_id=query.message.message_id if query.message else None,
         )
         row = await repo.get_by_id(row["id"])
+        _attend(task_manager, new_gid)
         await _edit(
             query, render_task_card(row, status="PENDING", node_label=node_label),
             answer_text="🔄 已重新加入下载",
@@ -724,7 +744,7 @@ async def _task_action(query: CallbackQuery, repo, nodes, task_manager, action: 
 
 
 @router.callback_query(F.data.startswith("filesel:"))
-async def toggle_file_selection(query: CallbackQuery, repo, nodes):
+async def toggle_file_selection(query: CallbackQuery, repo, nodes, task_manager=None):
     _, gid, index_raw = query.data.split(":", 2)
     row = await repo.get_by_gid(gid)
     if row is None:
@@ -767,6 +787,7 @@ async def toggle_file_selection(query: CallbackQuery, repo, nodes):
         return
 
     download = await _download_or_none(aria2, gid)
+    _attend(task_manager, gid, submenu=True)
     await _edit(
         query, render_file_selection(download),
         reply_markup=_with_back(file_selection_keyboard(gid, download), _back_target(query)), parse_mode="HTML",

@@ -19,14 +19,26 @@ from bot.db.repo import TaskRepo
 
 log = logging.getLogger(__name__)
 
+# 轮询间隔。平时 5 秒（完成/出错主要靠 WebSocket 推送，轮询只是兜底）；
+# 有用户正在看的卡片时降到 2 秒，让进度刷新跟得上
 POLL_INTERVAL_SECONDS = 5
+POLL_FAST_INTERVAL_SECONDS = 2
 # 自动清理检查间隔：不需要很频繁，一天查一次即可（用户改天数后手动触发的
 # run_cleanup_once 会立即生效，不必等这个周期）
 CLEANUP_CHECK_INTERVAL_SECONDS = 24 * 3600
-# Telegram allows ~20 message edits per minute per chat; with several active
-# tasks in one chat a 3s floor eats the budget and starts drawing 429s.
-PROGRESS_EDIT_MIN_INTERVAL = 10.0
-PROGRESS_EDIT_MIN_PERCENT_DELTA = 5.0
+# 进度卡片刷新节流（配置见 config.progress_*）。
+# 按聊天分配编辑预算：同一聊天里每多一张卡片，每张的间隔多 CHAT_EDIT_SPACING
+# 秒，整个聊天始终保持约每 2 秒一次编辑，不会撞上 Telegram 的频率限制
+# （真撞上了还有 429 退避兜底）
+CHAT_EDIT_SPACING = 2.0
+# 判断"这个聊天里有几张活跃卡片"的时间窗口：最近这么多秒内考虑过刷新的才算
+ACTIVE_CARD_WINDOW = 15.0
+# 下载卡住（已下载字节数没变）时不用每次都编辑，但也要隔一阵刷新一下，
+# 让用户看到连接数的变化、知道机器人还活着
+STALLED_REFRESH_INTERVAL = 30.0
+# 用户打开卡片上的子菜单（限速/取消确认/选择文件…）后，暂停这张卡片的自动
+# 刷新这么久——否则自动刷新会把正在操作的菜单冲掉
+MENU_HOLD_SECONDS = 120.0
 
 TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 
@@ -58,7 +70,13 @@ class TaskManager:
         self._bot = bot
         self._nodes = nodes
         self._repo = repo
-        self._last_edit: dict[str, tuple[float, float]] = {}  # gid -> (timestamp, percent)
+        self._last_edit: dict[str, tuple[float, int]] = {}  # gid -> (timestamp, completed bytes)
+        # chat_id -> {gid: 最近一次考虑刷新它的时间}，用来算这个聊天有几张活跃卡片
+        self._chat_cards: dict[int, dict[str, float]] = {}
+        # gid -> 到期时间（monotonic）。watched：用户正在看，快速刷新；
+        # held：用户正开着子菜单，暂停自动刷新
+        self._watched: dict[str, float] = {}
+        self._held: dict[str, float] = {}
         self._chat_backoff: dict[int, float] = {}  # chat_id -> monotonic deadline after a 429
         self._poll_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
@@ -120,7 +138,7 @@ class TaskManager:
                 raise
             except Exception:
                 log.exception("poll loop iteration failed")
-            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+            await asyncio.sleep(POLL_FAST_INTERVAL_SECONDS if self._any_watched() else POLL_INTERVAL_SECONDS)
 
     def _reconcile_ws_listeners(self):
         """WS 监听任务跟着轮询顺带对齐：新启用的节点补一条监听，被删/停用的
@@ -281,7 +299,7 @@ class TaskManager:
             await self._repo.update_status(
                 gid, "FAILED", error="任务在 aria2 中丢失（服务重启或已被清理）"
             )
-        self._last_edit.pop(gid, None)
+        self._forget_progress(gid)
 
     def _render_card(self, row, download=None, *, status: str) -> str:
         # 多节点部署时卡片带节点标注；单节点 label() 返回 None，界面不变
@@ -329,7 +347,21 @@ class TaskManager:
                 if mapped != "ACTIVE":  # ACTIVE keyboard refresh piggybacks on the progress edit below
                     await self._update_keyboard(row, gid, mapped)
             if status == "ACTIVE":
+                await self._sync_real_name(row, gid, download)
                 await self._maybe_report_progress(row, download)
+
+    async def _sync_real_name(self, row, gid: str, download):
+        """种子/磁力任务入库时的名字是 .torrent 文件名或磁力链接；拿到元数据后
+        把真正的内容名回写，任务列表、搜索、完成通知就都显示好看的名字了。"""
+        if row["source_type"] not in ("torrent", "magnet"):
+            return
+        real = download.name
+        if not real or real.startswith("[METADATA]") or real == row["file_name"]:
+            return
+        try:
+            await self._repo.update_file_name(gid, real)
+        except Exception:
+            log.debug("could not persist real name for gid %s", gid)
 
     async def _handle_metadata_resolved(self, row, download):
         """磁力/裸 infohash 任务的"元数据下载"阶段结束——这个 gid 抓到的只是
@@ -341,11 +373,11 @@ class TaskManager:
         new_gid = download.followed_by[0]
         log.info("gid %s finished metadata download, following to %s", gid, new_gid)
         await self._repo.retry_task(row["id"], new_gid)
-        self._last_edit.pop(gid, None)
+        self._forget_progress(gid)
 
     async def _handle_complete(self, row, download, *, node_is_local: bool):
         gid = row["gid"]
-        self._last_edit.pop(gid, None)
+        self._forget_progress(gid)
         save_path = str(download.files[0].path) if download.files else None
         # download.dir + download.name covers multi-file torrents too (the
         # first file alone would just be one piece of the whole download)
@@ -371,7 +403,7 @@ class TaskManager:
 
     async def _handle_error(self, row, download):
         gid = row["gid"]
-        self._last_edit.pop(gid, None)
+        self._forget_progress(gid)
         await self._repo.update_status(gid, "FAILED", error=download.error_message)
         await self._notify(
             row, self._render_card(row, download, status="FAILED"),
@@ -448,17 +480,23 @@ class TaskManager:
     async def _maybe_report_progress(self, row, download):
         gid = row["gid"]
         chat_id = row["chat_id"]
-        percent = download.progress
         now = time.monotonic()
 
         if now < self._chat_backoff.get(chat_id, 0.0):
             return  # still inside a Telegram flood-control window for this chat
+        if self._is_held(gid, now):
+            return  # 用户正开着这张卡片的子菜单，别把它冲掉
 
-        last_time, last_percent = self._last_edit.get(gid, (0.0, -100.0))
-        if (now - last_time) < PROGRESS_EDIT_MIN_INTERVAL and (percent - last_percent) < PROGRESS_EDIT_MIN_PERCENT_DELTA:
+        interval = self._progress_interval(chat_id, gid, now)
+        completed = download.completed_length
+        last_time, last_completed = self._last_edit.get(gid, (0.0, -1))
+        elapsed = now - last_time
+        if elapsed < interval:
             return
+        if completed == last_completed and elapsed < STALLED_REFRESH_INTERVAL:
+            return  # 一个字节都没动：卡片内容基本不变，没必要每次都编辑
 
-        self._last_edit[gid] = (now, percent)
+        self._last_edit[gid] = (now, completed)
         text = self._render_card(row, download, status="ACTIVE")
         if row["reply_message_id"]:
             try:
@@ -474,8 +512,56 @@ class TaskManager:
             except Exception:
                 pass  # message unchanged or transient error; safe to skip this tick
 
+    # ---- 谁在看：快速刷新 / 暂停刷新 ----
+
+    def watch(self, gid: str):
+        """用户刚和这个任务互动过（添加、点了卡片上的按钮）：接下来
+        progress_watch_seconds 秒内快速刷新它的卡片，并结束子菜单的暂停。"""
+        self._watched[gid] = time.monotonic() + settings.progress_watch_seconds
+        self._held.pop(gid, None)
+
+    def hold(self, gid: str):
+        """用户打开了卡片上的子菜单：暂停自动刷新，免得把菜单冲掉。"""
+        now = time.monotonic()
+        self._held[gid] = now + MENU_HOLD_SECONDS
+        self._watched[gid] = now + settings.progress_watch_seconds
+
+    def _is_watched(self, gid: str, now: float) -> bool:
+        return self._watched.get(gid, 0.0) > now
+
+    def _is_held(self, gid: str, now: float | None = None) -> bool:
+        return self._held.get(gid, 0.0) > (time.monotonic() if now is None else now)
+
+    def _any_watched(self) -> bool:
+        now = time.monotonic()
+        for gid in [g for g, t in self._watched.items() if t <= now]:
+            del self._watched[gid]
+        return bool(self._watched)
+
+    def _forget_progress(self, gid: str):
+        """任务进入终态/换 gid 时清掉进度节流的记录，不再占用聊天的刷新预算。"""
+        self._last_edit.pop(gid, None)
+        self._watched.pop(gid, None)
+        self._held.pop(gid, None)
+        for cards in self._chat_cards.values():
+            cards.pop(gid, None)
+
+    def _progress_interval(self, chat_id: int, gid: str, now: float) -> float:
+        """这张卡片的最小刷新间隔。正在看的卡片按 progress_interval，后台的按
+        progress_idle_interval；再和"聊天预算"取大——同一聊天里每多一张
+        同档位的卡片，每张多等 CHAT_EDIT_SPACING 秒。顺带登记这张卡片、清掉
+        过期的登记。"""
+        cards = self._chat_cards.setdefault(chat_id, {})
+        cards[gid] = now
+        for g in [g for g, t in cards.items() if now - t > ACTIVE_CARD_WINDOW]:
+            del cards[g]
+        watched = self._is_watched(gid, now)
+        peers = sum(1 for g in cards if self._is_watched(g, now) == watched)
+        base = settings.progress_interval if watched else settings.progress_idle_interval
+        return max(2.0, float(base), CHAT_EDIT_SPACING * peers)
+
     async def _update_keyboard(self, row, gid: str, status: str):
-        if not row["reply_message_id"]:
+        if not row["reply_message_id"] or self._is_held(gid):
             return
         try:
             await self._bot.edit_message_reply_markup(

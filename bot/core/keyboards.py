@@ -472,6 +472,22 @@ def dir_chooser_keyboard(options: list[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def text_progress_bar(percent: float, width: int = 12) -> str:
-    filled = max(0, min(width, round(percent / 100 * width)))
-    return "█" * filled + "░" * (width - filled)
+BAR_FILLED = "▰"
+BAR_EMPTY = "▱"
+
+
+def text_progress_bar(percent: float, width: int = 14) -> str:
+    """▰▰▰▱▱▱ 风格的进度条。两个字符同属 Unicode 几何图形区，各平台字体里
+    宽度一致，不需要放在等宽 <code> 里（以前的 █/░ 在手机上 ░ 显示成灰色
+    网纹，很难看）。
+
+    两端特殊处理：刚开始下载（>0 但不到一格）也点亮第一格，不然大文件开头
+    很长一段时间看起来像"没动"；不到 100% 时最后一格不点亮，不然 99.6% 看起来
+    已经下完了。"""
+    p = max(0.0, min(100.0, percent))
+    filled = round(p / 100 * width)
+    if p > 0 and filled == 0:
+        filled = 1
+    if p < 100 and filled == width:
+        filled = width - 1
+    return BAR_FILLED * filled + BAR_EMPTY * (width - filled)
