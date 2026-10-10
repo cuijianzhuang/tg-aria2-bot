@@ -67,13 +67,15 @@ Telegram 下载机器人：给机器人发送 **HTTP(S) 链接 / 磁力链接 / 
 ```bash
 git clone https://github.com/cuijianzhuang/tg-aria2-bot.git
 cd tg-aria2-bot
-sudo ./install.sh
+sudo ./tg-aria2.sh install
 ```
+
+安装、升级、日常管理全部由一个脚本 [`tg-aria2.sh`](tg-aria2.sh) 完成（`./install.sh`、`./update.sh` 只是转发给它的兼容入口）。
 
 不带参数运行会交互式询问部署方式和凭据；也可以全部用参数一次性跑完，方便无人值守部署：
 
 ```bash
-sudo ./install.sh \
+sudo ./tg-aria2.sh install \
   --mode docker \
   --token 123456:ABC-xxx \
   --api-id 12345 \
@@ -86,14 +88,18 @@ sudo ./install.sh \
 而且**只改脚本自己管理的那几个键**，你在设置菜单/Web 后台里改过的配置（同时下载数、GoFile、自动清理……）原样保留。
 `API_ID` / `API_HASH` 在 https://my.telegram.org 申请。
 加 `--with-rclone` 可选安装 rclone（网盘上传，默认不装，见下方"可选：rclone"一节）。
-Web 管理后台默认启用，`--admin-password <PW>` 指定密码，不指定则自动生成并在安装结束时打印一次；`--no-web` 完全跳过（见下方"Web 管理后台"一节）。
+**安装中途失败也不用慌**：脚本会说明是哪一步失败的，按提示处理后重新运行 `sudo ./tg-aria2.sh install` 即可，已完成的步骤会自动跳过。
+常见的坑都已经自动处理：Debian/Ubuntu 上缺 `python3-venv` 会自动安装；系统 Python 低于 3.11 会尝试装 `python3.11`；端口被占用会自动换；AriaNg 下载失败（访问不了 GitHub）只警告不中断。
+只想单独装 / 修复 Web 管理后台：`sudo ./tg-aria2.sh web-install`。
+
+Web 管理后台默认启用，`--admin-password <PW>` 指定密码，不指定则自动生成并在安装结束时打印一次；`--web-port <端口>` 指定端口（默认 8080，被占用时自动顺延到下一个空闲端口）；`--no-web` 完全跳过（见下方"Web 管理后台"一节）。
 
 ## 管理菜单
 
 安装完成后会自动注册快捷命令 `tg-aria2`，日常运维不用记各种 docker / systemctl 命令：
 
 ```bash
-sudo tg-aria2          # 或者在仓库目录里 sudo ./manage.sh
+sudo tg-aria2          # 或者在仓库目录里 sudo ./tg-aria2.sh
 ```
 
 ```
@@ -108,7 +114,7 @@ sudo tg-aria2          # 或者在仓库目录里 sudo ./manage.sh
    3. 重启服务
    4. 启动 / 停止全部服务
  —— 配置 ——
-   5. 修改常用配置（白名单/管理员/密码/并发/代理…）
+   5. 修改常用配置（白名单/管理员/密码/并发/代理/端口…）
    6. Web 后台访问信息
  —— 升级与备份 ——
    7. 检查更新
@@ -116,29 +122,31 @@ sudo tg-aria2          # 或者在仓库目录里 sudo ./manage.sh
    9. 立即备份
   10. 从备份恢复（.env / 数据库）
   11. 回退到历史版本
- —— 其它 ——
-  12. 安装 / 重新安装
-  13. 安装快捷命令 tg-aria2
+ —— 安装 ——
+  12. 安装 / 修复安装
+  13. 安装 / 修复 Web 管理后台
+  14. 安装快捷命令 tg-aria2
    0. 退出
 ```
 
 - 自动识别 docker / bare 模式，同一套菜单操作两种部署（bare 混合模式下的 telegram-bot-api 独立容器也能管）
+- 菜单顶部发现核心服务没装上（比如上次安装中途失败）会直接提示，选 12 修复
 - **修改常用配置**：白名单、管理员、Web 后台密码（留空自动生成，改完旧登录会话全部失效）、同时下载数、磁盘告警、自动清理、代理、Web 端口监听地址；输入会校验格式，改完询问是否立即重启生效；也可以直接用编辑器打开 `.env`
 - **从备份恢复**：从 `backups/` 里选一份，恢复 `.env` 和数据库（恢复前会先把当前状态再备份一次，防止误操作）
-- **回退到历史版本**：列出最近 15 个版本选择，或输入任意提交号/标签；走 `update.sh --to`，同样有备份、健康检查和自动回滚
+- **回退到历史版本**：列出最近 15 个版本选择，或输入任意提交号/标签；走 `tg-aria2.sh update --to`，同样有备份、健康检查和自动回滚
 
-也可以带子命令直接运行，不进菜单：`tg-aria2 status`、`tg-aria2 logs aria2`、`tg-aria2 restart bot`、`tg-aria2 backup`、`tg-aria2 update`……（`tg-aria2 --help` 查看全部）
+也可以带子命令直接运行，不进菜单：`tg-aria2 status`、`tg-aria2 logs aria2`、`tg-aria2 restart bot`、`tg-aria2 backup`、`tg-aria2 update`、`tg-aria2 web-install`……（`tg-aria2 --help` 查看全部）
 
 ## 升级
 
 ```bash
 cd tg-aria2-bot
-sudo ./update.sh --check   # 只看有没有新版本、有哪些更新，不做任何改动
-sudo ./update.sh           # 升级（列出新提交，确认后执行）
-sudo ./update.sh -y        # 不询问直接升级，适合放进 cron
+sudo tg-aria2 check        # 只看有没有新版本、有哪些更新，不做任何改动
+sudo tg-aria2 update       # 升级（列出新提交，确认后执行）
+sudo tg-aria2 update -y    # 不询问直接升级，适合放进 cron
 ```
 
-`update.sh` 自动识别部署模式（docker / bare），一条命令完成整个流程：
+升级自动识别部署模式（docker / bare），一条命令完成整个流程：
 
 1. `git fetch` 并列出将要更新的提交；提示依赖、`.env.example`、`aria2-config/` 模板是否有变化
 2. **备份**到 `backups/<时间戳>/`：`.env`、数据库（SQLite 在线备份，运行中也是一致的快照）、当前版本号，保留最近 10 份
@@ -149,7 +157,7 @@ sudo ./update.sh -y        # 不询问直接升级，适合放进 cron
 5. **健康检查**：观察 20 秒，服务挂掉或被 systemd/docker 反复拉起都算失败
 6. 任何一步失败**自动回滚**到升级前的版本并重新拉起服务（数据库迁移只增不删，旧代码可以直接用新 schema）；`--no-rollback` 可以保留现场排查
 
-其它选项：`--to <版本>`（回退/切换到指定提交或标签）、`--backup-only`（只备份）、`--force`（没有新提交也重新应用一遍）、`--reset`（本地分支和远端分叉时强制对齐远端）、`--branch NAME`。`update.sh --help` 查看全部。
+其它选项：`--to <版本>`（回退/切换到指定提交或标签）、`--backup-only`（只备份）、`--force`（没有新提交也重新应用一遍）、`--reset`（本地分支和远端分叉时强制对齐远端）、`--branch NAME`。`tg-aria2 --help` 查看全部。
 升级、回退、恢复在管理菜单里都有对应入口。
 
 升级后如果提示 `.env.example` 有新配置项，按需用 `git diff <旧版本> <新版本> -- .env.example` 对照添加；不加也能正常运行（都有默认值），`.env` 里多出旧版本不认识的键也不会导致启动失败。
@@ -166,10 +174,10 @@ sudo ./update.sh -y        # 不询问直接升级，适合放进 cron
 ### docker 模式
 
 ```bash
-sudo ./install.sh --mode docker ...
+sudo ./tg-aria2.sh install --mode docker ...
 ```
 
-内部执行 `scripts/install_docker.sh`：检测/安装 Docker + compose 插件，`docker compose up -d --build`。
+检测/安装 Docker + compose 插件，检查 Web 后台端口，`docker compose up -d --build`。
 
 常用命令：
 ```bash
@@ -183,16 +191,16 @@ docker compose down
 下载目录、Web 端口监听地址也在 `.env` 里配置（`HOST_DOWNLOAD_DIR`、`WEB_BIND`），见 [`.env.example`](.env.example) 末尾。
 所有容器日志都做了轮转（单文件 10MB × 3），长期运行不会撑满磁盘。
 
-`bot`/`web` 容器以非 root 用户（UID/GID 1000，跟 `aria2` 容器的 `PUID`/`PGID` 一致）运行。`install.sh` 和 `update.sh` 都会自动把
-`data/`、`aria2-config/`、`.env` 和下载目录的属主对齐成 1000:1000；从很早的 root 容器版本升级上来，直接跑 `sudo ./update.sh` 即可。
+`bot`/`web` 容器以非 root 用户（UID/GID 1000，跟 `aria2` 容器的 `PUID`/`PGID` 一致）运行。安装和升级都会自动把
+`data/`、`aria2-config/`、`.env` 和下载目录的属主对齐成 1000:1000；从很早的 root 容器版本升级上来，直接跑 `sudo tg-aria2 update` 即可。
 
 ### bare 模式
 
 ```bash
-sudo ./install.sh --mode bare ...
+sudo ./tg-aria2.sh install --mode bare ...
 ```
 
-内部执行 `scripts/install_bare.sh`：
+依次执行（每一步失败都会说明是哪一步，重跑自动跳过已完成的）：
 
 1. 用官方 [`aria2.sh`](https://github.com/P3TERX/aria2.sh) 在宿主机安装 aria2 + 完美配置（含 tracker 自动更新、下载完成/停止钩子），配置在 `/root/.aria2c/`。
    脚本本体逐字复刻在 [`vendor/aria2.sh/aria2.sh`](vendor/aria2.sh/aria2.sh)（离线可用、可审计，不受上游后续改动影响；仓库里没有才会回退联网拉取）。
@@ -203,13 +211,16 @@ sudo ./install.sh --mode bare ...
    RPC 密钥由 aria2.sh 安装时自动随机生成，写在 `/root/.aria2c/aria2.conf` 里，我们的脚本会读出来同步进 `.env`。
 2. telegram-bot-api：
    - 默认：仅用 `docker run` 起一个独立容器（不依赖 compose，其余服务都是裸机），端口只绑定 `127.0.0.1:8081`。
+     - 8081 上**已经是一个 telegram-bot-api**（比如之前源码编译装过、或别的名字的容器）：直接复用，不再另起
+     - 8081 被**其它程序**占用：自动改用 8082–8099 里第一个空闲端口并写进 `.env` 的 `BOT_API_URL`，安装脚本会提示是谁占着 8081
+     - 8081 跟 Web 管理后台的端口（`WEB_PORT`）相同，或被本项目自带的 Web 后台占着：同样让 telegram-bot-api 换端口，Web 后台端口保持不变
+     - 想手动指定端口：`sudo BOT_API_PORT=9081 ./tg-aria2.sh install --mode bare ...`
    - 加 `--build-botapi-from-source`：从源码编译 tdlib + telegram-bot-api 装到 `/usr/local/bin`，走 systemd 管理，彻底不用 Docker（耗时 20-40 分钟，需要 2GB+ 内存）：
      ```bash
-     sudo ./install.sh --mode bare --token ... --api-id ... --api-hash ... --allowed-ids ...
-     # 若已生成 .env，可单独重跑：
-     sudo bash scripts/install_bare.sh --build-botapi-from-source
+     sudo ./tg-aria2.sh install --mode bare --botapi-from-source --token ... --api-id ... --api-hash ... --allowed-ids ...
      ```
-3. 机器人：创建 `.venv`，装依赖，注册为 `tg-aria2-bot.service`。
+3. 机器人：找 Python ≥ 3.11（没有就尝试装 `python3.11`），创建 `.venv`（缺 venv 模块自动装 `python3.x-venv`），装依赖，先确认代码能正常导入，再注册为 `tg-aria2-bot.service`。
+4. Web 管理后台 `tg-aria2-web.service` + AriaNg（`--no-web` 时跳过；AriaNg 下载失败只警告）。
 
 常用命令：
 ```bash
@@ -224,6 +235,8 @@ systemctl status aria2
 
 - **bare 模式**：只监听 `127.0.0.1`
 - **docker 模式**：默认 `0.0.0.0`（对公网开放，**明文 HTTP**）。建议在 `.env` 里设 `WEB_BIND=127.0.0.1` 后 `docker compose up -d`，改为只监听本机
+
+端口默认 8080，由 `.env` 的 `WEB_PORT` 决定（docker 模式下是宿主机端口）。装好后要改，用管理菜单 `sudo tg-aria2` →「修改常用配置」→「Web 后台端口」，会检查端口是否被占用、是否跟 telegram-bot-api 冲突，并自动更新 systemd 单元/重建容器。
 
 只监听本机时，远程访问用 SSH 隧道 `ssh -L 8080:localhost:8080 -L 6880:localhost:6880 user@server`，或自己套一层带 TLS 的反向代理（Caddy 两行配置即可自动签证书）：
 
@@ -243,10 +256,10 @@ systemctl status aria2
 ### 关闭 Web 管理后台
 
 ```bash
-sudo ./install.sh --no-web ...
+sudo ./tg-aria2.sh install --no-web ...
 ```
 
-docker 模式下 `web`/`ariang` 两个服务标了 compose profile `web`，`--no-web` 会把 `.env` 里的 `COMPOSE_PROFILES` 置空，它们就不会启动，没有额外的镜像/端口占用。bare 模式下直接不注册对应的 systemd 服务。之后想重新开启：docker 模式在 `.env` 里设好 `ADMIN_PASSWORD` 和 `COMPOSE_PROFILES=web` 后 `docker compose up -d`；bare 模式重新跑 `install_bare.sh`，不用整个重装。
+docker 模式下 `web`/`ariang` 两个服务标了 compose profile `web`，`--no-web` 会把 `.env` 里的 `COMPOSE_PROFILES` 置空，它们就不会启动，没有额外的镜像/端口占用。bare 模式下直接不注册对应的 systemd 服务。之后想重新开启，运行 `sudo ./tg-aria2.sh web-install`（两种模式通用，密码为空时会自动生成），不用整个重装。
 
 ## 可选：GoFile 自动上传
 
@@ -266,10 +279,10 @@ GOFILE_DELETE_LOCAL=false    # 上传成功后删除本地文件（确认上传�
 `p3terx/aria2-pro` 镜像**本身不带 rclone**（已翻过其 Dockerfile 和 rootfs，确认没有）；bare 模式下 `aria2.sh` 装的完美配置里虽然有 `rclone.env` 模板，但 rclone 二进制同样得自己装。装了也不会自动生效——因为 `upload.sh` 默认没接入 `on-download-complete` 钩子。
 
 ```bash
-sudo ./install.sh --mode docker --with-rclone ...   # 或 --mode bare --with-rclone ...
+sudo ./tg-aria2.sh install --mode docker --with-rclone ...   # 或 --mode bare --with-rclone ...
 ```
 
-两种模式都通过 [`scripts/install_rclone.sh`](scripts/install_rclone.sh) 把 rclone **装在宿主机**（跑官方 `curl https://rclone.org/install.sh | bash`，二进制落在 `/usr/bin/rclone`），而不是塞进某个容器镜像里：
+两种模式都把 rclone **装在宿主机**（跑官方 `curl https://rclone.org/install.sh | bash`，二进制落在 `/usr/bin/rclone`），而不是塞进某个容器镜像里：
 - **docker 模式**：装完宿主机的 rclone 后，生成 `docker-compose.override.yml`，把宿主机的 `/usr/bin/rclone` 只读挂载进 `aria2` 容器同一路径，不用重新 build 镜像。rclone 官方 Linux 二进制是纯静态链接的 Go 可执行文件（已用 `file`/`ldd` 验证，无 glibc 依赖），挂进 `p3terx/aria2-pro` 用的 Alpine(musl) 容器不会有兼容性问题。升级 rclone 只需要在宿主机重新跑一次安装脚本，容器里立刻就是新版本。
 - **bare 模式**：aria2 本来就跑在宿主机，rclone 装在宿主机后直接就能被 `upload.sh` 调用，无需额外处理。
 
@@ -293,8 +306,8 @@ rclone config                                    # bare 模式
 
 | 方式 | 适用场景 | 做了什么 |
 |---|---|---|
-| `sudo ./update.sh`（服务器上） | **日常升级，推荐** | 见上方"升级"一节：备份 → 拉代码 → 装依赖/重建 → 健康检查 → 失败自动回滚 |
-| 推送到 `master`（GitHub Actions） | 自己维护 fork、想推完代码自动上线 | CI 全部通过后 SSH 到服务器执行 `update.sh --reset`，同样有备份和自动回滚 |
+| `sudo tg-aria2 update`（服务器上） | **日常升级，推荐** | 见上方"升级"一节：备份 → 拉代码 → 装依赖/重建 → 健康检查 → 失败自动回滚 |
+| 推送到 `master`（GitHub Actions） | 自己维护 fork、想推完代码自动上线 | CI 全部通过后 SSH 到服务器执行 `tg-aria2.sh update --reset`，同样有备份和自动回滚 |
 | `./deploy.sh`（开发机上） | 开发调试，把**未提交**的本地改动直接推上去验证 | tar 同步 `bot/` + `requirements.txt` → 装依赖 → 编译/导入校验 → 重启 bot/web。没有回滚，不要用于正式发布 |
 
 `deploy.sh` 的服务器地址/SSH key/目录可以用环境变量 `DEPLOY_HOST` / `DEPLOY_KEY` / `DEPLOY_DIR` 覆盖。三种方式都**不会覆盖服务器上的 `.env`**。
@@ -302,7 +315,7 @@ rclone config                                    # bare 模式
 ### 自动部署（GitHub Actions）
 
 - [`test.yml`](.github/workflows/test.yml)：PR 和非 master 分支的推送触发——ruff、编译 + 导入检查、全部单元测试（Python 3.11 和 3.14 两个版本，分别对应 bare 模式最低版本和 docker 镜像版本）、shellcheck 检查安装/升级脚本
-- [`deploy.yml`](.github/workflows/deploy.yml)：推到 `master`（或在 Actions 页面手动触发）时先复用 `test.yml` 跑一遍，全部通过后 SSH 登录服务器执行 `update.sh --reset --yes`。用的是 `origin/master` 上最新的 `update.sh`，所以升级脚本本身的改进第一次部署就生效；多次推送会排队，不会并发部署。手动触发时带 `--force`，没有新提交也会重新部署一遍
+- [`deploy.yml`](.github/workflows/deploy.yml)：推到 `master`（或在 Actions 页面手动触发）时先复用 `test.yml` 跑一遍，全部通过后 SSH 登录服务器执行 `tg-aria2.sh update --reset --yes`。用的是 `origin/master` 上最新的 `tg-aria2.sh`，所以升级脚本本身的改进第一次部署就生效；多次推送会排队，不会并发部署。手动触发时带 `--force`，没有新提交也会重新部署一遍
 
 前提是服务器上的 `/root/tg-aria2-bot` 是这个仓库的 git clone（不是 `deploy.sh` 那种文件同步），且以下三个仓库 Secret 已配置（`Settings → Secrets and variables → Actions`）：
 
@@ -312,7 +325,7 @@ rclone config                                    # bare 模式
 | `DEPLOY_HOST` | 服务器地址 |
 | `DEPLOY_USER` | SSH 用户名 |
 
-`--reset` 会让服务器上 git 跟踪的文件和 `origin/master` 完全一致，但 `.env`、`data/`、`.venv/`、`downloads/`、`backups/` 这些运行时文件都在 `.gitignore` 里，不受影响；`aria2-config/` 里的本地配置由 `update.sh` 备份后原样恢复。想临时关掉自动部署，去 Actions 页面禁用这个 workflow。
+`--reset` 会让服务器上 git 跟踪的文件和 `origin/master` 完全一致，但 `.env`、`data/`、`.venv/`、`downloads/`、`backups/` 这些运行时文件都在 `.gitignore` 里，不受影响；`aria2-config/` 里的本地配置由升级流程备份后原样恢复。想临时关掉自动部署，去 Actions 页面禁用这个 workflow。
 
 ### 测试
 
@@ -333,15 +346,9 @@ SQLite（默认 `data/tasks.db`，`aiosqlite` 异步访问）。schema 在 [`bot
 
 ```
 tg-aria2-bot/
-├── install.sh                  # 一键安装入口（可重复运行，只改自己管理的 .env 键）
-├── update.sh                   # 一键升级（备份 → 拉代码 → 应用 → 健康检查 → 失败自动回滚）
-├── manage.sh                   # 交互式管理菜单（快捷命令 tg-aria2）：状态/日志/重启/改配置/备份恢复/回退
+├── tg-aria2.sh                 # 一体化脚本（快捷命令 tg-aria2）：安装 / 升级 / 管理菜单 / 备份恢复 / 回退
+├── install.sh, update.sh       # 兼容入口，转发给 tg-aria2.sh install / update
 ├── deploy.sh                   # 开发调试用：把本地工作区直接同步到服务器
-├── scripts/
-│   ├── install_docker.sh
-│   ├── install_bare.sh
-│   ├── install_rclone.sh         # 两种模式共用：把 rclone 装在宿主机（--with-rclone 时调用）
-│   └── env_lib.sh                # install/update 共用的 .env 读写函数（就地改单个键）
 ├── systemd/                    # bare 模式用的 unit 模板（含 tg-aria2-web、tg-ariang）
 ├── docker-compose.yml
 ├── Dockerfile
@@ -350,7 +357,7 @@ tg-aria2-bot/
 ├── .env.example
 ├── tests/                      # 单元测试（无需网络/aria2）
 ├── aria2-config/                # 预置的 P3TERX/aria2.conf 文件，路径已适配本项目（docker 模式用）
-│   ├── aria2.conf                # dir=/downloads, rpc-secret 由 install.sh 自动写入（升级时本地改动会保留）
+│   ├── aria2.conf                # dir=/downloads, rpc-secret 安装时自动写入（升级时本地改动会保留）
 │   ├── script.conf
 │   ├── rclone.env                 # 默认未接入钩子，见"可选：rclone"一节
 │   └── script/upload.sh           # 必须放在这里，见下方说明
@@ -391,7 +398,7 @@ tg-aria2-bot/
 ```
 
 `aria2-config/` 里的文件取自 https://github.com/P3TERX/aria2.conf (MIT License)，调整了路径（`/root/Download` → `/downloads`，`/root/.aria2` → `/config`）以适配本项目的 docker 部署，容器首次启动直接使用这份配置，不需要联网去 GitHub 拉取。
-`vendor/` 里的文件是**未经任何修改**的原始副本（路径仍是上游默认的 `/root/...`），存在这里只是为了离线安装（`scripts/install_bare.sh` 会优先用 `vendor/aria2.sh/aria2.sh`）和审计对照，不会被本项目直接引用运行。
+`vendor/` 里的文件是**未经任何修改**的原始副本（路径仍是上游默认的 `/root/...`），存在这里只是为了离线安装（bare 安装会优先用 `vendor/aria2.sh/aria2.sh`）和审计对照，不会被本项目直接引用运行。
 
 **重要**：`aria2-config/` 里不再放 `core`/`clean.sh`/`delete.sh`/`tracker.sh`——实测 `p3terx/aria2-pro` 镜像首次启动会用它自己的这几个文件覆盖到容器内的 `/config/script/`（它的 `core` 把 `ARIA2_CONF_DIR` 写死为 `/config`，不依赖脚本物理路径，比我们原来 vendor 的 `$(dirname $0)` 写法更健壮，所以直接用镜像自带的更省心），放在仓库顶层也会被起容器时清掉，纯属误导。`upload.sh` 是镜像不自带的额外功能，必须放在 `aria2-config/script/upload.sh`（对应容器内 `/config/script/upload.sh`）才能和镜像自己的 `core` 配套工作；`aria2.conf` 里的 `on-download-complete`/`on-download-stop` 也相应指向 `/config/script/*.sh`，不能是 `/config/` 顶层。
 

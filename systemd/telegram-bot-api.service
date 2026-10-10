@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/telegram-bot-api --local --api-id={{API_ID}} --api-hash={{API_HASH}} --http-port=8081 --dir=/var/lib/telegram-bot-api
+ExecStart=/usr/local/bin/telegram-bot-api --local --api-id={{API_ID}} --api-hash={{API_HASH}} --http-port={{BOT_API_PORT}} --dir=/var/lib/telegram-bot-api
 Restart=on-failure
 RestartSec=5
 User=root

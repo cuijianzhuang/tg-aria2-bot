@@ -228,3 +228,14 @@ aria2p 是同步库，每次调用都要 `to_thread`。aria2 的 JSON-RPC 极简
 | 列表/主菜单 | 列表行带状态图标、加刷新按钮；批量「全部暂停/继续」分别只出现在对应 tab；主菜单加「📊 统计」，有失败任务时加「⚠️ 失败 N」直达 |
 | 选择器 | 全局限速选择器标出当前值（aria2 返回字节数，换算后对上预设）；限速/单文件上限按钮改为多列排布，少占屏幕 |
 | GoFile 流水线 | 上传前就失败时完成通知会因 `link` 未定义抛 NameError（新加的链接按钮会触发），先初始化 |
+
+## 实施记录（2026-10-10）：脚本合并
+
+| 项 | 说明 |
+|----|------|
+| 合并为单脚本 | `install.sh` / `scripts/install_docker.sh` / `scripts/install_bare.sh` / `scripts/install_rclone.sh` / `update.sh` / `manage.sh` / `scripts/env_lib.sh` / `scripts/net_lib.sh` 合并为 `tg-aria2.sh`（菜单 + `install` / `web-install` / `update` / `status` / `config` / `backup` … 子命令）。`install.sh`、`update.sh` 保留为转发入口：老版本的 update.sh 升级完会 exec 仓库里的 update.sh 执行第二阶段，必须还能用；CI 改为直接取 origin/master 上的 tg-aria2.sh |
+| 安装中途失败 | 以前任何一步出错 `set -e` 直接退出，后面的 bot/Web 服务都没装、也不说是哪步。现在每步有名字，失败时报告「在哪一步失败」+ 当前各服务状态 + 重跑即可（已完成的跳过）；菜单顶部检测到核心服务缺失会提示修复；新增 `web-install` 单独装 / 修 Web 后台 |
+| Python 环境 | Debian/Ubuntu 的 python3 默认不带 venv（ensurepip），`python3 -m venv` 失败是最常见的安装中断原因，现在自动装 `python3.x-venv`；bot 代码需要 Python ≥ 3.11（`datetime.UTC` 等），以前不检查，3.9/3.10 的系统装完服务起不来，现在先找 ≥3.11 的解释器，没有就尝试装 `python3.11`，再不行明确提示改用 docker 模式；装完先 `import bot.main` 验证再注册服务 |
+| AriaNg 非关键 | 下载 AriaNg 要访问 GitHub，失败以前会中断整个安装，现在只警告 |
+| `--botapi-from-source` | 以前只有 install_bare.sh 认识这个参数，从 install.sh 根本传不进去，现在是 install 的正式选项 |
+| systemd 单元同步 | 升级时以前只要 `systemd/` 目录有任何变化就重写所有单元（模拟里发现：只改了 telegram-bot-api.service 的模板，tg-aria2-bot.service 也被覆盖），改为逐个单元按自己的模板是否变化判断 |

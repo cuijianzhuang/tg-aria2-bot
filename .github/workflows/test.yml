@@ -42,4 +42,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: shellcheck -x -S warning install.sh update.sh manage.sh deploy.sh scripts/*.sh
+      - run: shellcheck -x -S warning tg-aria2.sh install.sh update.sh deploy.sh
