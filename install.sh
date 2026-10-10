@@ -15,6 +15,7 @@
 #   --with-rclone         install rclone on the host (see README, off by default)
 #   --admin-password PW   set the web admin password (auto-generated + printed once if omitted)
 #   --no-web               skip the web admin entirely (AriaNg + custom backend both off)
+#   --web-port PORT        web admin port (default 8080; auto-moved if already taken)
 #
 # Any flag omitted is asked for interactively (re-runs prefill from the existing .env).
 # Re-running only rewrites the keys this script manages; everything else in .env
@@ -37,6 +38,7 @@ DOWNLOAD_DIR="./downloads"
 WITH_RCLONE=0
 ADMIN_PASSWORD=""
 NO_WEB=0
+WEB_PORT_ARG=""
 
 log()  { printf '\033[1;32m[install]\033[0m %s\n' "$1"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$1"; }
@@ -56,10 +58,15 @@ while [[ $# -gt 0 ]]; do
     --with-rclone) WITH_RCLONE=1; shift ;;
     --admin-password) ADMIN_PASSWORD="$2"; shift 2 ;;
     --no-web) NO_WEB=1; shift ;;
+    --web-port) WEB_PORT_ARG="$2"; shift 2 ;;
     -h|--help) grep '^#' "$0" | sed 's/^#//'; exit 0 ;;
     *) die "未知参数: $1" ;;
   esac
 done
+
+if [[ -n "$WEB_PORT_ARG" ]] && ! [[ "$WEB_PORT_ARG" =~ ^[0-9]+$ && "$WEB_PORT_ARG" -ge 1 && "$WEB_PORT_ARG" -le 65535 ]]; then
+  die "--web-port 必须是 1-65535 之间的数字"
+fi
 
 if [[ "$EUID" -ne 0 ]]; then
   die "请用 root 权限运行 (sudo ./install.sh ...)"
@@ -152,6 +159,7 @@ env_set API_HASH "$API_HASH"
 env_set ARIA2_SECRET "$ARIA2_SECRET"
 env_set ALLOWED_USER_IDS "$ALLOWED_IDS"
 env_set ADMIN_PASSWORD "$ADMIN_PASSWORD"
+[[ -n "$WEB_PORT_ARG" ]] && env_set WEB_PORT "$WEB_PORT_ARG"
 
 if [[ "$MODE" == "docker" ]]; then
   env_set BOT_API_URL "http://telegram-bot-api:8081"

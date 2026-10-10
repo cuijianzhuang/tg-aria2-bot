@@ -28,6 +28,8 @@ die()  { printf '\033[1;31m[error]\033[0m %s\n' "$1" >&2; exit 1; }
 
 # shellcheck source=scripts/env_lib.sh
 source "$SCRIPT_DIR/scripts/env_lib.sh"
+# shellcheck source=scripts/net_lib.sh
+source "$SCRIPT_DIR/scripts/net_lib.sh"
 
 # ---------- 1. aria2 via P3TERX/aria2.sh ----------
 # aria2.sh 是一个纯交互式数字菜单脚本（没有非交互 flag），"1" 对应菜单里的
@@ -74,34 +76,6 @@ fi
 # BOT_API_PORT 指定）。8081 是很常见的端口，机器上可能已经有别的程序占着——
 # 以前这里直接 docker run，端口冲突就报 "address already in use" 整个安装中断。
 
-# 端口上有没有程序在监听。用 bash 自带的 /dev/tcp 探测，不依赖 ss/netstat
-# （精简系统上未必装了）
-port_in_use() {
-  (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1
-}
-
-# 尽量说出是谁占着端口（只用于提示，拿不到就算了）
-port_owner() {
-  local out=""
-  if command -v ss >/dev/null 2>&1; then
-    out="$(ss -Hltnp "sport = :$1" 2>/dev/null | grep -o 'users:(("[^"]*"' | head -1 | cut -d'"' -f2 || true)"
-  elif command -v lsof >/dev/null 2>&1; then
-    out="$(lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1}' || true)"
-  elif command -v netstat >/dev/null 2>&1; then
-    out="$(netstat -ltnp 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" {print $7; exit}' || true)"
-  fi
-  echo "${out:-未知程序}"
-}
-
-# 端口上已经是一个能用的 telegram-bot-api（之前源码编译装的原生服务、或者
-# 别的名字的容器）时返回 0——直接复用，不再另起一个。按协议判断而不是按
-# 进程名：拿一个无效 token 调 getMe，Bot API 服务一定回 {"ok":false,"error_code":...}
-port_is_botapi() {
-  local body
-  body="$(curl -s -m 5 "http://127.0.0.1:$1/bot0:invalid/getMe" 2>/dev/null || true)"
-  [[ "$body" == *'"ok":false'* && "$body" == *'"error_code"'* ]]
-}
-
 BOT_API_URL_CUR="$(env_get BOT_API_URL)"
 BOT_API_PORT="${BOT_API_URL_CUR##*:}"
 [[ "$BOT_API_PORT" =~ ^[0-9]+$ ]] || BOT_API_PORT=8081
@@ -112,21 +86,38 @@ if command -v docker >/dev/null 2>&1; then
   docker rm -f telegram-bot-api >/dev/null 2>&1 || true
 fi
 
+# Web 管理后台的端口（--no-web 时不占端口）。telegram-bot-api 的端口必须避开它：
+# 有人把 WEB_PORT 设成 8081 时，两者会抢同一个端口
+WEB_PORT_VALUE=""
+if [[ "$NO_WEB" -eq 0 ]]; then
+  WEB_PORT_VALUE="$(env_get WEB_PORT)"
+  WEB_PORT_VALUE="${WEB_PORT_VALUE:-8080}"
+fi
+
 REUSE_BOTAPI=0
-if port_in_use "$BOT_API_PORT"; then
+MOVE_BOTAPI=0
+if [[ "$BOT_API_PORT" == "$WEB_PORT_VALUE" ]]; then
+  warn "telegram-bot-api 的端口 ${BOT_API_PORT} 跟 Web 管理后台（.env 的 WEB_PORT）相同"
+  MOVE_BOTAPI=1
+elif port_in_use "$BOT_API_PORT"; then
   if port_is_botapi "$BOT_API_PORT"; then
     REUSE_BOTAPI=1
     log "127.0.0.1:${BOT_API_PORT} 上已经有一个 telegram-bot-api 在运行（$(port_owner "$BOT_API_PORT")），直接复用，不再另起容器"
+  elif port_is_our_web "$BOT_API_PORT"; then
+    warn "端口 ${BOT_API_PORT} 被本项目自带的 Web 管理后台占用"
+    MOVE_BOTAPI=1
   else
     warn "端口 ${BOT_API_PORT} 已被其它程序占用：$(port_owner "$BOT_API_PORT")"
-    NEW_PORT=""
-    for p in $(seq 8082 8099); do
-      if ! port_in_use "$p"; then NEW_PORT="$p"; break; fi
-    done
-    [[ -n "$NEW_PORT" ]] || die "8081-8099 端口全被占用，无法启动 telegram-bot-api。请释放端口后重试，或用 BOT_API_PORT=<端口> 指定"
-    BOT_API_PORT="$NEW_PORT"
-    warn "telegram-bot-api 改用端口 ${BOT_API_PORT}（已写入 .env 的 BOT_API_URL，不影响原来占用 8081 的程序）"
+    MOVE_BOTAPI=1
   fi
+fi
+if [[ "$MOVE_BOTAPI" -eq 1 ]]; then
+  # telegram-bot-api 只给本机的 bot 用，换端口对用户无感；Web 后台的端口是
+  # 用户记着/收藏着的，所以冲突时总是让 telegram-bot-api 让路
+  OLD_PORT="$BOT_API_PORT"
+  BOT_API_PORT="$(find_free_port 8081 8099 "$OLD_PORT" "$WEB_PORT_VALUE")" \
+    || die "8081-8099 端口全被占用，无法启动 telegram-bot-api。请释放端口后重试，或用 BOT_API_PORT=<端口> 指定"
+  warn "telegram-bot-api 改用端口 ${BOT_API_PORT}（已写入 .env 的 BOT_API_URL；占用 ${OLD_PORT} 的程序不受影响）"
 fi
 env_set BOT_API_URL "http://127.0.0.1:${BOT_API_PORT}"
 
@@ -194,9 +185,16 @@ log "机器人已作为 systemd 服务启动。"
 
 # ---------- 4. web 管理后台 + AriaNg（可选，--no-web 时跳过） ----------
 if [[ "$NO_WEB" -eq 0 ]]; then
-  # shellcheck disable=SC1091
-  source .env
-  WEB_PORT_VALUE="${WEB_PORT:-8080}"
+  # 自己的旧实例先停掉（下面会重新注册），这样端口探测到的占用一定是别的程序
+  systemctl stop tg-aria2-web 2>/dev/null || true
+  if port_in_use "$WEB_PORT_VALUE"; then
+    warn "Web 管理后台的端口 ${WEB_PORT_VALUE} 已被其它程序占用：$(port_owner "$WEB_PORT_VALUE")"
+    OLD_PORT="$WEB_PORT_VALUE"
+    WEB_PORT_VALUE="$(find_free_port 8080 8099 "$OLD_PORT" "$BOT_API_PORT")" \
+      || die "8080-8099 端口全被占用，无法启动 Web 管理后台。释放端口后重试，或在 .env 里设 WEB_PORT"
+    env_set WEB_PORT "$WEB_PORT_VALUE"
+    warn "Web 管理后台改用端口 ${WEB_PORT_VALUE}（已写入 .env 的 WEB_PORT）"
+  fi
 
   log "注册 web 管理后台 systemd 服务 (监听 127.0.0.1:${WEB_PORT_VALUE})"
   install -m 644 systemd/tg-aria2-web.service /etc/systemd/system/tg-aria2-web.service
@@ -204,7 +202,7 @@ if [[ "$NO_WEB" -eq 0 ]]; then
   systemctl daemon-reload
   systemctl enable --now tg-aria2-web
 
-  if [[ -z "${ADMIN_PASSWORD:-}" ]]; then
+  if [[ -z "$(env_get ADMIN_PASSWORD)" ]]; then
     warn "ADMIN_PASSWORD 为空，web 管理后台已启动但登录会被拒绝（返回 503），编辑 .env 设置密码后 systemctl restart tg-aria2-web"
   fi
 
@@ -237,9 +235,9 @@ cat <<EOF
 EOF
 
 if [[ "$NO_WEB" -eq 0 ]]; then
-  cat <<'EOF'
+  cat <<EOF
 
-Web 管理后台: http://127.0.0.1:8080  (仅监听本机，远程访问需要 SSH 隧道或反向代理+TLS)
+Web 管理后台: http://127.0.0.1:${WEB_PORT_VALUE}  (仅监听本机，远程访问需要 SSH 隧道或反向代理+TLS)
 AriaNg:       http://127.0.0.1:6880  (首次打开需要手动填 RPC 地址/密钥，之后记在浏览器本地)
 EOF
 fi

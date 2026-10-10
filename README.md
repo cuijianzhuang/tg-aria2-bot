@@ -86,7 +86,7 @@ sudo ./install.sh \
 而且**只改脚本自己管理的那几个键**，你在设置菜单/Web 后台里改过的配置（同时下载数、GoFile、自动清理……）原样保留。
 `API_ID` / `API_HASH` 在 https://my.telegram.org 申请。
 加 `--with-rclone` 可选安装 rclone（网盘上传，默认不装，见下方"可选：rclone"一节）。
-Web 管理后台默认启用，`--admin-password <PW>` 指定密码，不指定则自动生成并在安装结束时打印一次；`--no-web` 完全跳过（见下方"Web 管理后台"一节）。
+Web 管理后台默认启用，`--admin-password <PW>` 指定密码，不指定则自动生成并在安装结束时打印一次；`--web-port <端口>` 指定端口（默认 8080，被占用时自动顺延到下一个空闲端口）；`--no-web` 完全跳过（见下方"Web 管理后台"一节）。
 
 ## 管理菜单
 
@@ -205,6 +205,7 @@ sudo ./install.sh --mode bare ...
    - 默认：仅用 `docker run` 起一个独立容器（不依赖 compose，其余服务都是裸机），端口只绑定 `127.0.0.1:8081`。
      - 8081 上**已经是一个 telegram-bot-api**（比如之前源码编译装过、或别的名字的容器）：直接复用，不再另起
      - 8081 被**其它程序**占用：自动改用 8082–8099 里第一个空闲端口并写进 `.env` 的 `BOT_API_URL`，安装脚本会提示是谁占着 8081
+     - 8081 跟 Web 管理后台的端口（`WEB_PORT`）相同，或被本项目自带的 Web 后台占着：同样让 telegram-bot-api 换端口，Web 后台端口保持不变
      - 想手动指定端口：`sudo BOT_API_PORT=9081 ./install.sh --mode bare ...`
    - 加 `--build-botapi-from-source`：从源码编译 tdlib + telegram-bot-api 装到 `/usr/local/bin`，走 systemd 管理，彻底不用 Docker（耗时 20-40 分钟，需要 2GB+ 内存）：
      ```bash
@@ -227,6 +228,8 @@ systemctl status aria2
 
 - **bare 模式**：只监听 `127.0.0.1`
 - **docker 模式**：默认 `0.0.0.0`（对公网开放，**明文 HTTP**）。建议在 `.env` 里设 `WEB_BIND=127.0.0.1` 后 `docker compose up -d`，改为只监听本机
+
+端口默认 8080，由 `.env` 的 `WEB_PORT` 决定（docker 模式下是宿主机端口）。装好后要改，用管理菜单 `sudo tg-aria2` →「修改常用配置」→「Web 后台端口」，会检查端口是否被占用、是否跟 telegram-bot-api 冲突，并自动更新 systemd 单元/重建容器。
 
 只监听本机时，远程访问用 SSH 隧道 `ssh -L 8080:localhost:8080 -L 6880:localhost:6880 user@server`，或自己套一层带 TLS 的反向代理（Caddy 两行配置即可自动签证书）：
 

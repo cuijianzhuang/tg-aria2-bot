@@ -12,6 +12,10 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SCRIPT_DIR"
+# shellcheck source=scripts/env_lib.sh
+source "$SCRIPT_DIR/scripts/env_lib.sh"
+# shellcheck source=scripts/net_lib.sh
+source "$SCRIPT_DIR/scripts/net_lib.sh"
 
 log()  { printf '\033[1;32m[docker]\033[0m %s\n' "$1"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$1"; }
@@ -61,6 +65,20 @@ fi
 # web/ariang 两个服务标了 profiles: ["web"]。是否启用由 install.sh 写进 .env 的
 # COMPOSE_PROFILES 决定（docker compose 会自动读取），这样之后手敲的
 # docker compose up/restart/logs 也会带上它们，不用每次记得加 --profile web。
+# Web 后台端口（宿主机侧）被别的程序占着时 compose up 会直接失败，先换一个。
+# 我们自己的 web 容器正在跑时它占着端口是正常的（up 会原地重建），跳过检查
+if [[ "$NO_WEB" -eq 0 ]] && [[ -z "$(docker compose ps -q web 2>/dev/null)" ]]; then
+  WEB_PORT_VALUE="$(env_get WEB_PORT)"
+  WEB_PORT_VALUE="${WEB_PORT_VALUE:-8080}"
+  if port_in_use "$WEB_PORT_VALUE"; then
+    warn "Web 管理后台的端口 ${WEB_PORT_VALUE} 已被其它程序占用：$(port_owner "$WEB_PORT_VALUE")"
+    NEW_PORT="$(find_free_port 8080 8099 "$WEB_PORT_VALUE")" \
+      || { echo "8080-8099 端口全被占用，请在 .env 里设 WEB_PORT 后重试"; exit 1; }
+    env_set WEB_PORT "$NEW_PORT"
+    warn "Web 管理后台改用端口 ${NEW_PORT}（已写入 .env 的 WEB_PORT）"
+  fi
+fi
+
 log "启动服务 (docker compose up -d --build)"
 docker compose up -d --build
 
@@ -86,7 +104,8 @@ if [[ "$NO_WEB" -eq 0 ]]; then
   WEB_BIND_VALUE="$(grep -m1 '^WEB_BIND=' .env 2>/dev/null | cut -d= -f2- || true)"
   WEB_BIND_VALUE="${WEB_BIND_VALUE:-0.0.0.0}"
   echo
-  echo "Web 管理后台: http://<服务器IP>:8080   AriaNg: http://<服务器IP>:6880"
+  WEB_PORT_VALUE="$(env_get WEB_PORT)"
+  echo "Web 管理后台: http://<服务器IP>:${WEB_PORT_VALUE:-8080}   AriaNg: http://<服务器IP>:6880"
   if [[ "$WEB_BIND_VALUE" == "0.0.0.0" ]]; then
     warn "这两个端口当前对公网开放且是明文 HTTP。建议在 .env 里设 WEB_BIND=127.0.0.1 后"
     warn "docker compose up -d，再通过 SSH 隧道或带 TLS 的反向代理访问。"

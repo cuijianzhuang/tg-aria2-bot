@@ -48,6 +48,8 @@ confirm() {
 if [[ -f scripts/env_lib.sh ]]; then
   # shellcheck source=scripts/env_lib.sh
   source scripts/env_lib.sh
+  # shellcheck source=scripts/net_lib.sh
+  source scripts/net_lib.sh
 else
   die "找不到 scripts/env_lib.sh，仓库不完整？"
 fi
@@ -311,6 +313,32 @@ apply_config() {
   log "已重启：${targets[*]}"
 }
 
+# 改 Web 后台端口：校验 → 写 .env →（bare）重新生成 systemd 单元。
+# 生效（重启/重建容器）交给 config_menu 退出时的 apply_config
+change_web_port() {
+  local cur new bot_port
+  cur="$(env_get WEB_PORT)"; cur="${cur:-8080}"
+  new="$(read_validated "新的 Web 后台端口（当前 ${cur}）: " '^[0-9]{1,5}$' "请输入端口号")" || return 1
+  if (( new < 1 || new > 65535 )); then err "端口范围是 1-65535"; return 1; fi
+  [[ "$new" == "$cur" ]] && { log "端口没变"; return 1; }
+  bot_port="$(env_get BOT_API_URL)"; bot_port="${bot_port##*:}"
+  if [[ "$MODE" == "bare" && "$new" == "$bot_port" ]]; then
+    err "端口 ${new} 是 telegram-bot-api 在用的，换一个"
+    return 1
+  fi
+  if port_in_use "$new"; then
+    err "端口 ${new} 已被占用：$(port_owner "$new")"
+    return 1
+  fi
+  env_set WEB_PORT "$new"
+  if [[ "$MODE" == "bare" && -f /etc/systemd/system/tg-aria2-web.service ]]; then
+    sed "s#{{WORKDIR}}#${REPO_DIR}#g; s#{{WEB_PORT}}#${new}#g" systemd/tg-aria2-web.service \
+      > /etc/systemd/system/tg-aria2-web.service
+    systemctl daemon-reload
+  fi
+  log "Web 后台端口改为 ${new}，重启后生效；之后访问地址里的端口记得一起换"
+}
+
 read_validated() {
   # read_validated <提示> <正则> <错误提示> → 输出用户输入
   local prompt="$1" re="$2" msg="$3" v
@@ -338,7 +366,8 @@ config_menu() {
     if [[ "$MODE" == "docker" ]]; then
       printf '  8. Web 端口监听地址 WEB_BIND        %s\n' "$(v="$(env_get WEB_BIND)"; echo "${v:-0.0.0.0}")"
     fi
-    printf '  9. 用编辑器打开 .env（全部配置）\n'
+    printf '  9. Web 后台端口 WEB_PORT            %s\n' "$(v="$(env_get WEB_PORT)"; echo "${v:-8080}")"
+    printf ' 10. 用编辑器打开 .env（全部配置）\n'
     printf '  0. 返回%s\n' "$([[ "$changed" -eq 1 ]] && echo "（并选择是否重启生效）")"
     read -rp "请选择: " choice
     case "$choice" in
@@ -375,12 +404,14 @@ config_menu() {
            *) continue ;;
          esac
          changed=1; recreate=1 ;;
-      9) "${EDITOR:-$(command -v nano || command -v vim || echo vi)}" .env
+      9) change_web_port || continue
+         changed=1; recreate=1 ;;
+      10) "${EDITOR:-$(command -v nano || command -v vim || echo vi)}" .env
          changed=1; recreate=1 ;;
       0|"") break ;;
       *) err "无效选择" ;;
     esac
-    [[ "$choice" =~ ^[1-9]$ ]] && log "已保存"
+    [[ "$choice" =~ ^[1-8]$ ]] && log "已保存"
   done
   [[ "$changed" -eq 1 ]] && apply_config "$recreate"
   return 0
@@ -397,7 +428,6 @@ show_info() {
   else
     if [[ "$MODE" == "docker" ]]; then
       bind="$(env_get WEB_BIND)"; bind="${bind:-0.0.0.0}"
-      port=8080
     else
       bind=127.0.0.1
     fi
