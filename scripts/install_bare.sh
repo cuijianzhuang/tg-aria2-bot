@@ -26,6 +26,9 @@ log()  { printf '\033[1;32m[bare]\033[0m %s\n' "$1"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$1"; }
 die()  { printf '\033[1;31m[error]\033[0m %s\n' "$1" >&2; exit 1; }
 
+# shellcheck source=scripts/env_lib.sh
+source "$SCRIPT_DIR/scripts/env_lib.sh"
+
 # ---------- 1. aria2 via P3TERX/aria2.sh ----------
 # aria2.sh 是一个纯交互式数字菜单脚本（没有非交互 flag），"1" 对应菜单里的
 # "安装 Aria2"。安装流程本身（装依赖、下载二进制、下载完美配置、注册 init.d 服务）
@@ -55,8 +58,6 @@ ARIA2_CONF_DIR="/root/.aria2c"
 ARIA2_RPC_SECRET_LINE="$(grep -oP '(?<=rpc-secret=).*' "$ARIA2_CONF_DIR/aria2.conf" 2>/dev/null || true)"
 if [[ -n "$ARIA2_RPC_SECRET_LINE" ]]; then
   log "检测到 aria2.sh 已生成的 RPC secret，同步到 .env"
-  # shellcheck source=scripts/env_lib.sh
-  source "$SCRIPT_DIR/scripts/env_lib.sh"
   env_set ARIA2_SECRET "$ARIA2_RPC_SECRET_LINE"
 fi
 log "move.sh / upload.sh 默认未接入 aria2 钩子（on-download-complete 只调用 clean.sh），不会自动生效，无需额外操作"
@@ -69,7 +70,69 @@ if [[ "$WITH_RCLONE" -eq 1 ]]; then
 fi
 
 # ---------- 2. telegram-bot-api ----------
-if [[ "$BUILD_FROM_SOURCE" -eq 1 ]]; then
+# 端口以 .env 里 BOT_API_URL 的端口为准（install.sh 默认写 8081，可用环境变量
+# BOT_API_PORT 指定）。8081 是很常见的端口，机器上可能已经有别的程序占着——
+# 以前这里直接 docker run，端口冲突就报 "address already in use" 整个安装中断。
+
+# 端口上有没有程序在监听。用 bash 自带的 /dev/tcp 探测，不依赖 ss/netstat
+# （精简系统上未必装了）
+port_in_use() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1
+}
+
+# 尽量说出是谁占着端口（只用于提示，拿不到就算了）
+port_owner() {
+  local out=""
+  if command -v ss >/dev/null 2>&1; then
+    out="$(ss -Hltnp "sport = :$1" 2>/dev/null | grep -o 'users:(("[^"]*"' | head -1 | cut -d'"' -f2 || true)"
+  elif command -v lsof >/dev/null 2>&1; then
+    out="$(lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1}' || true)"
+  elif command -v netstat >/dev/null 2>&1; then
+    out="$(netstat -ltnp 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" {print $7; exit}' || true)"
+  fi
+  echo "${out:-未知程序}"
+}
+
+# 端口上已经是一个能用的 telegram-bot-api（之前源码编译装的原生服务、或者
+# 别的名字的容器）时返回 0——直接复用，不再另起一个。按协议判断而不是按
+# 进程名：拿一个无效 token 调 getMe，Bot API 服务一定回 {"ok":false,"error_code":...}
+port_is_botapi() {
+  local body
+  body="$(curl -s -m 5 "http://127.0.0.1:$1/bot0:invalid/getMe" 2>/dev/null || true)"
+  [[ "$body" == *'"ok":false'* && "$body" == *'"error_code"'* ]]
+}
+
+BOT_API_URL_CUR="$(env_get BOT_API_URL)"
+BOT_API_PORT="${BOT_API_URL_CUR##*:}"
+[[ "$BOT_API_PORT" =~ ^[0-9]+$ ]] || BOT_API_PORT=8081
+
+# 先清掉我们自己上一次留下的容器（失败的 docker run 也会留下一个 Created
+# 状态的容器），它占着端口的话这一步就释放了
+if command -v docker >/dev/null 2>&1; then
+  docker rm -f telegram-bot-api >/dev/null 2>&1 || true
+fi
+
+REUSE_BOTAPI=0
+if port_in_use "$BOT_API_PORT"; then
+  if port_is_botapi "$BOT_API_PORT"; then
+    REUSE_BOTAPI=1
+    log "127.0.0.1:${BOT_API_PORT} 上已经有一个 telegram-bot-api 在运行（$(port_owner "$BOT_API_PORT")），直接复用，不再另起容器"
+  else
+    warn "端口 ${BOT_API_PORT} 已被其它程序占用：$(port_owner "$BOT_API_PORT")"
+    NEW_PORT=""
+    for p in $(seq 8082 8099); do
+      if ! port_in_use "$p"; then NEW_PORT="$p"; break; fi
+    done
+    [[ -n "$NEW_PORT" ]] || die "8081-8099 端口全被占用，无法启动 telegram-bot-api。请释放端口后重试，或用 BOT_API_PORT=<端口> 指定"
+    BOT_API_PORT="$NEW_PORT"
+    warn "telegram-bot-api 改用端口 ${BOT_API_PORT}（已写入 .env 的 BOT_API_URL，不影响原来占用 8081 的程序）"
+  fi
+fi
+env_set BOT_API_URL "http://127.0.0.1:${BOT_API_PORT}"
+
+if [[ "$REUSE_BOTAPI" -eq 1 ]]; then
+  :
+elif [[ "$BUILD_FROM_SOURCE" -eq 1 ]]; then
   log "从源码编译 telegram-bot-api（需要 20-40 分钟，2GB+ 内存）"
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update -y
@@ -91,9 +154,8 @@ if [[ "$BUILD_FROM_SOURCE" -eq 1 ]]; then
   log "编译完成: $(telegram-bot-api --version 2>&1 | head -1 || echo installed)"
 
   install -m 644 systemd/telegram-bot-api.service /etc/systemd/system/telegram-bot-api.service
-  # shellcheck disable=SC1091
-  source .env
-  sed -i "s#{{API_ID}}#${API_ID}#; s#{{API_HASH}}#${API_HASH}#" /etc/systemd/system/telegram-bot-api.service
+  sed -i "s#{{API_ID}}#$(env_get API_ID)#; s#{{API_HASH}}#$(env_get API_HASH)#; s#{{BOT_API_PORT}}#${BOT_API_PORT}#" \
+    /etc/systemd/system/telegram-bot-api.service
   systemctl daemon-reload
   systemctl enable --now telegram-bot-api
 else
@@ -103,17 +165,15 @@ else
     curl -fsSL https://get.docker.com | sh
     systemctl enable --now docker
   fi
-  # shellcheck disable=SC1091
-  source .env
-  docker rm -f telegram-bot-api >/dev/null 2>&1 || true
   docker run -d --name telegram-bot-api --restart unless-stopped \
-    -p 127.0.0.1:8081:8081 \
-    -e TELEGRAM_API_ID="${API_ID}" \
-    -e TELEGRAM_API_HASH="${API_HASH}" \
+    -p "127.0.0.1:${BOT_API_PORT}:8081" \
+    -e TELEGRAM_API_ID="$(env_get API_ID)" \
+    -e TELEGRAM_API_HASH="$(env_get API_HASH)" \
     -e TELEGRAM_LOCAL=true \
     -v tg-botapi-data:/var/lib/telegram-bot-api \
-    aiogram/telegram-bot-api:latest
-  log "telegram-bot-api 容器已启动，监听 127.0.0.1:8081"
+    aiogram/telegram-bot-api:latest >/dev/null \
+    || die "telegram-bot-api 容器启动失败（见上方 docker 报错）。修好后重新运行 sudo ./install.sh 即可，已完成的步骤会自动跳过"
+  log "telegram-bot-api 容器已启动，监听 127.0.0.1:${BOT_API_PORT}"
 fi
 
 # ---------- 3. bot: python venv + systemd ----------

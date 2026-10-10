@@ -56,7 +56,7 @@ MODE=""
 detect_mode() {
   case "$(env_get BOT_API_URL)" in
     http://telegram-bot-api:8081) MODE=docker ;;
-    http://127.0.0.1:8081) MODE=bare ;;
+    http://127.0.0.1:*) MODE=bare ;;
     *) MODE="" ;;
   esac
 }

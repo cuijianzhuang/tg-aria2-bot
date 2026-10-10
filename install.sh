@@ -80,7 +80,8 @@ if [[ -f .env ]]; then
   # rewrites it to 127.0.0.1. Use that as the fingerprint of the deployed mode.
   EXISTING_BOT_API_URL="$(env_get BOT_API_URL)"
   [[ "$EXISTING_BOT_API_URL" == "http://telegram-bot-api:8081" ]] && EXISTING_MODE="docker"
-  [[ "$EXISTING_BOT_API_URL" == "http://127.0.0.1:8081" ]] && EXISTING_MODE="bare"
+  # bare 模式端口可能因为 8081 被占用而换成别的（见 install_bare.sh）
+  [[ "$EXISTING_BOT_API_URL" == http://127.0.0.1:* ]] && EXISTING_MODE="bare"
   # 重跑时凭据默认沿用 .env 里的值，不用再交互输入一遍
   [[ -z "$MODE" ]]        && MODE="$EXISTING_MODE"
   [[ -z "$BOT_TOKEN" ]]   && BOT_TOKEN="$(env_get BOT_TOKEN)"
@@ -163,7 +164,13 @@ if [[ "$MODE" == "docker" ]]; then
   if [[ "$NO_WEB" -eq 1 ]]; then env_set COMPOSE_PROFILES ""; else env_set COMPOSE_PROFILES "web"; fi
 else
   # bare mode: no compose network, everything on the host
-  env_set BOT_API_URL "http://127.0.0.1:8081"
+  # 端口：环境变量 BOT_API_PORT 指定 > 沿用 .env 里已有的 > 默认 8081；
+  # 被其它程序占用时 install_bare.sh 会自动换一个空闲端口并回写这里
+  BARE_PORT="${BOT_API_PORT:-}"
+  if [[ -z "$BARE_PORT" && "$(env_get BOT_API_URL)" == http://127.0.0.1:* ]]; then
+    BARE_PORT="$(env_get BOT_API_URL)"; BARE_PORT="${BARE_PORT##*:}"
+  fi
+  env_set BOT_API_URL "http://127.0.0.1:${BARE_PORT:-8081}"
   env_set ARIA2_RPC "http://127.0.0.1:6800/jsonrpc"
   env_set DOWNLOAD_DIR "$(realpath "$DOWNLOAD_DIR")"
   env_set DB_PATH "$(realpath data)/tasks.db"

@@ -203,6 +203,9 @@ sudo ./install.sh --mode bare ...
    RPC 密钥由 aria2.sh 安装时自动随机生成，写在 `/root/.aria2c/aria2.conf` 里，我们的脚本会读出来同步进 `.env`。
 2. telegram-bot-api：
    - 默认：仅用 `docker run` 起一个独立容器（不依赖 compose，其余服务都是裸机），端口只绑定 `127.0.0.1:8081`。
+     - 8081 上**已经是一个 telegram-bot-api**（比如之前源码编译装过、或别的名字的容器）：直接复用，不再另起
+     - 8081 被**其它程序**占用：自动改用 8082–8099 里第一个空闲端口并写进 `.env` 的 `BOT_API_URL`，安装脚本会提示是谁占着 8081
+     - 想手动指定端口：`sudo BOT_API_PORT=9081 ./install.sh --mode bare ...`
    - 加 `--build-botapi-from-source`：从源码编译 tdlib + telegram-bot-api 装到 `/usr/local/bin`，走 systemd 管理，彻底不用 Docker（耗时 20-40 分钟，需要 2GB+ 内存）：
      ```bash
      sudo ./install.sh --mode bare --token ... --api-id ... --api-hash ... --allowed-ids ...
