@@ -5,7 +5,7 @@ on:
     branches: [master]
   workflow_dispatch: {}
 
-# 连续推送时不并发部署：后一次排队等前一次结束，而不是两个 update.sh 同时改服务器
+# 连续推送时不并发部署：后一次排队等前一次结束，而不是两次升级同时改服务器
 concurrency:
   group: deploy-production
   cancel-in-progress: false
@@ -26,14 +26,14 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script_stop: true
-          # 服务器端走 update.sh：备份 .env/数据库 → 对齐 origin/master → 装依赖 →
+          # 服务器端走 tg-aria2.sh update：备份 .env/数据库 → 对齐 origin/master → 装依赖 →
           # 导入校验 → 重启 → 健康检查，任一步失败自动回滚到部署前的版本并让
-          # 这个 job 失败。update.sh 取自 origin/master 而不是服务器当前的
+          # 这个 job 失败。脚本取自 origin/master 而不是服务器当前的
           # checkout，这样脚本本身的改进第一次部署就能生效。手动触发
           # （workflow_dispatch）时加 --force：没有新提交也重新应用+重启一遍。
           script: |
             set -e
             cd /root/tg-aria2-bot
             git fetch -q origin master
-            git show origin/master:update.sh > /tmp/tg-aria2-update.sh
-            bash /tmp/tg-aria2-update.sh --dir /root/tg-aria2-bot --branch master --reset --yes ${{ github.event_name == 'workflow_dispatch' && '--force' || '' }}
+            git show origin/master:tg-aria2.sh > /tmp/tg-aria2.sh
+            bash /tmp/tg-aria2.sh update --dir /root/tg-aria2-bot --branch master --reset --yes ${{ github.event_name == 'workflow_dispatch' && '--force' || '' }}
