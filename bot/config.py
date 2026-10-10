@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     download_dir_presets: str = ""
     max_file_size: int = 2 * 1024 * 1024 * 1024
     max_concurrent: int = 3
+    # 任务卡片进度刷新分两档：用户"正在看"的卡片（刚添加的任务、刚点过卡片上
+    # 按钮的 progress_watch_seconds 秒内）按 progress_interval 快速刷新；其余
+    # 后台下载的卡片按 progress_idle_interval 慢速刷新——没人盯着的 2 小时下载
+    # 不需要编辑 2400 次。同一聊天里多张卡片会自动再放慢以避开 Telegram 的
+    # 编辑频率限制。
+    progress_interval: int = 2
+    progress_idle_interval: int = 30
+    progress_watch_seconds: int = 120
     # 完成/失败时是否补发新消息（编辑已有进度卡片始终进行，编辑本身无推送打扰）
     notify_on_complete: bool = True
     # 下载完成后自动把文件发回 Telegram（走自建 Bot API，上限 2GB；

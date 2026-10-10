@@ -126,10 +126,25 @@ class TestFileSelection(unittest.TestCase):
 
 class TestProgressBar(unittest.TestCase):
     def test_bounds(self):
-        self.assertEqual(text_progress_bar(0), "░" * 12)
-        self.assertEqual(text_progress_bar(100), "█" * 12)
-        self.assertEqual(text_progress_bar(150), "█" * 12)  # clamps
-        self.assertEqual(text_progress_bar(-5), "░" * 12)
+        self.assertEqual(text_progress_bar(0), "▱" * 14)
+        self.assertEqual(text_progress_bar(100), "▰" * 14)
+        self.assertEqual(text_progress_bar(150), "▰" * 14)  # clamps
+        self.assertEqual(text_progress_bar(-5), "▱" * 14)
+
+    def test_width_is_constant(self):
+        for p in (0, 0.2, 3.5, 50, 99.6, 100):
+            self.assertEqual(len(text_progress_bar(p)), 14)
+
+    def test_just_started_lights_first_segment(self):
+        # 0.2% 不到一格，也要亮一格，不然大文件开头看起来像没动
+        self.assertEqual(text_progress_bar(0.2), "▰" + "▱" * 13)
+
+    def test_almost_done_is_not_shown_full(self):
+        # 99.6% 四舍五入会满格，看起来像已经下完了
+        self.assertEqual(text_progress_bar(99.6), "▰" * 13 + "▱")
+
+    def test_midway(self):
+        self.assertEqual(text_progress_bar(50), "▰" * 7 + "▱" * 7)
 
 
 class TestFormatters(unittest.TestCase):
@@ -155,12 +170,56 @@ class TestFormatters(unittest.TestCase):
 class TestCards(unittest.TestCase):
     def test_active_card_has_speed_line(self):
         text = render_task_card(fake_row(), FakeDownload(), status="ACTIVE")
-        self.assertIn("⚡", text)
+        self.assertIn("↓ 1.0 MiB/s", text)
+        self.assertIn("剩余 约 1分55秒", text)
         self.assertIn("movie.mkv", text)
 
     def test_completed_card_hides_speed_line(self):
         text = render_task_card(fake_row(status="COMPLETED"), status="COMPLETED")
-        self.assertNotIn("⚡", text)
+        self.assertNotIn("↓", text)
+
+    def test_active_card_is_four_lines(self):
+        text = render_task_card(fake_row(), FakeDownload(), status="ACTIVE")
+        self.assertEqual(len(text.split("\n")), 4)
+
+    def test_active_card_hides_save_path_but_completed_shows_it(self):
+        self.assertNotIn("/downloads/video", render_task_card(fake_row(), FakeDownload(), status="ACTIVE"))
+        self.assertIn("/downloads/video", render_task_card(fake_row(status="COMPLETED"), status="COMPLETED"))
+
+    def test_title_includes_total_size(self):
+        text = render_task_card(fake_row(), FakeDownload(), status="ACTIVE")
+        self.assertIn("<b>movie.mkv</b> · 200.0 MiB", text)
+
+    def test_torrent_task_shows_real_content_name(self):
+        # 种子任务入库的是 .torrent 文件名，拿到元数据后应显示真正的内容名
+        dl = FakeDownload()
+        dl.name = "IPZZ-961"
+        text = render_task_card(fake_row(file_name="x.torrent", source_type="torrent"), dl, status="ACTIVE")
+        self.assertIn("IPZZ-961", text)
+        self.assertNotIn("x.torrent", text)
+
+    def test_torrent_metadata_placeholder_name_is_ignored(self):
+        dl = FakeDownload()
+        dl.name = "[METADATA]abcdef"
+        text = render_task_card(fake_row(file_name="x.torrent", source_type="torrent"), dl, status="ACTIVE")
+        self.assertIn("x.torrent", text)
+
+    def test_url_task_keeps_its_own_name(self):
+        dl = FakeDownload()
+        dl.name = "something-else.bin"
+        text = render_task_card(fake_row(), dl, status="ACTIVE")
+        self.assertIn("movie.mkv", text)
+
+    def test_no_speed_says_what_is_happening(self):
+        dl = FakeDownload()
+        dl.download_speed = 0
+        text = render_task_card(fake_row(), dl, status="ACTIVE")
+        self.assertNotIn("剩余 未知", text)
+        self.assertIn("正在连接节点", text)
+
+    def test_failed_card_shows_error_once(self):
+        text = render_task_card(fake_row(status="FAILED", error="磁盘已满"), FakeDownload(), status="FAILED")
+        self.assertEqual(text.count("磁盘已满"), 1)
 
     def test_card_escapes_html_in_name(self):
         text = render_task_card(fake_row(file_name="<b>x&y</b>.zip"), status="PENDING")

@@ -75,6 +75,12 @@ class TaskRepo:
         )
         await self._conn.commit()
 
+    async def update_file_name(self, gid: str, file_name: str):
+        """种子/磁力任务拿到元数据后，把真正的内容名回写（入库时只有 .torrent
+        文件名或磁力链接），任务列表、搜索、完成通知都跟着显示好看的名字。"""
+        await self._conn.execute("UPDATE tasks SET file_name = ? WHERE gid = ?", (file_name, gid))
+        await self._conn.commit()
+
     async def get_by_gid(self, gid: str) -> aiosqlite.Row | None:
         cur = await self._conn.execute("SELECT * FROM tasks WHERE gid = ?", (gid,))
         return await cur.fetchone()

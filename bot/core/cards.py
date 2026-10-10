@@ -125,42 +125,94 @@ def render_pending_card(
     return "\n".join(lines)
 
 
+def _row_get(row, key: str, default=None):
+    """行对象可能是 sqlite3.Row（缺列抛 IndexError）或测试里的精简 dict。"""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
+
+
+def _display_name(row, download) -> str:
+    """卡片标题。种子/磁力任务入库时的名字是 .torrent 文件名或磁力链接，
+    aria2 拿到元数据后已经知道真正的内容名，优先显示后者。"""
+    real = getattr(download, "name", None) if download else None
+    if (
+        real and not str(real).startswith("[METADATA]")
+        and _row_get(row, "source_type") in ("torrent", "magnet")
+    ):
+        return str(real)
+    return _row_get(row, "file_name") or real or _row_get(row, "source_ref") or _row_get(row, "gid") or "未命名任务"
+
+
 def render_task_card(row, download=None, *, status: str | None = None, node_label: str | None = None) -> str:
+    """任务卡片。下载中的信息压缩成 4 行，一眼能看全：
+
+        ⬇️ 名称 · 总大小
+        ▰▰▱▱▱▱▱▱▱▱▱▱▱▱  12.5%
+        680 MiB · ↓ 689.8 KiB/s · 剩余 约 2小时15分
+        👥 58 · ↑ 36.6 KiB/s · #1 · 22:09:42
+
+    保存路径只在已完成/失败的卡片上显示——下载过程中用户关心的是进度、
+    速度和剩余时间，路径占一整行却几乎不变。"""
     status = status or row["status"]
-    name = row["file_name"] or getattr(download, "name", None) or row["source_ref"] or row["gid"]
+    name = _display_name(row, download)
+    total_bytes = getattr(download, "total_length", 0) if download else 0
+    total_bytes = total_bytes or _row_get(row, "file_size") or 0
     percent = getattr(download, "progress", 0.0) if download else 0.0
     completed = _safe_call(download, "completed_length_string", "0 B") if download else "0 B"
-    total = _safe_call(download, "total_length_string", _fmt_size(row["file_size"])) if download else _fmt_size(row["file_size"])
+    total = _safe_call(download, "total_length_string", _fmt_size(total_bytes)) if download else _fmt_size(total_bytes or None)
     speed = _safe_call(download, "download_speed_string", "0 B/s") if download else "0 B/s"
     upload = _safe_call(download, "upload_speed_string", "0 B/s") if download else "0 B/s"
     connections = getattr(download, "connections", None) if download else None
-    save_path = row["save_path"] or getattr(download, "dir", None) or settings.download_dir
+    save_path = _row_get(row, "save_path") or getattr(download, "dir", None) or settings.download_dir
     updated = datetime.now().strftime("%H:%M:%S")
 
-    status_text = STATUS_LABEL.get(status, status)
-    reason = _state_reason(download, status)
-    safe_name = escape(str(name), quote=False)
-    safe_reason = escape(str(reason), quote=False)
-    safe_path = escape(str(save_path), quote=False)
-    lines = [
-        f"{_status_icon(status)} <b>{safe_name}</b>",
-        DIVIDER,
-        f"<code>{text_progress_bar(percent)}</code>  <b>{percent:.1f}%</b>",
-        f"<code>{completed} / {total}</code>",
-        "",
-        f"{status_text} · {safe_reason}",
-    ]
-    if row["error"]:
-        lines.append(f"❗ {escape(str(row['error']), quote=False)}")
+    title = f"{_status_icon(status)} <b>{escape(str(name), quote=False)}</b>"
+    if total_bytes:
+        title += f" · {total}"
+    lines = [title]
+    footer = f"<code>#{_row_get(row, 'id')}</code> · <i>{updated}</i>"
+
     if status == "ACTIVE":
-        lines.append(f"⚡ ↓ {speed} · ↑ {upload}")
-        lines.append(f"⏱ 剩余 {_eta(download) if download else '未知'} · 🔗 {connections if connections is not None else '-'} 连接")
-    lines.append(f"📂 <code>{safe_path}</code>")
+        lines.append(f"{text_progress_bar(percent)}  <b>{percent:.1f}%</b>")
+        eta = _eta(download) if download else "未知"
+        if not (getattr(download, "download_speed", 0) or 0):
+            # 没速度时 "↓ 0 B/s · 剩余 未知" 毫无信息量，直接说在干什么
+            lines.append(f"{completed} · {escape(_state_reason(download, status), quote=False)}")
+        else:
+            lines.append(f"{completed} · ↓ {speed} · 剩余 {eta}")
+        meta = []
+        if connections is not None:
+            meta.append(f"👥 {connections}")
+        meta.append(f"↑ {upload}")
+        meta.append(footer)  # 下载中的页脚并进这一行，整张卡片 4 行
+        lines.append(" · ".join(meta))
+    elif status == "PAUSED":
+        lines.append(f"{text_progress_bar(percent)}  <b>{percent:.1f}%</b>")
+        lines.append(f"已暂停 · {completed} / {total}")
+    elif status == "PENDING":
+        lines.append("等待下载服务分配任务…")
+    elif status == "COMPLETED":
+        lines.append(f"📂 <code>{escape(str(save_path), quote=False)}</code>")
+    elif status == "FAILED":
+        if percent:
+            lines.append(f"已下载 {completed} / {total}（{percent:.1f}%）")
+        reason = _row_get(row, "error") or _state_reason(download, status)
+        lines.append(f"❗ {escape(str(reason), quote=False)}")
+        lines.append(f"📂 <code>{escape(str(save_path), quote=False)}</code>")
+    else:  # CANCELLED / 未知状态
+        lines.append(STATUS_LABEL.get(status, status))
+
+    # 非 FAILED 状态下的错误信息（比如重试后残留）
+    if status != "FAILED" and _row_get(row, "error"):
+        lines.append(f"❗ {escape(str(row['error']), quote=False)}")
     if node_label:
         lines.append(f"📍 节点：{escape(node_label, quote=False)}")
-    if row["gofile_link"]:
+    if _row_get(row, "gofile_link"):
         lines.append(f"☁️ {escape(str(row['gofile_link']), quote=False)}")
-    lines += ["", f"<code>#{row['id']}</code> · <i>{updated}</i>"]
+    if status != "ACTIVE":
+        lines.append(footer)
     return "\n".join(lines)
 
 

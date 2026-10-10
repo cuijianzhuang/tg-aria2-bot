@@ -186,7 +186,7 @@ class FakeQuery:
         self.answers.append((text, show_alert))
 
 
-class TestTaskCallbacks(unittest.IsolatedAsyncioTestCase):
+class CallbackTestBase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self._dir = tempfile.TemporaryDirectory()
         self.dl = os.path.join(self._dir.name, "downloads")
@@ -225,6 +225,9 @@ class TestTaskCallbacks(unittest.IsolatedAsyncioTestCase):
             await callbacks.handle_task_action(q, self.repo, self.nodes, task_manager=None)
         return q
 
+
+
+class TestTaskCallbacks(CallbackTestBase):
     async def test_open_from_list_keeps_tab_and_page(self):
         f = os.path.join(self.dl, "a.bin")
         open(f, "w").close()
@@ -284,6 +287,67 @@ class TestTaskCallbacks(unittest.IsolatedAsyncioTestCase):
         await self._completed("g1", self.dl)
         await self._run("task:purge:g1")
         self.assertTrue(os.path.isdir(self.dl))
+
+
+class RecordingTM:
+    """只记录 watch/hold 调用的 TaskManager 替身。"""
+
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def watch(self, gid):
+        self.calls.append(("watch", gid))
+
+    def hold(self, gid):
+        self.calls.append(("hold", gid))
+
+
+class TestAttendance(CallbackTestBase):
+    """按钮操作告诉 TaskManager 用户在看哪张卡片：普通操作 → 快速刷新，
+    打开子菜单 → 暂停自动刷新（不然 2 秒一次的刷新会把菜单冲掉）。"""
+
+    async def _attend_run(self, data, **kw):
+        f = os.path.join(self.dl, "a.bin")
+        open(f, "w").close()
+        if await self.repo.get_by_gid("g1") is None:
+            await self._completed("g1", f)
+        self.tm = RecordingTM()
+        q = FakeQuery(data)
+        await callbacks.handle_task_action(q, self.repo, self.nodes, self.tm)
+        return q
+
+    async def test_refresh_button_watches(self):
+        await self._attend_run("task:detail:g1")
+        self.assertEqual(self.tm.calls, [("watch", "g1")])
+
+    async def test_submenus_hold(self):
+        for action in ("cancel", "delete", "limit", "files", "confirm_delete_files", "confirm_purge"):
+            await self._attend_run(f"task:{action}:g1")
+            self.assertEqual(self.tm.calls[0], ("hold", "g1"), action)
+
+    async def test_back_to_card_releases_hold(self):
+        await self._attend_run("task:delete:g1")
+        await self._attend_run("task:detail:g1")
+        self.assertEqual(self.tm.calls[-1], ("watch", "g1"))
+
+    async def test_unauthorized_user_does_not_trigger_fast_refresh(self):
+        await self._attend_run("task:detail:g1")  # 先建任务
+        self.tm = RecordingTM()
+        settings.allowed_user_ids = "1"
+        settings.admin_user_ids = "1"
+        q = FakeQuery("task:pause:g1", user_id=99)
+        await callbacks.handle_task_action(q, self.repo, self.nodes, self.tm)
+        self.assertEqual(self.tm.calls, [])
+
+    async def test_new_pending_task_is_watched(self):
+        token = await self.repo.create_pending(
+            kind="url", user_id=1, chat_id=1, source_ref="https://x/y.bin",
+            file_name="y.bin", file_size=1, payload="https://x/y.bin",
+        )
+        self.tm = RecordingTM()
+        q = FakeQuery(f"pending:start:{token}")
+        await callbacks.handle_pending(q, self.repo, self.nodes, self.tm)
+        self.assertEqual(self.tm.calls, [("watch", "gid-uri")])
 
 
 class TestSettingsAreAdminOnly(unittest.IsolatedAsyncioTestCase):
