@@ -1545,8 +1545,17 @@ version_line() {
 show_header() {
   clear 2>/dev/null || true
   printf '%s========== tg-aria2-bot 管理菜单 ==========%s\n' "$C_BOLD" "$C_RESET"
+  if [[ -f "$(node_info_file)" ]]; then
+    local node_st=stopped
+    [[ "$(systemctl is-active "$NODE_UNIT" 2>/dev/null)" == active ]] && node_st=running
+    printf ' 子节点: %s  （选 16 查看 /addnode 命令）\n' "$(state_label "$node_st")"
+  fi
   if [[ -z "$MODE" ]]; then
-    printf ' 状态: %s未安装%s —— 选 12 开始安装\n' "$C_YELLOW" "$C_RESET"
+    if [[ -f "$(node_info_file)" ]]; then
+      printf ' 主机器人: %s未安装%s（这台机器是子节点）\n' "$C_DIM" "$C_RESET"
+    else
+      printf ' 状态: %s未安装%s —— 选 12 安装主机器人，或选 15 把这台机器装成子节点\n' "$C_YELLOW" "$C_RESET"
+    fi
     return
   fi
   printf ' 部署模式: %s%s%s    版本: %s\n' "$C_CYAN" "$MODE" "$C_RESET" "$(version_line)"
@@ -1590,6 +1599,10 @@ main_menu() {
   ${C_CYAN}12.${C_RESET} 安装 / 修复安装
   ${C_CYAN}13.${C_RESET} 安装 / 修复 Web 管理后台
   ${C_CYAN}14.${C_RESET} 安装快捷命令 tg-aria2
+ ${C_DIM}—— 子节点（这台机器只当远程下载节点，不装机器人）——${C_RESET}
+  ${C_CYAN}15.${C_RESET} 安装子节点
+  ${C_CYAN}16.${C_RESET} 查看子节点信息（/addnode 命令）
+  ${C_CYAN}17.${C_RESET} 卸载子节点
   ${C_CYAN} 0.${C_RESET} 退出
 EOF
     local choice
@@ -1611,6 +1624,9 @@ EOF
       12) require_root install && { bash "$SCRIPT_PATH" install || true; }; pause ;;
       13) require_root web-install && { bash "$SCRIPT_PATH" web-install || true; }; pause ;;
       14) install_shortcut; pause ;;
+      15) node_install_menu; pause ;;
+      16) { bash "$SCRIPT_PATH" node-info || true; }; pause ;;
+      17) require_root node-uninstall && { bash "$SCRIPT_PATH" node-uninstall || true; }; pause ;;
       0|q|exit) exit 0 ;;
       *) err "无效选择"; sleep 1 ;;
     esac
@@ -1900,6 +1916,27 @@ cmd_node_uninstall() {
     log "已卸载服务，配置保留在 ${NODE_CONF_DIR}（加 --purge 一并删除）"
   fi
   warn "别忘了在主机器人里删除这个节点：设置 → 🌐 节点管理"
+}
+
+# 菜单里的"安装子节点"：问几个问题，再交给 node-install 子命令（参数校验都在那里）
+node_install_menu() {
+  require_root node-install || return 0
+  echo "安装子节点：这台机器只装 aria2，装完会给你一条 /addnode 命令，发给主机器人即可。"
+  echo "每项直接回车用默认值。"
+  echo
+  local name dir port allow host args=()
+  read -rp "节点名 [$(hostname -s 2>/dev/null || echo node1)]: " name || return 0
+  read -rp "下载目录 [/downloads]: " dir || return 0
+  read -rp "RPC 端口 [6800]: " port || return 0
+  read -rp "主机器人所在服务器的 IP（只对它放行 RPC 端口；不填则对所有人开放，不推荐）: " allow || return 0
+  read -rp "主机器人用来访问这台机器的地址 [自动探测公网 IP]: " host || return 0
+  [[ -n "$name" ]] && args+=(--name "$name")
+  [[ -n "$dir" ]] && args+=(--dir "$dir")
+  [[ -n "$port" ]] && args+=(--port "$port")
+  [[ -n "$allow" ]] && args+=(--allow-from "$allow")
+  [[ -n "$host" ]] && args+=(--host "$host")
+  echo
+  bash "$SCRIPT_PATH" node-install "${args[@]}" || true
 }
 
 usage() {

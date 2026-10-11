@@ -60,6 +60,24 @@ class TestDryRun(unittest.TestCase):
         for word in ("node-install", "node-info", "node-uninstall", "--allow-from"):
             self.assertIn(word, out)
 
+    def test_menu_offers_the_node_entries(self):
+        text = SCRIPT.read_text()
+        for needle in ("15.${C_RESET} 安装子节点", "16.${C_RESET} 查看子节点信息", "17.${C_RESET} 卸载子节点",
+                       "15) node_install_menu", 'node-info', 'node-uninstall'):
+            self.assertIn(needle, text)
+
+    def test_menu_install_passes_only_the_filled_in_answers(self):
+        """菜单里全部回车 = 不带任何选项，走默认值；填了非法值会被 node-install 的校验拦下，什么都不会装。"""
+        if not shutil.which("script"):
+            self.skipTest("需要 script 命令来模拟终端")
+        r = subprocess.run(
+            ["script", "-qc", f"{BASH} {SCRIPT}", "/dev/null"], capture_output=True, text=True, timeout=60,
+            input="15\n\n\n\nnot an ip!\n\n\n0\n", env={**os.environ, "TERM": "dumb"},
+        )
+        out = r.stdout
+        self.assertIn("--allow-from 请填主机器人所在服务器的 IP", out)
+        self.assertNotIn("子节点已就绪", out)
+
     def test_script_is_valid_bash(self):
         self.assertEqual(subprocess.run([BASH, "-n", str(SCRIPT)]).returncode, 0)
 
