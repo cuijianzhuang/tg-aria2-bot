@@ -266,3 +266,13 @@ aria2p 是同步库，每次调用都要 `to_thread`。aria2 的 JSON-RPC 极简
 | 管理员被自己的机器人拒之门外 | `ADMIN_USER_IDS` 里的人如果不在 `ALLOWED_USER_IDS` 里，`AuthMiddleware` 会把他当陌生人拒绝（也就收不到申请通知）。管理员现在始终放行 |
 | 额度 | 同时进行的任务数 / 单任务大小 / 每日流量，默认全部不限（不改变现有部署的行为），`.env` 设默认值、`/setquota` 个别覆盖。添加、重试、恢复、批量添加、批量恢复都检查，被拒时确认卡片保留。URL/种子添加时不知道大小，所以单任务大小在下载中拦截（取消并删掉已下载部分）；每日流量用"相邻两次看到的已下载字节之差"累加到 `usage_daily`，跟任务创建在哪天无关（按创建日归属会让隔夜任务绕过额度），用完后暂停（不是取消）、当天只通知一次；重启后第一次看到只建基线，不会把已下载的全算成今天的 |
 | 集成测试 | `tests/test_access_e2e.py` 用真的 aiogram `Dispatcher` + 主程序同样的路由/中间件装配（只替换 Telegram 网络层）验证：「申请使用」按钮真的能穿过权限中间件、伪造的「通过」被拦住、通过后能正常使用。这些取决于 aiogram 的中间件传播规则，单测里的替身证明不了 |
+
+## 实施记录（2026-10-11）：在机器人里升级
+
+| 项 | 说明 |
+|----|------|
+| 为什么不能在 bot 进程里直接跑升级 | `tg-aria2.sh update` 会重启 bot，等于杀掉自己。改用 `systemd-run --unit=tg-aria2-upgrade` 起一个独立的瞬态服务执行，bot 重启不影响它；输出写入 `data/upgrade.log` |
+| 结果怎么回到消息上 | 启动前写 `data/upgrade_job.json`（聊天、消息、起点版本）。新进程启动时 `finish_pending_upgrade` 等升级服务结束，比较 HEAD 与起点：变了=成功，日志含"已经是最新版本"=无需升级，否则=失败/已回滚，附日志末尾；超过 1 小时的旧任务丢弃 |
+| 安全 | 路由整体挂 `AdminMiddleware`；确认页回调带目标短 sha，远端变了要重新确认；命令行里没有任何用户输入；本地改动/分叉只有明确点"丢弃"才 `--reset` |
+| 定期检查 | `update_check_loop` 每 `UPDATE_CHECK_HOURS` 小时 fetch 一次，同一个远端版本只通知一次（`data/upgrade_state.json`） |
+| 限制 | 仅 bare 模式 + root + systemd-run + git；docker 模式给出原因并提示 `sudo tg-aria2 update`；第一次必须手动升级。沙箱里用真实 `tg-aria2.sh` + git 演练过成功和失败回滚两条链路，真实 Telegram / systemd 未验证 |

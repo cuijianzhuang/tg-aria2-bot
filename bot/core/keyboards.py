@@ -333,6 +333,7 @@ def settings_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🖥 服务器状态", callback_data="admin:sysinfo"),
                 InlineKeyboardButton(text="🌐 节点管理", callback_data="admin:nodes"),
             ],
+            [InlineKeyboardButton(text="⬆️ 检查更新", callback_data="admin:upgrade")],
             [InlineKeyboardButton(text="⬅️ 返回主菜单", callback_data="nav:start")],
         ]
     )
