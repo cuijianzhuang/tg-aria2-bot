@@ -652,6 +652,95 @@ class TestHandlers(UpgradeTestBase):
         self.assertIn("admin:upgrade", _cbs(settings_keyboard()))
 
 
+class TestRollback(UpgradeTestBase):
+    """回退：只能回到最近版本列表里的提交，命令行里只有校验过的 sha。"""
+
+    COMMITS = [upgrade.Commit("aaaaaaa", "当前", int(time.time())), upgrade.Commit("1234567", "上一个版本", int(time.time()) - 3600),
+               upgrade.Commit("7654321", "更早", int(time.time()) - 7200)]
+
+    def _env(self):
+        calls = []
+
+        async def fake_run(*args, **kw):
+            calls.append(args)
+            return (0, "inactive") if args[0] == "systemctl" else (0, "")
+
+        for p in (patch.object(upgrade, "_run", fake_run), patch.object(upgrade, "support", return_value=(True, "")),
+                  patch.object(upgrade, "recent_versions", AsyncMock(return_value=self.COMMITS)),
+                  patch.object(upgrade, "current_version", AsyncMock(return_value=cur()))):
+            p.start()
+            self.addCleanup(p.stop)
+        upgrade.REPO_DIR = Path("/opt/tg-aria2-bot")
+        return calls
+
+    async def test_runner_gets_dash_dash_to_with_the_sha(self):
+        calls = self._env()
+        await upgrade.start_upgrade(chat_id=42, message_id=7, user_id=1, from_sha="a" * 40, target_sha="1234567", rollback=True)
+        cmd = next(c for c in calls if c[0] == "systemd-run")
+        self.assertEqual(cmd[-2:], ("--to", "1234567"))
+        self.assertEqual(upgrade.read_job()["action"], "rollback")
+
+    async def test_garbage_sha_is_refused_before_anything_runs(self):
+        calls = self._env()
+        with self.assertRaises(UpgradeError):
+            await upgrade.start_upgrade(chat_id=1, message_id=1, user_id=1, from_sha="a" * 40,
+                                        target_sha="HEAD; rm -rf /", rollback=True)
+        self.assertFalse([c for c in calls if c[0] == "systemd-run"])
+        self.assertIsNone(upgrade.read_job())
+
+    def test_rollback_wording(self):
+        job = {"from_sha": "a" * 40, "action": "rollback"}
+        ok = upgrade.classify(job, "1" * 40, "")
+        self.assertIn("回退完成", upgrade.render_outcome(ok))
+        failed = upgrade.classify(job, "a" * 40, "boom")
+        self.assertIn("回退失败", upgrade.render_outcome(failed))
+
+    def test_list_offers_everything_but_the_current_version(self):
+        text, markup = ui.render_rollback_list(self.COMMITS)
+        data = [b.callback_data for row in markup.inline_keyboard for b in row]
+        self.assertIn("rollback:ask:1234567", data)
+        self.assertIn("rollback:ask:7654321", data)
+        self.assertNotIn("rollback:ask:aaaaaaa", data)
+        self.assertIn("当前", text)
+
+    async def test_ask_shows_confirmation_and_does_not_start(self):
+        self._env()
+        start = patch.object(upgrade, "start_upgrade", AsyncMock())
+        m = start.start()
+        self.addCleanup(start.stop)
+        q = FakeQuery("rollback:ask:1234567")
+        await ui.rollback_action(q, bot=FakeBot())
+        m.assert_not_awaited()
+        self.assertIn("确认回退", q.message.texts[-1][0])
+
+    async def test_go_starts_a_rollback_to_a_listed_version(self):
+        self._env()
+        start = patch.object(upgrade, "start_upgrade", AsyncMock())
+        m = start.start()
+        self.addCleanup(start.stop)
+        with patch.object(upgrade, "finish_pending_upgrade", AsyncMock()):
+            await ui.rollback_action(FakeQuery("rollback:go:1234567"), bot=FakeBot())
+        kw = m.await_args.kwargs
+        self.assertTrue(kw["rollback"])
+        self.assertEqual(kw["target_sha"], "1234567")
+
+    async def test_unlisted_version_and_current_version_are_not_accepted(self):
+        self._env()
+        start = patch.object(upgrade, "start_upgrade", AsyncMock())
+        m = start.start()
+        self.addCleanup(start.stop)
+        for data in ("rollback:go:deadbeef", "rollback:go:aaaaaaa"):
+            q = FakeQuery(data)
+            await ui.rollback_action(q, bot=FakeBot())
+            self.assertIn("回退版本", q.message.texts[-1][0])     # 退回到选择列表
+        m.assert_not_awaited()
+
+    def test_router_is_admin_only_and_registers_the_rollback_handlers(self):
+        names = {h.callback.__name__ for h in ui.router.callback_query.handlers}
+        self.assertTrue({"show_rollback", "rollback_action"} <= names)
+        self.assertTrue(any(isinstance(m, AdminMiddleware) for m in ui.router.callback_query.middleware))
+
+
 class TestSettingsFile(unittest.TestCase):
     def test_job_file_roundtrip_is_atomic(self):
         with tempfile.TemporaryDirectory() as d:

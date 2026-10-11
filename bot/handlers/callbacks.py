@@ -33,7 +33,7 @@ from bot.core.keyboards import (
 )
 from bot.core.list_view import LIST_STATUS_MAP, render_task_list
 from bot.core.node_pool import NodeUnavailable
-from bot.core.stats_view import render_stats_view
+from bot.core.stats_view import render_daily_view, render_stats_view
 from bot.core.telegram_files import to_download_uri
 
 log = logging.getLogger(__name__)
@@ -301,6 +301,13 @@ async def list_filter(query: CallbackQuery, repo, nodes):
         page = 0
     scope = settings.scope_for(query.from_user.id) if query.from_user else None
     text, markup = await render_task_list(repo, nodes, status_key, page, user_id=scope)
+    await _edit(query, text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "stats:daily")
+async def show_daily_stats(query: CallbackQuery, repo):
+    scope = settings.scope_for(query.from_user.id) if query.from_user else None
+    text, markup = await render_daily_view(repo, user_id=scope)
     await _edit(query, text, reply_markup=markup, parse_mode="HTML")
 
 

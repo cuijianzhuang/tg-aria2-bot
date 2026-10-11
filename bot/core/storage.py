@@ -3,10 +3,12 @@ import os
 import shutil
 
 CATEGORY_BY_EXT = {
-    ".mp4": "video", ".mkv": "video", ".mov": "video", ".avi": "video",
-    ".mp3": "audio", ".flac": "audio", ".m4a": "audio", ".wav": "audio",
-    ".jpg": "photo", ".jpeg": "photo", ".png": "photo", ".webp": "photo",
-    ".zip": "archive", ".rar": "archive", ".7z": "archive",
+    **dict.fromkeys((".mp4", ".mkv", ".mov", ".avi", ".ts", ".flv", ".wmv", ".webm", ".m4v", ".rmvb", ".mpg", ".mpeg"), "video"),
+    **dict.fromkeys((".mp3", ".flac", ".m4a", ".wav", ".aac", ".ogg", ".opus", ".ape", ".wma"), "audio"),
+    **dict.fromkeys((".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic"), "photo"),
+    **dict.fromkeys((".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".zst"), "archive"),
+    **dict.fromkeys((".pdf", ".epub", ".mobi", ".azw3", ".txt", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".csv"), "document"),
+    **dict.fromkeys((".iso", ".apk", ".exe", ".msi", ".dmg", ".deb", ".rpm", ".pkg"), "software"),
 }
 
 

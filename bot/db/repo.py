@@ -61,6 +61,10 @@ class TaskRepo:
         await self._conn.commit()
         return cur.lastrowid
 
+    async def set_reply_message(self, task_id: int, message_id: int):
+        await self._conn.execute("UPDATE tasks SET reply_message_id = ? WHERE id = ?", (message_id, task_id))
+        await self._conn.commit()
+
     async def retry_task(self, task_id: int, new_gid: str, *, reply_message_id: int | None = None):
         """Re-arm a failed/cancelled/completed task with a freshly-added aria2 gid.
         reply_message_id repoints progress edits at the message the retry came from."""
@@ -116,6 +120,106 @@ class TaskRepo:
         )
         await self._conn.commit()
         return cur.rowcount
+
+    # ---------- 过期文件自动清理 ----------
+
+    async def get_expiring(
+        self, cutoff_iso: str, *, unwarned: bool = False, warned_before: float | None = None, limit: int = 200,
+    ) -> list[aiosqlite.Row]:
+        """已完成、文件还在、没被保留、完成时间早于 cutoff 的任务。
+        unwarned=True 只取还没提醒过的；warned_before=T 只取在 T 之前就已经提醒过的
+        （expiry_warned 存的是提醒时刻的 epoch 秒，0 = 没提醒过）。"""
+        sql = (
+            "SELECT * FROM tasks WHERE status = 'COMPLETED' AND files_deleted = 0 AND expiry_keep = 0 "
+            "AND save_path IS NOT NULL AND finished_at IS NOT NULL AND finished_at < ?"
+        )
+        params: list = [cutoff_iso]
+        if unwarned:
+            sql += " AND expiry_warned = 0"
+        if warned_before is not None:
+            sql += " AND expiry_warned > 0 AND expiry_warned <= ?"
+            params.append(warned_before)
+        cur = await self._conn.execute(sql + " ORDER BY finished_at LIMIT ?", (*params, limit))
+        return await cur.fetchall()
+
+    async def mark_expiry_warned(self, task_id: int):
+        await self._conn.execute("UPDATE tasks SET expiry_warned = ? WHERE id = ?", (time(), task_id))
+        await self._conn.commit()
+
+    async def mark_files_deleted(self, task_id: int):
+        await self._conn.execute("UPDATE tasks SET files_deleted = 1 WHERE id = ?", (task_id,))
+        await self._conn.commit()
+
+    async def set_expiry_keep(self, task_id: int, keep: bool):
+        await self._conn.execute("UPDATE tasks SET expiry_keep = ? WHERE id = ?", (1 if keep else 0, task_id))
+        await self._conn.commit()
+
+    # ---------- RSS 订阅 ----------
+
+    async def add_feed(self, *, user_id: int, chat_id: int, url: str, keyword: str, exclude: str, node: str) -> int | None:
+        """返回新订阅的 id；同一个人重复订阅同一个地址返回 None。"""
+        try:
+            cur = await self._conn.execute(
+                "INSERT INTO rss_feeds (user_id, chat_id, url, keyword, exclude, node, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id, chat_id, url, keyword, exclude, node, time()),
+            )
+        except sqlite3.IntegrityError:
+            return None
+        await self._conn.commit()
+        return cur.lastrowid
+
+    async def list_feeds(self, *, user_id: int | None = None, enabled_only: bool = False) -> list[aiosqlite.Row]:
+        conds, params = [], []
+        if user_id is not None:
+            conds.append("user_id = ?")
+            params.append(user_id)
+        if enabled_only:
+            conds.append("enabled = 1")
+        where = f" WHERE {' AND '.join(conds)}" if conds else ""
+        cur = await self._conn.execute(f"SELECT * FROM rss_feeds{where} ORDER BY id", params)
+        return await cur.fetchall()
+
+    async def get_feed(self, feed_id: int) -> aiosqlite.Row | None:
+        cur = await self._conn.execute("SELECT * FROM rss_feeds WHERE id = ?", (feed_id,))
+        return await cur.fetchone()
+
+    async def delete_feed(self, feed_id: int):
+        await self._conn.execute("DELETE FROM rss_seen WHERE feed_id = ?", (feed_id,))
+        await self._conn.execute("DELETE FROM rss_feeds WHERE id = ?", (feed_id,))
+        await self._conn.commit()
+
+    async def set_feed_enabled(self, feed_id: int, enabled: bool):
+        await self._conn.execute("UPDATE rss_feeds SET enabled = ? WHERE id = ?", (1 if enabled else 0, feed_id))
+        await self._conn.commit()
+
+    async def update_feed_state(self, feed_id: int, *, title: str | None = None, error: str | None = None):
+        await self._conn.execute(
+            # 出错不更新 last_checked：它为空代表"还没成功基线过"，否则出错后的下一次
+            # 成功轮询会被当成正常轮询，把源里的全部历史条目都下载一遍
+            "UPDATE rss_feeds SET last_checked = COALESCE(?, last_checked), last_error = ?, "
+            "title = COALESCE(?, title) WHERE id = ?",
+            (time() if error is None else None, error, title, feed_id),
+        )
+        await self._conn.commit()
+
+    async def seen_guids(self, feed_id: int) -> set[str]:
+        cur = await self._conn.execute("SELECT guid FROM rss_seen WHERE feed_id = ?", (feed_id,))
+        return {r["guid"] for r in await cur.fetchall()}
+
+    async def mark_seen(self, feed_id: int, guids: list[str]):
+        now = time()
+        await self._conn.executemany(
+            "INSERT OR IGNORE INTO rss_seen (feed_id, guid, seen_at) VALUES (?, ?, ?)",
+            [(feed_id, g, now) for g in guids],
+        )
+        # 每个订阅只留最近 2000 条记录，免得无限增长
+        await self._conn.execute(
+            "DELETE FROM rss_seen WHERE feed_id = ? AND rowid NOT IN "
+            "(SELECT rowid FROM rss_seen WHERE feed_id = ? ORDER BY seen_at DESC, rowid DESC LIMIT 2000)",
+            (feed_id, feed_id),
+        )
+        await self._conn.commit()
 
     async def search_tasks(self, keyword: str, limit: int = 15, *, user_id: int | None = None) -> list[aiosqlite.Row]:
         """按文件名/来源标识模糊搜索，多取 1 条用来在渲染层判断"结果是否被截断"。
@@ -378,6 +482,22 @@ class TaskRepo:
         )
         row = await cur.fetchone()
         return row[0] if row else 0
+
+    async def get_usage_since(self, since_day: str, *, user_id: int | None = None) -> list[tuple[str, int]]:
+        """[(day, bytes)] 按天汇总；user_id=None 汇总所有人。"""
+        sql, params = "SELECT day, SUM(bytes) FROM usage_daily WHERE day >= ?", [since_day]
+        if user_id is not None:
+            sql += " AND user_id = ?"
+            params.append(user_id)
+        cur = await self._conn.execute(sql + " GROUP BY day ORDER BY day", params)
+        return [(r[0], r[1] or 0) for r in await cur.fetchall()]
+
+    async def get_top_users_since(self, since_day: str, limit: int = 5) -> list[tuple[int, int]]:
+        cur = await self._conn.execute(
+            "SELECT user_id, SUM(bytes) AS b FROM usage_daily WHERE day >= ? GROUP BY user_id "
+            "HAVING b > 0 ORDER BY b DESC LIMIT ?", (since_day, limit),
+        )
+        return [(r[0], r[1]) for r in await cur.fetchall()]
 
     async def prune_usage(self, before_day: str) -> int:
         cur = await self._conn.execute("DELETE FROM usage_daily WHERE day < ?", (before_day,))
