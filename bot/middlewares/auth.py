@@ -8,6 +8,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, TelegramObject, Update
 
 from bot.config import settings
+from bot.core.keyboards import ACCESS_REQUEST_CALLBACK, access_request_keyboard
 
 log = logging.getLogger(__name__)
 
@@ -50,17 +51,18 @@ async def resolve_admin_contact(bot) -> str | None:
     return contact
 
 
-def denied_text(user_id: int, contact: str | None, *, html: bool) -> str:
-    """没有权限时给用户看的提示：他自己的 ID（发给管理员加白名单用）+ 联系方式。
+def denied_text(user_id: int, contact: str | None, *, html: bool, can_apply: bool = False) -> str:
+    """没有权限时给用户看的提示：他自己的 ID + 怎么拿到权限。
     html=True 用于普通消息（ID 放进 <code>，点一下就能复制）；False 用于按钮
-    弹窗（纯文本，Telegram 限制 200 字符）。"""
+    弹窗（纯文本，Telegram 限制 200 字符）。can_apply=True 表示消息下面带
+    「申请使用」按钮，文案相应改成"点按钮申请"。"""
     if html:
-        who = f"请把这个 ID 发给管理员 {escape(contact, quote=False)}" if contact else "请把这个 ID 发给管理员"
-        return (
-            "⛔ <b>你没有权限使用这个机器人</b>\n\n"
-            f"你的 ID：<code>{user_id}</code>\n"
-            f"{who}，加入白名单后即可使用。"
-        )
+        who = f"管理员 {escape(contact, quote=False)}" if contact else "管理员"
+        if can_apply:
+            how = f"点下面的「📨 申请使用」，管理员通过后会通知你。\n也可以把这个 ID 发给{who}。"
+        else:
+            how = f"请把这个 ID 发给{who}，加入白名单后即可使用。"
+        return f"⛔ <b>你没有权限使用这个机器人</b>\n\n你的 ID：<code>{user_id}</code>\n{how}"
     who = f"请联系管理员 {contact}" if contact else "请联系管理员"
     return f"⛔ 你没有权限使用这个机器人\n你的 ID：{user_id}\n{who}"[:200]
 
@@ -81,12 +83,17 @@ class AuthMiddleware(BaseMiddleware):
         # non-empty, allowed_users (DB, manageable from the web admin) adds more users
         # on top without needing a redeploy.
         if user and settings.allowed_ids:
-            allowed = user.id in settings.allowed_ids
+            # 管理员始终放行：ADMIN_USER_IDS 里的人不一定也写在 ALLOWED_USER_IDS 里，
+            # 以前这种管理员会被自己的机器人拒之门外（也就收不到使用申请的通知）
+            allowed = user.id in settings.allowed_ids or user.id in settings.admin_ids
             if not allowed:
                 repo = data.get("repo")
                 if repo is not None:
                     allowed = await repo.is_user_allowed(user.id)
             if not allowed:
+                # 「申请使用」按钮是没权限的人唯一能点的东西，放行到 access 路由
+                if isinstance(event, CallbackQuery) and event.data == ACCESS_REQUEST_CALLBACK:
+                    return await handler(event, data)
                 await self._deny(event, user.id, data.get("bot"))
                 return None
 
@@ -110,7 +117,12 @@ class AuthMiddleware(BaseMiddleware):
             for uid in [u for u, t in _last_denied.items() if now - t > _DENY_REPLY_COOLDOWN]:
                 del _last_denied[uid]
         _last_denied[user_id] = now
-        await reply(denied_text(user_id, contact, html=True), parse_mode="HTML")
+        can_apply = settings.access_request_enabled
+        await reply(
+            denied_text(user_id, contact, html=True, can_apply=can_apply),
+            parse_mode="HTML",
+            reply_markup=access_request_keyboard() if can_apply else None,
+        )
 
 
 class AdminMiddleware(BaseMiddleware):

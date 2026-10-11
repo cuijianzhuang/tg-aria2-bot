@@ -301,6 +301,9 @@ class RecordingTM:
     def hold(self, gid):
         self.calls.append(("hold", gid))
 
+    def pending_usage(self, user_id):
+        return 0
+
 
 class TestAttendance(CallbackTestBase):
     """按钮操作告诉 TaskManager 用户在看哪张卡片：普通操作 → 快速刷新，
@@ -373,5 +376,131 @@ class TestSettingsAreAdminOnly(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(isinstance(m, AdminMiddleware) for m in settings_menu.router.callback_query.middleware))
 
 
+class TestQuotaAtTheDoor(CallbackTestBase):
+    """额度在添加/重试/恢复任务的按钮入口生效：被拒时给出原因，且确认卡片保留。"""
+
+    GIB = 1024**3
+
+    def setUp(self):
+        from bot.core import quota as q
+        self._quota_orig = (settings.user_max_active_tasks, settings.user_max_task_size_gb, settings.user_daily_quota_gb)
+        self.quota = q
+
+    def tearDown(self):
+        settings.user_max_active_tasks, settings.user_max_task_size_gb, settings.user_daily_quota_gb = self._quota_orig
+
+    async def _task(self, gid, status, user_id=2):
+        await self.repo.create_task(
+            gid=gid, user_id=user_id, chat_id=1, reply_message_id=None, source_type="url",
+            source_ref=gid, file_name="f", file_size=None, payload="https://x/y.bin",
+        )
+        await self.repo.update_status(gid, status)
+
+    async def _pending(self, user_id=2, size=None, batch_id=None):
+        return await self.repo.create_pending(
+            kind="url", user_id=user_id, chat_id=1, source_ref=f"r{os.urandom(2).hex()}",
+            file_name="y.bin", file_size=size, payload="https://x/y.bin", batch_id=batch_id,
+        )
+
+    async def _start(self, token, user_id=2):
+        q = FakeQuery(f"pending:start:{token}", user_id=user_id)
+        await callbacks.handle_pending(q, self.repo, self.nodes, RecordingTM())
+        return q
+
+    async def test_start_refused_when_too_many_active_tasks_and_card_is_kept(self):
+        settings.user_max_active_tasks = 1
+        await self._task("g0", "ACTIVE")
+        token = await self._pending()
+        q = await self._start(token)
+        text, alert = q.answers[-1]
+        self.assertTrue(alert)
+        self.assertIn("最多同时进行 1 个任务", text)
+        self.assertIsNotNone(await self.repo.get_pending(token))       # 卡片还在，可以稍后再点
+        self.assertEqual(self.nodes.get("default").add_uri_calls, [])  # 没有真的去 aria2 添加
+
+    async def test_start_refused_when_file_is_too_big(self):
+        settings.user_max_task_size_gb = 1
+        token = await self._pending(size=3 * self.GIB)
+        q = await self._start(token)
+        self.assertIn("单任务上限", q.answers[-1][0])
+        self.assertIsNotNone(await self.repo.get_pending(token))
+
+    async def test_start_refused_when_daily_quota_is_used_up(self):
+        settings.user_daily_quota_gb = 1
+        await self.repo.add_usage(2, self.quota.today(), 1 * self.GIB)
+        token = await self._pending()
+        q = await self._start(token)
+        self.assertIn("今天的下载额度已用完", q.answers[-1][0])
+
+    async def test_start_allowed_within_limits(self):
+        settings.user_max_active_tasks = 2
+        await self._task("g0", "ACTIVE")
+        token = await self._pending()
+        await self._start(token)
+        self.assertIsNone(await self.repo.get_pending(token))
+        self.assertEqual(len(self.nodes.get("default").add_uri_calls), 1)
+
+    async def test_admin_is_not_limited(self):
+        settings.user_max_active_tasks = 1
+        await self._task("g0", "ACTIVE", user_id=1)
+        token = await self._pending(user_id=1)
+        await self._start(token, user_id=1)
+        self.assertEqual(len(self.nodes.get("default").add_uri_calls), 1)
+
+    async def test_retry_is_refused_over_quota(self):
+        settings.user_max_active_tasks = 1
+        await self._task("g0", "ACTIVE")
+        await self._task("g1", "FAILED")
+        q = FakeQuery("task:retry:g1", user_id=2)
+        await callbacks.handle_task_action(q, self.repo, self.nodes, RecordingTM())
+        self.assertIn("最多同时进行", q.answers[-1][0])
+        self.assertEqual(self.nodes.get("default").add_uri_calls, [])
+
+    async def test_resume_is_refused_only_when_todays_quota_is_gone(self):
+        settings.user_max_active_tasks = 1      # 它自己占着唯一的名额——恢复不应该因此被拒
+        settings.user_daily_quota_gb = 1
+        await self._task("g1", "PAUSED")
+        q = FakeQuery("task:resume:g1", user_id=2)
+        await callbacks.handle_task_action(q, self.repo, self.nodes, RecordingTM())
+        self.assertEqual(self.nodes.get("default").resumed, ["g1"])
+
+        await self._task("g2", "PAUSED")
+        await self.repo.add_usage(2, self.quota.today(), 1 * self.GIB)
+        q = FakeQuery("task:resume:g2", user_id=2)
+        await callbacks.handle_task_action(q, self.repo, self.nodes, RecordingTM())
+        self.assertIn("额度已用完", q.answers[-1][0])
+        self.assertEqual(self.nodes.get("default").resumed, ["g1"])    # g2 没有被恢复
+
+    async def test_batch_start_stops_at_the_active_limit_and_says_why(self):
+        settings.user_max_active_tasks = 2
+        fake = self.nodes.get("default")
+        counter = iter(range(100))
+
+        async def add_uri(uri, *, out=None, download_dir=None):   # 每次返回不同的 gid（默认替身是固定值）
+            fake.add_uri_calls.append((uri, out, download_dir))
+            return f"batch-gid-{next(counter)}"
+
+        fake.add_uri = add_uri
+        for _ in range(4):
+            await self._pending(batch_id="b1")
+        q = FakeQuery("pending:startall:b1", user_id=2)
+        await callbacks.handle_pending(q, self.repo, self.nodes, RecordingTM())
+        self.assertEqual(len(self.nodes.get("default").add_uri_calls), 2)
+        text = q.message.edits[-1][0]
+        self.assertIn("成功启动 2 个", text)
+        self.assertIn("跳过 2 个", text)
+        self.assertIn("最多同时进行 2 个任务", text)
+
+    async def test_bulk_resume_skips_users_whose_quota_is_gone(self):
+        settings.user_daily_quota_gb = 1
+        await self.repo.add_usage(2, self.quota.today(), 1 * self.GIB)
+        await self._task("g1", "PAUSED", user_id=2)
+        await self._task("g2", "PAUSED", user_id=1)      # 管理员的不受限
+        q = FakeQuery("bulk:resume:PAUSED", user_id=1)   # 管理员点"全部继续"
+        await callbacks.bulk_action(q, self.repo, self.nodes, RecordingTM())
+        self.assertEqual(self.nodes.get("default").resumed, ["g2"])
+
+
 if __name__ == "__main__":
     unittest.main()
+

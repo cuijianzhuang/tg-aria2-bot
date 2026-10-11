@@ -29,6 +29,36 @@ CREATE TABLE IF NOT EXISTS allowed_users (
     added_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 使用申请：没权限的人点「申请使用」后建一行，管理员点通过/拒绝后更新状态。
+-- 一个人只有一行（重复申请复用同一行），所以"重复申请只算一次"天然成立。
+CREATE TABLE IF NOT EXISTS access_requests (
+    user_id       INTEGER PRIMARY KEY,
+    username      TEXT,
+    full_name     TEXT,
+    status        TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
+    requested_at  REAL NOT NULL,
+    notified_at   REAL,                              -- 上次成功通知到管理员的时间
+    decided_at    REAL,
+    decided_by    INTEGER
+);
+
+-- 普通用户的个别额度覆盖。NULL = 沿用 .env 里的默认值；0 = 不限制。
+CREATE TABLE IF NOT EXISTS user_quotas (
+    user_id         INTEGER PRIMARY KEY,
+    max_active      INTEGER,    -- 同时进行的任务数
+    max_task_bytes  INTEGER,    -- 单个任务大小上限
+    daily_bytes     INTEGER     -- 每天下载总量
+);
+
+-- 每人每天实际下载的字节数（按轮询时看到的增量累加，跟任务创建在哪天无关，
+-- 所以隔夜的任务不会绕过额度）
+CREATE TABLE IF NOT EXISTS usage_daily (
+    user_id  INTEGER NOT NULL,
+    day      TEXT NOT NULL,       -- YYYY-MM-DD，服务器时区的自然日
+    bytes    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, day)
+);
+
 -- Unconfirmed "开始下载" cards. Used to be an in-memory dict, which meant a bot
 -- restart silently expired every pending confirmation; persisting it lets a
 -- restart mid-confirmation still resolve correctly.
@@ -82,6 +112,9 @@ MIGRATIONS = [
     # created_at（列表/搜索）和 WHERE user_id = ? [AND status = ?]（计数/统计）
     "CREATE INDEX IF NOT EXISTS idx_tasks_user_created ON tasks(user_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_user_status ON tasks(user_id, status)",
+    # 白名单页显示昵称/用户名（通过申请加入的用户会带上这两项）
+    "ALTER TABLE allowed_users ADD COLUMN username TEXT",
+    "ALTER TABLE allowed_users ADD COLUMN full_name TEXT",
 ]
 
 # Valid status values, kept here as the single source of truth for the state machine.

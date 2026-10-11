@@ -36,6 +36,26 @@ def _mark(label: str, selected: bool) -> str:
     return f"·{label}·" if selected else label
 
 
+ACCESS_REQUEST_CALLBACK = "access:request"
+
+
+def access_request_keyboard() -> InlineKeyboardMarkup:
+    """没权限的人收到的提示下面的按钮。"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📨 申请使用", callback_data=ACCESS_REQUEST_CALLBACK)],
+    ])
+
+
+def access_decision_keyboard(user_id: int, *, from_page: bool = False) -> InlineKeyboardMarkup:
+    """管理员收到的申请消息下面的通过/拒绝。from_page=True 用在白名单页里
+    （处理完刷新那一页，而不是改一条通知消息）。"""
+    ok, no = ("pok", "pno") if from_page else ("ok", "no")
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ 通过", callback_data=f"access:{ok}:{user_id}"),
+        InlineKeyboardButton(text="❌ 拒绝", callback_data=f"access:{no}:{user_id}"),
+    ]])
+
+
 def main_inline_keyboard(
     counts: dict[str, int] | None = None, *, node_label: str | None = None, is_admin: bool = True,
 ) -> InlineKeyboardMarkup:

@@ -12,7 +12,7 @@ from bot.core import gofile
 from bot.core.node_pool import NodePool
 from bot.core.task_manager import TaskManager
 from bot.db.repo import TaskRepo
-from bot.handlers import admin, callbacks, commands, links, media, settings_menu
+from bot.handlers import access, admin, callbacks, commands, links, media, settings_menu
 from bot.middlewares.auth import AuthMiddleware
 
 BOT_COMMANDS = [
@@ -20,6 +20,7 @@ BOT_COMMANDS = [
     BotCommand(command="list", description="任务列表"),
     BotCommand(command="find", description="按文件名搜索任务"),
     BotCommand(command="stats", description="下载统计"),
+    BotCommand(command="quota", description="我的额度和今日用量"),
     BotCommand(command="settings", description="设置与管理"),
 ]
 
@@ -56,6 +57,7 @@ async def main():
     dp.message.middleware(AuthMiddleware())
     dp.callback_query.middleware(AuthMiddleware())
     dp.include_router(commands.router)
+    dp.include_router(access.router)
     dp.include_router(admin.router)
     dp.include_router(settings_menu.router)
     dp.include_router(callbacks.router)

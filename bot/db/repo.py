@@ -251,9 +251,19 @@ class TaskRepo:
 
     # ---- allowed_users: DB-managed whitelist additions on top of the env-seeded ALLOWED_USER_IDS ----
 
-    async def add_allowed_user(self, user_id: int, note: str | None = None):
+    async def add_allowed_user(
+        self, user_id: int, note: str | None = None, *, username: str | None = None, full_name: str | None = None,
+    ):
+        # 重复添加时只覆盖传进来的非空字段，不会把已有的备注/用户名冲成空
         await self._conn.execute(
-            "INSERT OR REPLACE INTO allowed_users (user_id, note) VALUES (?, ?)", (user_id, note)
+            """
+            INSERT INTO allowed_users (user_id, note, username, full_name) VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                note = COALESCE(excluded.note, note),
+                username = COALESCE(excluded.username, username),
+                full_name = COALESCE(excluded.full_name, full_name)
+            """,
+            (user_id, note, username, full_name),
         )
         await self._conn.commit()
 
@@ -268,6 +278,111 @@ class TaskRepo:
     async def is_user_allowed(self, user_id: int) -> bool:
         cur = await self._conn.execute("SELECT 1 FROM allowed_users WHERE user_id = ?", (user_id,))
         return await cur.fetchone() is not None
+
+    # ---- access_requests: 没权限的人点「申请使用」→ 管理员通过/拒绝 ----
+
+    async def get_access_request(self, user_id: int) -> aiosqlite.Row | None:
+        cur = await self._conn.execute("SELECT * FROM access_requests WHERE user_id = ?", (user_id,))
+        return await cur.fetchone()
+
+    async def upsert_access_request(
+        self, user_id: int, username: str | None, full_name: str | None, *, now: float | None = None,
+    ):
+        """新建（或重新发起）一条待处理的申请。"""
+        await self._conn.execute(
+            """
+            INSERT INTO access_requests (user_id, username, full_name, status, requested_at)
+            VALUES (?, ?, ?, 'pending', ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username, full_name = excluded.full_name,
+                status = 'pending', requested_at = excluded.requested_at,
+                notified_at = NULL, decided_at = NULL, decided_by = NULL
+            """,
+            (user_id, username, full_name, time() if now is None else now),
+        )
+        await self._conn.commit()
+
+    async def mark_request_notified(self, user_id: int, *, now: float | None = None):
+        await self._conn.execute(
+            "UPDATE access_requests SET notified_at = ? WHERE user_id = ?",
+            (time() if now is None else now, user_id),
+        )
+        await self._conn.commit()
+
+    async def decide_access_request(
+        self, user_id: int, status: str, decided_by: int | None, *, now: float | None = None,
+    ) -> bool:
+        """只有还在 pending 的申请才能被处理——两个管理员同时点，只有先到的生效。
+        返回这次调用是否真的改了状态。"""
+        assert status in ("approved", "rejected")
+        cur = await self._conn.execute(
+            """
+            UPDATE access_requests SET status = ?, decided_by = ?, decided_at = ?
+            WHERE user_id = ? AND status = 'pending'
+            """,
+            (status, decided_by, time() if now is None else now, user_id),
+        )
+        await self._conn.commit()
+        return cur.rowcount > 0
+
+    async def list_pending_requests(self) -> list[aiosqlite.Row]:
+        cur = await self._conn.execute(
+            "SELECT * FROM access_requests WHERE status = 'pending' ORDER BY requested_at"
+        )
+        return await cur.fetchall()
+
+    # ---- 额度：个别用户的覆盖值 + 每日用量 ----
+
+    _QUOTA_FIELDS = ("max_active", "max_task_bytes", "daily_bytes")
+
+    async def get_user_quota(self, user_id: int) -> aiosqlite.Row | None:
+        cur = await self._conn.execute("SELECT * FROM user_quotas WHERE user_id = ?", (user_id,))
+        return await cur.fetchone()
+
+    async def set_user_quota(self, user_id: int, changes: dict[str, int | None]):
+        """changes: 字段名 -> 值；None 表示清掉覆盖（回到 .env 默认值），0 表示不限。
+        字段名走白名单，不会被拼进 SQL。"""
+        bad = set(changes) - set(self._QUOTA_FIELDS)
+        if bad:
+            raise ValueError(f"unknown quota field(s): {sorted(bad)}")
+        await self._conn.execute("INSERT OR IGNORE INTO user_quotas (user_id) VALUES (?)", (user_id,))
+        for field, value in changes.items():
+            await self._conn.execute(f"UPDATE user_quotas SET {field} = ? WHERE user_id = ?", (value, user_id))
+        await self._conn.commit()
+
+    async def clear_user_quota(self, user_id: int):
+        await self._conn.execute("DELETE FROM user_quotas WHERE user_id = ?", (user_id,))
+        await self._conn.commit()
+
+    async def count_active_by_user(self, user_id: int) -> int:
+        """进行中的任务数：排队 + 下载 + 暂停（还占着名额的）。"""
+        cur = await self._conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE user_id = ? AND status IN ('PENDING', 'ACTIVE', 'PAUSED')",
+            (user_id,),
+        )
+        return (await cur.fetchone())[0]
+
+    async def add_usage(self, user_id: int, day: str, delta: int):
+        await self._conn.execute(
+            """
+            INSERT INTO usage_daily (user_id, day, bytes) VALUES (?, ?, ?)
+            ON CONFLICT(user_id, day) DO UPDATE SET bytes = bytes + excluded.bytes
+            """,
+            (user_id, day, delta),
+        )
+        await self._conn.commit()
+
+    async def get_usage(self, user_id: int, day: str) -> int:
+        cur = await self._conn.execute(
+            "SELECT bytes FROM usage_daily WHERE user_id = ? AND day = ?", (user_id, day)
+        )
+        row = await cur.fetchone()
+        return row[0] if row else 0
+
+    async def prune_usage(self, before_day: str) -> int:
+        cur = await self._conn.execute("DELETE FROM usage_daily WHERE day < ?", (before_day,))
+        await self._conn.commit()
+        return cur.rowcount
 
     # ---- pending_tasks: unconfirmed "开始下载" cards, persisted so a bot restart
     # mid-confirmation doesn't just silently expire them ----

@@ -7,7 +7,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.config import settings
-from bot.core import storage
+from bot.core import quota, storage
 from bot.core.cards import (
     render_file_selection,
     render_home,
@@ -83,6 +83,15 @@ def _attend(task_manager, gid: str, *, submenu: bool = False):
         task_manager.hold(gid)
     else:
         task_manager.watch(gid)
+
+
+async def _quota_refusal(repo, task_manager, user_id: int, size: int | None, *, check_active: bool = True) -> str | None:
+    """额度不允许时返回给用户看的原因，允许返回 None。"""
+    return await quota.admission_error(
+        repo, user_id, size,
+        pending_usage=task_manager.pending_usage(user_id) if task_manager else 0,
+        check_active=check_active,
+    )
 
 
 def _is_admin(query: CallbackQuery) -> bool:
@@ -342,7 +351,7 @@ async def handle_pending(query: CallbackQuery, repo, nodes, task_manager=None):
     # 批量确认（一条消息贴了多条链接）走独立分支 —— token 这里实际是 batch_id，
     # 跟下面单条确认的逻辑不共用，提前分流
     if action == "startall":
-        await _handle_batch_start(query, repo, nodes, batch_id=token)
+        await _handle_batch_start(query, repo, nodes, task_manager, batch_id=token)
         return
     if action == "cancelall":
         await _handle_batch_cancel(query, repo, batch_id=token)
@@ -389,6 +398,12 @@ async def handle_pending(query: CallbackQuery, repo, nodes, task_manager=None):
     # 远程节点靠 aria2 自己下载失败兜底
     if target_node.is_local and not storage.has_enough_space(target_node.download_dir, pending.file_size or 0):
         await query.answer("⛔ 服务器磁盘空间不足，已拒绝该任务。", show_alert=True)
+        return
+
+    # 额度检查放在认领之前：被拒时确认卡片原样保留，用户可以先去处理别的任务再回来点
+    refusal = await _quota_refusal(repo, task_manager, pending.user_id, pending.file_size)
+    if refusal:
+        await query.answer(f"⛔ {refusal}"[:200], show_alert=True)
         return
 
     # atomically claim the confirmation BEFORE adding to aria2 — a rapid double
@@ -461,7 +476,7 @@ async def apply_pending_node(query: CallbackQuery, repo, nodes):
     )
 
 
-async def _handle_batch_start(query: CallbackQuery, repo, nodes, *, batch_id: str):
+async def _handle_batch_start(query: CallbackQuery, repo, nodes, task_manager, *, batch_id: str):
     pendings = await repo.get_pending_batch(batch_id)
     if not pendings:
         await query.answer("批量任务已过期或已处理。", show_alert=True)
@@ -473,6 +488,7 @@ async def _handle_batch_start(query: CallbackQuery, repo, nodes, *, batch_id: st
     # 批量任务不挂 reply_message_id：逐个任务都去编辑同一条汇总消息会互相打架，
     # 干脆不接，进度只能在任务列表里看；完成/失败时仍然会按"完成通知"设置补发新消息
     started, skipped = 0, 0
+    quota_reason = None
     for claimed in pendings:
         claimed = await repo.pop_pending(claimed.token)
         if claimed is None:
@@ -483,6 +499,12 @@ async def _handle_batch_start(query: CallbackQuery, repo, nodes, *, batch_id: st
             continue
         # 磁盘预检只对本机节点做（远端磁盘摸不到），与单条确认的逻辑一致
         if node.is_local and not storage.has_enough_space(node.download_dir, claimed.file_size or 0):
+            skipped += 1
+            continue
+        # 额度：前面刚加的任务已经写进库了，所以"同时进行数"会随着循环实时累计
+        refusal = await _quota_refusal(repo, task_manager, claimed.user_id, claimed.file_size)
+        if refusal:
+            quota_reason = quota_reason or refusal
             skipped += 1
             continue
         try:
@@ -501,7 +523,9 @@ async def _handle_batch_start(query: CallbackQuery, repo, nodes, *, batch_id: st
 
     text = f"✅ 批量任务已处理：成功启动 {started} 个"
     if skipped:
-        text += f"，跳过 {skipped} 个（磁盘空间不足或添加失败）"
+        text += f"，跳过 {skipped} 个（磁盘空间不足、额度限制或添加失败）"
+        if quota_reason:
+            text += f"\n⛔ {quota_reason}"
     text += "\n\n可在 📋 任务列表 里查看进度。"
     markup = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="📋 任务列表", callback_data="list:ALL:0"),
@@ -590,6 +614,10 @@ async def _task_action(query: CallbackQuery, repo, nodes, task_manager, action: 
         payload = row["payload"]
         if not payload or (row["source_type"] == "torrent" and not os.path.exists(payload)):
             await query.answer("缺少原始下载来源，无法重试。请重新发送链接或文件。", show_alert=True)
+            return
+        refusal = await _quota_refusal(repo, task_manager, row["user_id"], row["file_size"])
+        if refusal:
+            await query.answer(f"⛔ {refusal}"[:200], show_alert=True)
             return
         try:
             new_gid = await _add_source(nodes, row["node"], row["source_type"], payload, row["file_name"])
@@ -728,6 +756,14 @@ async def _task_action(query: CallbackQuery, repo, nodes, task_manager, action: 
             await query.answer(msg, show_alert=True)
         return
 
+    if action == "resume":
+        # 恢复暂停的任务：它本来就占着名额，只需要看今天的流量是否还有余量，
+        # 否则刚恢复就会被下一轮轮询重新暂停
+        refusal = await _quota_refusal(repo, task_manager, row["user_id"], None, check_active=False)
+        if refusal:
+            await query.answer(f"⛔ {refusal}"[:200], show_alert=True)
+            return
+
     new_status = await _apply_action(query, aria2, repo, action, gid, is_local=is_local)
     if new_status is None or not query.message:
         return
@@ -795,7 +831,7 @@ async def toggle_file_selection(query: CallbackQuery, repo, nodes, task_manager=
 
 
 @router.callback_query(F.data.startswith("bulk:"))
-async def bulk_action(query: CallbackQuery, repo, nodes):
+async def bulk_action(query: CallbackQuery, repo, nodes, task_manager=None):
     _, action, status = query.data.split(":", 2)
     rows = await repo.list_recent(1000, status=status)
     changed = 0
@@ -812,6 +848,8 @@ async def bulk_action(query: CallbackQuery, repo, nodes):
                 await repo.update_status(gid, "PAUSED")
                 changed += 1
             elif action == "resume":
+                if await _quota_refusal(repo, task_manager, row["user_id"], None, check_active=False):
+                    continue  # 今日额度用完的用户，批量恢复时跳过他的任务
                 await aria2.resume(gid)
                 await repo.update_status(gid, "ACTIVE")
                 changed += 1
