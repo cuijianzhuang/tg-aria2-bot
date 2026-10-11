@@ -18,6 +18,21 @@ class Settings(BaseSettings):
     # 没有权限的用户收到的提示里"联系谁"。填 Telegram 用户名（如 @cuiplus）或任意
     # 文字/链接；留空则自动用管理员账号的用户名（管理员需要私聊过机器人）。
     admin_contact: str = ""
+    # 在机器人里升级（/settings → ⬆️ 检查更新，仅管理员）。只有 bare 模式（git 仓库 +
+    # systemd + root）支持；docker 模式请在服务器上运行 sudo tg-aria2 update。
+    upgrade_enabled: bool = True
+    # 定期检查有没有新版本，发现新版本时私聊通知管理员（同一个新版本只通知一次）。
+    update_check_enabled: bool = True
+    update_check_hours: int = 12
+    # 没权限的用户可以点「申请使用」，管理员收到通知后一键通过/拒绝。被拒绝的人
+    # access_request_cooldown_hours 小时内不能再申请。
+    access_request_enabled: bool = True
+    access_request_cooldown_hours: int = 12
+    # 普通用户（非管理员）的默认额度，0 = 不限制。每个人可以用 /setquota 单独调整；
+    # 管理员始终不受限制。每日额度按服务器时区的自然日统计。
+    user_max_active_tasks: int = 0       # 同时进行的任务数
+    user_max_task_size_gb: float = 0     # 单个任务大小上限
+    user_daily_quota_gb: float = 0       # 每天下载总量
     download_dir: str = "/downloads"
     # 逗号分隔的备选下载目录，配合设置菜单里的"下载目录"切换使用；当前 download_dir
     # 始终排在选项第一位，这里只补充其它可选目录
@@ -97,6 +112,12 @@ class Settings(BaseSettings):
     @property
     def admin_ids(self) -> set[int]:
         return self._parse_ids(self.admin_user_ids)
+
+    @property
+    def admin_recipient_ids(self) -> list[int]:
+        """要通知管理员时发给谁：明确配置的管理员优先，没配就用白名单
+        （跟 is_admin 的回退口径一致）。"""
+        return sorted(self.admin_ids or self.allowed_ids)
 
     def is_admin(self, user_id: int | None) -> bool:
         if user_id is None:

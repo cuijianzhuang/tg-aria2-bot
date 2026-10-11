@@ -8,11 +8,12 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.types import BotCommand
 
 from bot.config import settings
-from bot.core import gofile
+from bot.core import gofile, upgrade
 from bot.core.node_pool import NodePool
 from bot.core.task_manager import TaskManager
 from bot.db.repo import TaskRepo
-from bot.handlers import admin, callbacks, commands, links, media, settings_menu
+from bot.handlers import access, admin, callbacks, commands, links, media, settings_menu
+from bot.handlers import upgrade as upgrade_handler
 from bot.middlewares.auth import AuthMiddleware
 
 BOT_COMMANDS = [
@@ -20,6 +21,7 @@ BOT_COMMANDS = [
     BotCommand(command="list", description="任务列表"),
     BotCommand(command="find", description="按文件名搜索任务"),
     BotCommand(command="stats", description="下载统计"),
+    BotCommand(command="quota", description="我的额度和今日用量"),
     BotCommand(command="settings", description="设置与管理"),
 ]
 
@@ -56,8 +58,10 @@ async def main():
     dp.message.middleware(AuthMiddleware())
     dp.callback_query.middleware(AuthMiddleware())
     dp.include_router(commands.router)
+    dp.include_router(access.router)
     dp.include_router(admin.router)
     dp.include_router(settings_menu.router)
+    dp.include_router(upgrade_handler.router)
     dp.include_router(callbacks.router)
     dp.include_router(links.router)
     dp.include_router(media.router)
@@ -74,9 +78,18 @@ async def main():
     await task_manager.reconcile_on_startup()
     await task_manager.start()
 
+    # 在机器人里升级：升级重启后的新进程在这里接着把结果汇报给发起升级的管理员；
+    # 另有一个定期检查新版本的后台任务（只通知，不会自动升级）
+    background = [
+        asyncio.create_task(upgrade.finish_pending_upgrade(bot)),
+        asyncio.create_task(upgrade.update_check_loop(bot)),
+    ]
+
     try:
         await dp.start_polling(bot)
     finally:
+        for task in background:
+            task.cancel()
         task_manager.stop()
         await nodes.close()
         await repo.close()

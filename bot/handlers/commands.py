@@ -3,6 +3,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from bot.config import settings
+from bot.core import quota
 from bot.core.cards import render_home
 from bot.core.keyboards import main_inline_keyboard
 from bot.core.list_view import render_search_results, render_task_list
@@ -10,6 +11,29 @@ from bot.core.node_pool import NodeUnavailable
 from bot.core.stats_view import DEFAULT_PERIOD, render_stats_view
 
 router = Router(name="commands")
+
+
+@router.message(Command("quota"))
+async def cmd_quota(message: Message, command: CommandObject, repo, task_manager=None):
+    """普通用户看自己的额度和今天的用量；管理员可以 /quota <用户ID> 看别人的。"""
+    viewer = message.from_user.id if message.from_user else None
+    if viewer is None:
+        return
+    target, title = viewer, "📊 <b>我的额度</b>"
+    if command.args:
+        if not settings.is_admin(viewer):
+            await message.reply("只有管理员可以查看别人的额度。")
+            return
+        try:
+            target = int(command.args.strip())
+        except ValueError:
+            await message.reply("用法: /quota [用户ID]")
+            return
+        title = f"📊 <b><code>{target}</code> 的额度</b>"
+    pending = task_manager.pending_usage(target) if task_manager is not None else 0
+    await message.reply(
+        await quota.render_quota(repo, target, pending_usage=pending, title=title), parse_mode="HTML",
+    )
 
 
 @router.message(Command("start"))

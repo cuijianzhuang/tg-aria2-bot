@@ -3,14 +3,14 @@ import logging
 import os
 import shutil
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import FSInputFile
 
 from bot.config import settings
-from bot.core import gofile
+from bot.core import gofile, quota
 from bot.core.cards import render_task_card
 from bot.core.compress import compress_path, remove_path
 from bot.core.keyboards import task_keyboard
@@ -36,6 +36,13 @@ ACTIVE_CARD_WINDOW = 15.0
 # 下载卡住（已下载字节数没变）时不用每次都编辑，但也要隔一阵刷新一下，
 # 让用户看到连接数的变化、知道机器人还活着
 STALLED_REFRESH_INTERVAL = 30.0
+# 每日用量累加后多久写一次库（内存里的累加值对额度判断始终是实时可见的）
+USAGE_FLUSH_INTERVAL = 10.0
+# 额度/限制的缓存时间：改了 /setquota 最多这么久后生效
+LIMITS_CACHE_SECONDS = 5.0
+# 每日用量记录保留多少天
+USAGE_RETENTION_DAYS = 35
+
 # 用户打开卡片上的子菜单（限速/取消确认/选择文件…）后，暂停这张卡片的自动
 # 刷新这么久——否则自动刷新会把正在操作的菜单冲掉
 MENU_HOLD_SECONDS = 120.0
@@ -77,6 +84,12 @@ class TaskManager:
         # held：用户正开着子菜单，暂停自动刷新
         self._watched: dict[str, float] = {}
         self._held: dict[str, float] = {}
+        # ---- 额度：每日用量累计 + 下载中拦截 ----
+        self._last_bytes: dict[str, int] = {}                  # gid -> 上次看到的已下载字节
+        self._usage_pending: dict[tuple[int, str], int] = {}   # (user_id, day) -> 还没写库的增量
+        self._last_usage_flush = 0.0
+        self._limits_cache: dict[int, tuple[float, quota.Limits]] = {}
+        self._quota_notified: set[tuple[int, str]] = set()     # 当天已发过"额度用完"通知的用户
         self._chat_backoff: dict[int, float] = {}  # chat_id -> monotonic deadline after a 429
         self._poll_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
@@ -133,6 +146,7 @@ class TaskManager:
             try:
                 await self._check_disk_space()
                 await self._poll_once()
+                await self._flush_usage()
                 self._reconcile_ws_listeners()
             except asyncio.CancelledError:
                 raise
@@ -316,6 +330,7 @@ class TaskManager:
     async def _handle_download_state(self, row, download, *, node_is_local: bool = True):
         gid = row["gid"]
         status = download.status.upper()
+        self._account_usage(row, download)
 
         if status in ("COMPLETE", "ERROR"):
             if gid in self._terminal_in_flight:
@@ -341,6 +356,8 @@ class TaskManager:
             return
 
         if status in ("ACTIVE", "PAUSED", "WAITING"):
+            if await self._enforce_limits(row, download, status, node_is_local=node_is_local):
+                return  # 任务已被额度规则取消/暂停，不再往下处理
             mapped = "ACTIVE" if status == "ACTIVE" else ("PAUSED" if status == "PAUSED" else "PENDING")
             if mapped != row["status"]:
                 await self._repo.update_status(gid, mapped)
@@ -349,6 +366,128 @@ class TaskManager:
             if status == "ACTIVE":
                 await self._sync_real_name(row, gid, download)
                 await self._maybe_report_progress(row, download)
+
+    # ---------------------------------------------------------------- 额度
+
+    def _account_usage(self, row, download):
+        """把这个任务自上次看到以来多下载的字节数记到它的主人名下（当天）。
+        用"相邻两次看到的已下载字节之差"累加，所以跨天、暂停后继续、WS 和轮询
+        两条路径重复看到同一状态都不会算错；机器人重启后第一次看到只建基线。"""
+        try:
+            user_id = row["user_id"]
+        except (KeyError, IndexError):
+            return
+        gid = row["gid"]
+        cur = download.completed_length
+        last = self._last_bytes.get(gid)
+        self._last_bytes[gid] = cur
+        if last is not None and cur > last:
+            key = (user_id, quota.today())
+            self._usage_pending[key] = self._usage_pending.get(key, 0) + (cur - last)
+
+    def pending_usage(self, user_id: int) -> int:
+        """还没写进数据库的当日用量（给额度判断补上，保证实时）。"""
+        day = quota.today()
+        return sum(v for (uid, d), v in self._usage_pending.items() if uid == user_id and d == day)
+
+    async def usage_today(self, user_id: int) -> int:
+        return await self._repo.get_usage(user_id, quota.today()) + self.pending_usage(user_id)
+
+    async def _flush_usage(self, *, force: bool = False):
+        now = time.monotonic()
+        if not self._usage_pending or (not force and now - self._last_usage_flush < USAGE_FLUSH_INTERVAL):
+            return
+        self._last_usage_flush = now
+        items = list(self._usage_pending.items())
+        self._usage_pending.clear()
+        for (user_id, day), delta in items:
+            try:
+                await self._repo.add_usage(user_id, day, delta)
+            except Exception:
+                # 写失败就放回去，下次再试，不丢用量
+                log.exception("failed to persist usage for user %s", user_id)
+                key = (user_id, day)
+                self._usage_pending[key] = self._usage_pending.get(key, 0) + delta
+
+    async def _limits(self, user_id: int) -> quota.Limits:
+        now = time.monotonic()
+        hit = self._limits_cache.get(user_id)
+        if hit and now - hit[0] < LIMITS_CACHE_SECONDS:
+            return hit[1]
+        limits = await quota.limits_for(self._repo, user_id)
+        self._limits_cache[user_id] = (now, limits)
+        return limits
+
+    def invalidate_limits(self):
+        self._limits_cache.clear()
+
+    async def _enforce_limits(self, row, download, status: str, *, node_is_local: bool) -> bool:
+        """下载中的额度检查，返回 True 表示任务已被处理（取消/暂停）。
+
+        单任务大小：URL/磁力/种子在添加时不知道大小，等 aria2 连上拿到总大小后才
+        能判断，所以在这里拦——超了就取消并删掉已下的部分。
+        每日流量：用完当天额度后暂停（不是取消），第二天可以接着下。"""
+        try:
+            user_id = row["user_id"]
+        except (KeyError, IndexError):
+            return False
+        limits = await self._limits(user_id)
+        if limits.unlimited:
+            return False
+        if limits.max_task_bytes and download.total_length > limits.max_task_bytes:
+            reason = (
+                f"任务大小 {quota.fmt_bytes(download.total_length)} 超过你的单任务上限 "
+                f"{quota.fmt_bytes(limits.max_task_bytes)}，已取消"
+            )
+            return await self._stop_over_limit(row, download, reason, node_is_local=node_is_local)
+        if limits.daily_bytes and status == "ACTIVE":
+            used = await self.usage_today(user_id)
+            if used >= limits.daily_bytes:
+                return await self._pause_over_quota(row, user_id, used, limits.daily_bytes)
+        return False
+
+    async def _stop_over_limit(self, row, download, reason: str, *, node_is_local: bool) -> bool:
+        gid = row["gid"]
+        try:
+            await self._nodes.get(row["node"]).remove(gid, files=True, is_local=node_is_local)
+        except Exception:
+            # 没取消成功就不改库，下一轮轮询再试——别出现"库里失败了、aria2 还在下"
+            log.exception("could not cancel over-limit task %s", gid)
+            return False
+        log.info("task %s of user %s cancelled: %s", gid, row["user_id"], reason)
+        await self._repo.update_status(gid, "FAILED", error=reason)
+        self._forget_progress(gid)
+        failed_row = {**dict(row), "error": reason, "status": "FAILED"}
+        await self._notify(
+            failed_row, self._render_card(failed_row, download, status="FAILED"),
+            gid=gid, status="FAILED", parse_mode="HTML", local=node_is_local,
+        )
+        return True
+
+    async def _pause_over_quota(self, row, user_id: int, used: int, cap: int) -> bool:
+        gid = row["gid"]
+        try:
+            await self._nodes.get(row["node"]).pause(gid)
+        except Exception:
+            log.exception("could not pause over-quota task %s", gid)
+            return False
+        await self._repo.update_status(gid, "PAUSED")
+        await self._update_keyboard(row, gid, "PAUSED")
+        day = quota.today()
+        self._quota_notified = {k for k in self._quota_notified if k[1] == day}  # 清掉往天的
+        if (user_id, day) not in self._quota_notified:
+            self._quota_notified.add((user_id, day))
+            try:
+                await self._bot.send_message(
+                    chat_id=row["chat_id"],
+                    text=(
+                        f"⏸ 你今天的下载额度已用完（{quota.fmt_bytes(used)} / {quota.fmt_bytes(cap)}），"
+                        "进行中的任务已暂停。明天可以点「▶️ 继续」接着下载。"
+                    ),
+                )
+            except Exception:
+                log.warning("failed to send quota notice to user %s", user_id)
+        return True
 
     async def _sync_real_name(self, row, gid: str, download):
         """种子/磁力任务入库时的名字是 .torrent 文件名或磁力链接；拿到元数据后
@@ -540,6 +679,7 @@ class TaskManager:
 
     def _forget_progress(self, gid: str):
         """任务进入终态/换 gid 时清掉进度节流的记录，不再占用聊天的刷新预算。"""
+        self._last_bytes.pop(gid, None)
         self._last_edit.pop(gid, None)
         self._watched.pop(gid, None)
         self._held.pop(gid, None)
@@ -608,6 +748,11 @@ class TaskManager:
                 raise
             except Exception:
                 log.exception("auto cleanup failed")
+            try:
+                cutoff = (date.today() - timedelta(days=USAGE_RETENTION_DAYS)).isoformat()
+                await self._repo.prune_usage(cutoff)
+            except Exception:
+                log.exception("usage prune failed")
             await asyncio.sleep(CLEANUP_CHECK_INTERVAL_SECONDS)
 
     async def run_cleanup_once(self) -> int:

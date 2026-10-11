@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from html import escape
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -7,12 +8,14 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.config import settings
+from bot.core import quota
 from bot.core.aria2_client import Aria2Client
 from bot.core.cards import render_node_manage, render_server_status, render_settings
 from bot.core.conf_editor import aria2_conf_path, read_kv, script_conf_path, write_kv
 from bot.core.keyboards import node_manage_keyboard, server_status_keyboard, settings_keyboard
 from bot.core.node_pool import DEFAULT_NODE, MAX_NODE_NAME_BYTES
 from bot.core.sysinfo import collect_system_status
+from bot.handlers.access import who_html
 from bot.middlewares.auth import AdminMiddleware
 
 log = logging.getLogger(__name__)
@@ -57,24 +60,37 @@ async def show_menu(query: CallbackQuery, aria2):
 async def _render_users(repo) -> tuple[str, InlineKeyboardMarkup]:
     env_ids = sorted(settings.allowed_ids)
     db_rows = await repo.list_allowed_users()
+    pending = await repo.list_pending_requests()
 
-    lines = ["👥 <b>白名单用户</b>", "", "<i>来自 .env（不可在此删除）</i>"]
-    lines += [f"  {uid}" for uid in env_ids] or ["  (无)"]
+    lines = ["👥 <b>白名单用户</b>", ""]
+    kb = []
+    if pending:
+        # 没来得及点通知消息的申请，在这里也能处理
+        lines.append(f"🙋 <b>待处理的申请（{len(pending)}）</b>")
+        for req in pending:
+            lines.append(f"  <code>{req['user_id']}</code> · {who_html(req['username'], req['full_name'])}")
+            kb.append([
+                InlineKeyboardButton(text=f"✅ 通过 {req['user_id']}", callback_data=f"access:pok:{req['user_id']}"),
+                InlineKeyboardButton(text=f"❌ 拒绝 {req['user_id']}", callback_data=f"access:pno:{req['user_id']}"),
+            ])
+        lines.append("")
+    lines.append("<i>来自 .env（不可在此删除）</i>")
+    lines += [f"  <code>{uid}</code>" for uid in env_ids] or ["  (无)"]
     lines.append("")
     lines.append("<i>可管理</i>")
 
-    kb = []
     if db_rows:
         for row in db_rows:
-            note = f"（{row['note']}）" if row["note"] else ""
-            lines.append(f"  {row['user_id']}{note}")
+            name = who_html(row["username"], row["full_name"]) if (row["username"] or row["full_name"]) else ""
+            note = f"（{escape(row['note'], quote=False)}）" if row["note"] else ""
+            lines.append(f"  <code>{row['user_id']}</code>" + (f" · {name}" if name else "") + note)
             kb.append([InlineKeyboardButton(
                 text=f"🗑 删除 {row['user_id']}", callback_data=f"admin:deluser:{row['user_id']}",
             )])
     else:
         lines.append("  (无)")
     lines.append("")
-    lines.append("用 <code>/adduser 数字ID 备注（可选）</code> 添加")
+    lines.append("用 <code>/adduser 数字ID 备注（可选）</code> 添加；没权限的人点「申请使用」后会在这里和通知消息里等你处理")
 
     kb.append([BACK_TO_SETTINGS])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
@@ -101,6 +117,70 @@ async def del_user(query: CallbackQuery, repo):
     await query.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
 
 
+# ---------- 使用申请：通过 / 拒绝 ----------
+
+def _admin_name(user) -> str:
+    return f"@{user.username}" if user.username else user.full_name
+
+
+@router.callback_query(F.data.regexp(r"^access:(ok|no|pok|pno):\d+$"))
+async def decide_access(query: CallbackQuery, repo, bot):
+    _, action, uid_raw = query.data.split(":", 2)
+    user_id = int(uid_raw)
+    from_page = action in ("pok", "pno")
+    approve = action in ("ok", "pok")
+
+    req = await repo.get_access_request(user_id)
+    if req is None:
+        await query.answer("这条申请已经不存在了。", show_alert=True)
+        return
+
+    changed = await repo.decide_access_request(
+        user_id, "approved" if approve else "rejected", query.from_user.id,
+    )
+    if not changed:
+        # 另一个管理员先处理了（或者申请人已经被别处加进了白名单）
+        done = {"approved": "✅ 已通过", "rejected": "❌ 已拒绝"}.get(req["status"], "已处理")
+        await query.answer(f"这条申请已经处理过了：{done}", show_alert=True)
+        if from_page:
+            text, markup = await _render_users(repo)
+            await query.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+        elif query.message:
+            await _finish_notice(query, f"{done}（已被其他管理员处理）")
+        return
+
+    if approve:
+        await repo.add_allowed_user(user_id, "申请通过", username=req["username"], full_name=req["full_name"])
+        applicant_text = "✅ 你的使用申请已通过！发送 /start 开始使用。"
+        verdict = f"✅ 已通过（{escape(_admin_name(query.from_user), quote=False)}）"
+    else:
+        hours = settings.access_request_cooldown_hours
+        applicant_text = f"❌ 你的使用申请没有通过。{hours} 小时后可以再次申请。"
+        verdict = f"❌ 已拒绝（{escape(_admin_name(query.from_user), quote=False)}）"
+
+    try:  # 申请人可能屏蔽了机器人，发不出去不影响结果
+        await bot.send_message(chat_id=user_id, text=applicant_text)
+    except Exception:
+        log.warning("could not tell applicant %s about the decision", user_id)
+
+    await query.answer("已通过" if approve else "已拒绝")
+    if from_page:
+        text, markup = await _render_users(repo)
+        await query.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    elif query.message:
+        await _finish_notice(query, verdict)
+
+
+async def _finish_notice(query: CallbackQuery, verdict: str):
+    """把申请通知消息改成最终结果，并去掉按钮。"""
+    try:
+        await query.message.edit_text(
+            f"{query.message.html_text}\n\n{verdict}", parse_mode="HTML", reply_markup=None,
+        )
+    except Exception:
+        log.debug("could not edit access request notice")
+
+
 @router.message(Command("adduser"))
 async def cmd_adduser(message: Message, command: CommandObject, repo):
     if not command.args:
@@ -114,7 +194,35 @@ async def cmd_adduser(message: Message, command: CommandObject, repo):
         return
     note = parts[1] if len(parts) > 1 else None
     await repo.add_allowed_user(user_id, note)
+    # 这个人如果正好有待处理的申请，顺手标记为已通过，免得它还留在待处理里
+    await repo.decide_access_request(user_id, "approved", message.from_user.id if message.from_user else None)
     await message.reply(f"✅ 已添加 {user_id}")
+
+
+@router.message(Command("setquota"))
+async def cmd_setquota(message: Message, command: CommandObject, repo, task_manager=None):
+    if not command.args:
+        await message.reply(quota.SETQUOTA_USAGE, parse_mode="HTML")
+        return
+    try:
+        user_id, changes = quota.parse_setquota(command.args)
+    except ValueError as e:
+        await message.reply(f"⚠️ {escape(str(e), quote=False)}\n\n{quota.SETQUOTA_USAGE}", parse_mode="HTML")
+        return
+    if settings.is_admin(user_id):
+        await message.reply("管理员不受额度限制，不需要设置。")
+        return
+    if changes is None:
+        await repo.clear_user_quota(user_id)
+    else:
+        await repo.set_user_quota(user_id, changes)
+    if task_manager is not None:
+        task_manager.invalidate_limits()
+    pending = task_manager.pending_usage(user_id) if task_manager is not None else 0
+    text = await quota.render_quota(
+        repo, user_id, pending_usage=pending, title=f"✅ 已更新 <code>{user_id}</code> 的额度",
+    )
+    await message.reply(text, parse_mode="HTML")
 
 
 @router.message(Command("removeuser"))

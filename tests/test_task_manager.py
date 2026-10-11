@@ -6,9 +6,10 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from bot.config import settings
+from bot.core import quota
 from bot.core.aria2_client import Download
 from bot.core.node_pool import Node
 from bot.core.task_manager import TaskManager
@@ -758,5 +759,243 @@ class TestRealNameSync(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.repo.get_by_gid("g1"))["file_name"], "mine.zip")
 
 
+class QuotaTMBase(unittest.IsolatedAsyncioTestCase):
+    """额度：下载中的用量累计和拦截（单任务太大 → 取消，当日流量用完 → 暂停）。"""
+
+    GIB = 1024**3
+
+    async def asyncSetUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = TaskRepo(os.path.join(self._dir.name, "t.db"))
+        await self.repo.connect()
+        self.pool = FakeNodePool()
+        self.bot = FakeBot()
+        self.tm = TaskManager(bot=self.bot, nodes=self.pool, repo=self.repo)
+        self._orig = (settings.allowed_user_ids, settings.admin_user_ids, settings.user_max_active_tasks,
+                      settings.user_max_task_size_gb, settings.user_daily_quota_gb)
+        settings.allowed_user_ids = "1,2"
+        settings.admin_user_ids = "1"        # 1 管理员，2 普通用户
+        settings.user_max_active_tasks = 0
+        settings.user_max_task_size_gb = 0
+        settings.user_daily_quota_gb = 0
+
+    async def asyncTearDown(self):
+        (settings.allowed_user_ids, settings.admin_user_ids, settings.user_max_active_tasks,
+         settings.user_max_task_size_gb, settings.user_daily_quota_gb) = self._orig
+        await self.repo.close()
+        self._dir.cleanup()
+
+    async def _row(self, gid="g1", user_id=2):
+        await self.repo.create_task(
+            gid=gid, user_id=user_id, chat_id=50 + user_id, reply_message_id=None, source_type="url",
+            source_ref=gid, file_name="f.bin", file_size=None, payload="https://x/f.bin",
+        )
+        await self.repo.update_status(gid, "ACTIVE")
+        return await self.repo.get_by_gid(gid)
+
+    @staticmethod
+    def _dl(gid="g1", status="active", total=10, completed=0):
+        return Download(
+            gid=gid, status=status, total_length=total, completed_length=completed,
+            download_speed=1, upload_speed=0, connections=1, error_message=None,
+            dir=Path("/dl"), files=[],
+        )
+
+
+class TestUsageAccounting(QuotaTMBase):
+    async def test_first_sight_only_sets_a_baseline(self):
+        row = await self._row()
+        self.tm._account_usage(row, self._dl(completed=500))   # 重启后第一次看到：不能把已下载的全算成今天的
+        self.assertEqual(self.tm.pending_usage(2), 0)
+
+    async def test_deltas_accumulate_per_user(self):
+        a, b = await self._row("a", 2), await self._row("b", 3)
+        for row, steps in ((a, (0, 100, 250)), (b, (0, 40))):
+            for done in steps:
+                self.tm._account_usage(row, self._dl(row["gid"], completed=done))
+        self.assertEqual(self.tm.pending_usage(2), 250)
+        self.assertEqual(self.tm.pending_usage(3), 40)
+
+    async def test_unchanged_or_decreasing_bytes_add_nothing(self):
+        row = await self._row()
+        for done in (100, 100, 60, 60):
+            self.tm._account_usage(row, self._dl(completed=done))
+        self.assertEqual(self.tm.pending_usage(2), 0)
+
+    async def test_finished_task_forgets_its_baseline(self):
+        row = await self._row()
+        self.tm._account_usage(row, self._dl(completed=100))
+        self.tm._forget_progress("g1")
+        self.tm._account_usage(row, self._dl(completed=100))   # 重新当作第一次看到
+        self.assertEqual(self.tm.pending_usage(2), 0)
+
+    async def test_flush_persists_and_clears(self):
+        row = await self._row()
+        self.tm._account_usage(row, self._dl(completed=0))
+        self.tm._account_usage(row, self._dl(completed=300))
+        await self.tm._flush_usage(force=True)
+        self.assertEqual(self.tm.pending_usage(2), 0)
+        self.assertEqual(await self.repo.get_usage(2, quota.today()), 300)
+
+    async def test_usage_today_is_db_plus_pending(self):
+        row = await self._row()
+        await self.repo.add_usage(2, quota.today(), 1000)
+        self.tm._account_usage(row, self._dl(completed=0))
+        self.tm._account_usage(row, self._dl(completed=70))
+        self.assertEqual(await self.tm.usage_today(2), 1070)
+
+    async def test_failed_flush_keeps_the_numbers(self):
+        row = await self._row()
+        self.tm._account_usage(row, self._dl(completed=0))
+        self.tm._account_usage(row, self._dl(completed=300))
+        with patch.object(self.repo, "add_usage", AsyncMock(side_effect=RuntimeError("db locked"))):
+            await self.tm._flush_usage(force=True)
+        self.assertEqual(self.tm.pending_usage(2), 300)       # 没丢
+        await self.tm._flush_usage(force=True)
+        self.assertEqual(await self.repo.get_usage(2, quota.today()), 300)
+
+    async def test_usage_is_attributed_to_the_day_it_was_downloaded(self):
+        row = await self._row()
+        with patch("bot.core.quota.today", return_value="2026-10-10"):
+            self.tm._account_usage(row, self._dl(completed=0))
+            self.tm._account_usage(row, self._dl(completed=100))
+        with patch("bot.core.quota.today", return_value="2026-10-11"):
+            self.tm._account_usage(row, self._dl(completed=250))   # 隔夜的任务，新增部分算到新的一天
+            await self.tm._flush_usage(force=True)
+        self.assertEqual(await self.repo.get_usage(2, "2026-10-10"), 100)
+        self.assertEqual(await self.repo.get_usage(2, "2026-10-11"), 150)
+
+    async def test_handle_download_state_accounts_every_poll(self):
+        row = await self._row()
+        await self.tm._handle_download_state(row, self._dl(completed=0))
+        await self.tm._handle_download_state(row, self._dl(completed=8))
+        self.assertEqual(self.tm.pending_usage(2), 8)
+
+
+class TestOversizeTaskIsCancelled(QuotaTMBase):
+    async def test_oversize_task_is_cancelled_with_files_removed(self):
+        settings.user_max_task_size_gb = 1
+        row = await self._row()
+        await self.tm._handle_download_state(row, self._dl(total=5 * self.GIB))
+        self.assertEqual(self.pool.get("default").removed, [("g1", True, True)])
+        after = await self.repo.get_by_gid("g1")
+        self.assertEqual(after["status"], "FAILED")
+        self.assertIn("单任务上限", after["error"])
+        self.assertTrue(any("单任务上限" in text for _, text in self.bot.sent_messages))
+
+    async def test_task_within_limit_is_left_alone(self):
+        settings.user_max_task_size_gb = 5
+        row = await self._row()
+        await self.tm._handle_download_state(row, self._dl(total=5 * self.GIB))
+        self.assertEqual(self.pool.get("default").removed, [])
+        self.assertEqual((await self.repo.get_by_gid("g1"))["status"], "ACTIVE")
+
+    async def test_admin_task_is_never_cancelled(self):
+        settings.user_max_task_size_gb = 1
+        row = await self._row("g1", user_id=1)
+        await self.tm._handle_download_state(row, self._dl(total=50 * self.GIB))
+        self.assertEqual(self.pool.get("default").removed, [])
+
+    async def test_per_user_override_applies(self):
+        await self.repo.set_user_quota(2, {"max_task_bytes": 100})
+        row = await self._row()
+        await self.tm._handle_download_state(row, self._dl(total=101))
+        self.assertEqual((await self.repo.get_by_gid("g1"))["status"], "FAILED")
+
+    async def test_paused_task_is_checked_too(self):
+        settings.user_max_task_size_gb = 1
+        row = await self._row()
+        await self.tm._handle_download_state(row, self._dl(status="paused", total=5 * self.GIB))
+        self.assertEqual((await self.repo.get_by_gid("g1"))["status"], "FAILED")
+
+    async def test_failed_cancel_leaves_db_untouched_so_next_poll_retries(self):
+        settings.user_max_task_size_gb = 1
+        row = await self._row()
+        self.pool.get("default").remove = AsyncMock(side_effect=RuntimeError("rpc down"))
+        await self.tm._handle_download_state(row, self._dl(total=5 * self.GIB))
+        self.assertEqual((await self.repo.get_by_gid("g1"))["status"], "ACTIVE")
+
+
+class TestDailyQuotaPausesTasks(QuotaTMBase):
+    async def _exhaust(self):
+        settings.user_daily_quota_gb = 1
+        await self.repo.add_usage(2, quota.today(), 1 * self.GIB)
+
+    async def test_task_is_paused_once_the_daily_quota_is_used_up(self):
+        await self._exhaust()
+        row = await self._row()
+        await self.tm._handle_download_state(row, self._dl())
+        self.assertEqual(self.pool.get("default").paused, ["g1"])
+        self.assertEqual((await self.repo.get_by_gid("g1"))["status"], "PAUSED")
+
+    async def test_user_is_told_once_per_day(self):
+        await self._exhaust()
+        row = await self._row()
+        await self.tm._handle_download_state(row, self._dl())
+        await self.repo.update_status("g1", "ACTIVE")           # 用户手动点了继续
+        await self.tm._handle_download_state(row, self._dl())   # 又被暂停
+        notices = [t for _, t in self.bot.sent_messages if "额度已用完" in t]
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(self.pool.get("default").paused, ["g1", "g1"])
+
+    async def test_told_again_on_the_next_day(self):
+        await self._exhaust()
+        row = await self._row()
+        await self.tm._handle_download_state(row, self._dl())
+        await self.repo.add_usage(2, "2099-01-01", 1 * self.GIB)
+        with patch("bot.core.quota.today", return_value="2099-01-01"):
+            await self.repo.update_status("g1", "ACTIVE")
+            await self.tm._handle_download_state(row, self._dl())
+        self.assertEqual(len([1 for _, t in self.bot.sent_messages if "额度已用完" in t]), 2)
+
+    async def test_under_quota_keeps_downloading(self):
+        settings.user_daily_quota_gb = 10
+        await self.repo.add_usage(2, quota.today(), 1 * self.GIB)
+        row = await self._row()
+        await self.tm._handle_download_state(row, self._dl())
+        self.assertEqual(self.pool.get("default").paused, [])
+
+    async def test_in_memory_usage_counts_before_it_is_flushed(self):
+        settings.user_daily_quota_gb = 1
+        row = await self._row()
+        self.tm._account_usage(row, self._dl(completed=0))
+        self.tm._account_usage(row, self._dl(completed=1 * self.GIB))   # 还没写库
+        await self.tm._handle_download_state(row, self._dl(completed=1 * self.GIB, total=2 * self.GIB))
+        self.assertEqual(self.pool.get("default").paused, ["g1"])
+
+    async def test_only_actively_downloading_tasks_are_paused(self):
+        await self._exhaust()
+        row = await self._row()
+        await self.tm._handle_download_state(row, self._dl(status="waiting"))
+        self.assertEqual(self.pool.get("default").paused, [])
+
+    async def test_admin_is_not_paused(self):
+        settings.user_daily_quota_gb = 1
+        await self.repo.add_usage(1, quota.today(), 50 * self.GIB)
+        row = await self._row("g1", user_id=1)
+        await self.tm._handle_download_state(row, self._dl())
+        self.assertEqual(self.pool.get("default").paused, [])
+
+    async def test_other_users_are_unaffected(self):
+        await self._exhaust()                                    # 只有用户 2 用完了
+        row = await self._row("g9", user_id=3)
+        await self.tm._handle_download_state(row, self._dl("g9"))
+        self.assertEqual(self.pool.get("default").paused, [])
+
+
+class TestLimitsCache(QuotaTMBase):
+    async def test_setquota_takes_effect_after_invalidate(self):
+        row = await self._row()
+        await self.tm._handle_download_state(row, self._dl(total=101))     # 没限额：放行，并缓存"不限"
+        self.assertEqual((await self.repo.get_by_gid("g1"))["status"], "ACTIVE")
+        await self.repo.set_user_quota(2, {"max_task_bytes": 100})
+        await self.tm._handle_download_state(row, self._dl(total=101))     # 缓存还没过期
+        self.assertEqual((await self.repo.get_by_gid("g1"))["status"], "ACTIVE")
+        self.tm.invalidate_limits()
+        await self.tm._handle_download_state(row, self._dl(total=101))
+        self.assertEqual((await self.repo.get_by_gid("g1"))["status"], "FAILED")
+
+
 if __name__ == "__main__":
     unittest.main()
+
