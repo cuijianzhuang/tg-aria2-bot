@@ -16,3 +16,7 @@ data/
 
 # update.sh 的升级备份（.env / 数据库快照）
 backups/
+
+# 授权签发私钥 —— 绝不能提交
+*.key
+license-private*

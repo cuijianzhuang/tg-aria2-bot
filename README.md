@@ -38,6 +38,13 @@ Telegram 下载机器人：给机器人发送 **HTTP(S) 链接 / 磁力链接 / 
 - **运维告警**：磁盘剩余空间低于 `DISK_ALERT_THRESHOLD_GB`、节点离线超过 5 分钟、机器人 10 分钟内被启动 3 次以上（说明在反复崩溃重启，`RESTART_ALERT_ENABLED` 可关）都会私聊管理员
 - **下载统计按天**：`/stats` 下的「📅 按天查看」显示最近 14 天每天的下载量柱状图；管理员还能看到下载最多的用户
 
+- **VIP 等级**：在白名单和额度的基础上多一层。VIP 用户有更高的额度（`VIP_*`，0 = 不限）、更多的 RSS 订阅数（`RSS_MAX_FEEDS_VIP`）、新任务插到 aria2 等待队列最前面（`VIP_PRIORITY`），还可以把 `rss` / `node`（切换节点）/ `gofile` / `autosend` 设为**仅 VIP 可用**（`VIP_ONLY_FEATURES`，默认留空 = 所有人可用，不改变现有行为）。到期时间可设，到期自动恢复为普通用户（到期前 `VIP_WARN_DAYS` 天和到期时各提醒一次，续期后重新计）；管理员不需要 VIP。开通方式：
+  - 管理员手动：`/vip grant 用户ID 30`（顺延 30 天）、`/vip grant 用户ID forever`、`/vip revoke 用户ID`、`/vip list`
+  - 兑换码：`/vip code 30 5` 生成 5 个 30 天的一次性码（`VIP-XXXX-XXXX-XXXX`），发给用户，用户发 `/redeem 码` 兑换；`/vip codes` 看没用的，`/vip delcode 码` 作废。兑换错 5 次锁定 1 小时；兑换码不能给白名单外的人用（先要让他进白名单）
+  - 用户发 `/vip` 看自己的状态和权益。已经是 VIP 的再兑换/授予是在原到期时间上**顺延**，永久 VIP 不会被短期码降级
+  - 任务优先只是把新任务插到**等待队列**最前面，不会抢占正在下载的任务
+- **软件授权（Pro）**：VIP 等级是 Pro 功能，由 Ed25519 签名的授权码控制（离线校验，无需联网）。**源码默认不启用校验，所有功能直接可用**，fork 自己用不受影响。发行方要启用时：`python tools/license.py keygen` 生成密钥对，把公钥填进 `bot/core/license.py` 的 `PUBLIC_KEY_B64` 再发布，私钥离线保管（不要提交，`.gitignore` 已排除 `*.key`）；买家管理员在机器人里发 `/license` 看到 Bot ID 发给你，你用 `python tools/license.py issue --key 私钥文件 --bot-id 123456789 --name 买家 --days 365 --max-vip 50` 签发，买家发 `/license 授权码` 激活。授权绑定 Bot ID、有到期时间和 VIP 人数上限；到期前 7 天和到期时提醒管理员，到期后 VIP 系统整体关闭（没有人是 VIP、功能限制解除），普通功能不受影响。**这是开源项目，校验代码在仓库里，有能力的人几分钟就能绕过——它只能挡住普通用户、让正规渠道有据可依，不是防破解**
+
 ## 机器人命令
 
 | 命令 | 作用 |
@@ -50,6 +57,8 @@ Telegram 下载机器人：给机器人发送 **HTTP(S) 链接 / 磁力链接 / 
 | `/limit 2M` | 全局限速（`/limit 0` 取消）；设置页里也有预设按钮，任务卡片上还有单任务限速 |
 | `/pause /resume /cancel <任务id>` | 命令方式操作任务（按钮已覆盖，保留兜底） |
 | `/adduser <ID> [备注]` / `/removeuser <ID>` | 白名单增删（设置页里也可操作；通过「申请使用」加人不需要这个） |
+| `/vip` / `/redeem 兑换码` | 查看自己的 VIP 状态和权益 / 兑换 VIP；管理员用 `/vip grant\|revoke\|list\|code\|codes\|delcode` 管理 |
+| `/license` / `/license 授权码` | 查看授权状态和 Bot ID / 激活 Pro 授权码（仅管理员） |
 | `/quota` | 查看自己的额度和今日用量；管理员可以 `/quota <ID>` 看别人的 |
 | `/setquota <ID> active=3 size=2G daily=20G` | 给某个用户单独设额度（仅管理员）。`active` 同时任务数，`size` 单任务大小，`daily` 每天总量，值 `0` = 不限、`default` = 恢复默认；`/setquota <ID> reset` 清掉这个人的所有个别设置 |
 | `/rss` / `/rss add 地址 [关键词] [-排除词]` | RSS 订阅自动下载（所有人，各管各的） |

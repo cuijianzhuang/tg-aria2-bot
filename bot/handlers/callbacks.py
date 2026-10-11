@@ -7,7 +7,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.config import settings
-from bot.core import quota, storage
+from bot.core import quota, storage, vip
 from bot.core.cards import (
     render_file_selection,
     render_home,
@@ -200,6 +200,9 @@ async def nav_start(query: CallbackQuery, repo, nodes):
 
 @router.callback_query(F.data == "node:pick")
 async def node_pick(query: CallbackQuery, repo, nodes):
+    if not await vip.feature_allowed(repo, query.from_user.id if query.from_user else None, "node"):
+        await query.answer(vip.denied_text("node"), show_alert=True)
+        return
     current = nodes.resolve(await repo.get_current_node(query.from_user.id)).name
     enabled = nodes.enabled_nodes()
     healthy = {n.name: nodes.is_healthy(n.name) for n in enabled}
@@ -211,6 +214,9 @@ async def node_pick(query: CallbackQuery, repo, nodes):
 
 @router.callback_query(F.data.startswith("node:use:"))
 async def node_use(query: CallbackQuery, repo, nodes):
+    if not await vip.feature_allowed(repo, query.from_user.id if query.from_user else None, "node"):
+        await query.answer(vip.denied_text("node"), show_alert=True)
+        return
     name = query.data.split(":", 2)[2]
     node = nodes.get_node(name)
     if node is None or not node.enabled:
@@ -444,6 +450,7 @@ async def handle_pending(query: CallbackQuery, repo, nodes, task_manager=None):
         payload=pending.payload,
         node=pending.node,
     )
+    await vip.prioritize(repo, nodes, pending.node, gid, pending.user_id)
     row = await repo.get_by_id(task_id)
     _attend(task_manager, gid)  # 刚添加的任务：用户多半在盯着看，先快速刷新一阵
     await _edit(
@@ -463,6 +470,9 @@ async def apply_pending_node(query: CallbackQuery, repo, nodes):
         return
     if not _can_manage(query, pending.user_id):
         await query.answer("⛔ 只能操作自己添加的任务。", show_alert=True)
+        return
+    if not await vip.feature_allowed(repo, query.from_user.id if query.from_user else None, "node"):
+        await query.answer(vip.denied_text("node"), show_alert=True)
         return
     node = nodes.get_node(name)
     if node is None or not node.enabled:
@@ -526,6 +536,7 @@ async def _handle_batch_start(query: CallbackQuery, repo, nodes, task_manager, *
             file_name=claimed.file_name, file_size=claimed.file_size, payload=claimed.payload,
             node=claimed.node,
         )
+        await vip.prioritize(repo, nodes, claimed.node, gid, claimed.user_id)
         started += 1
 
     text = f"✅ 批量任务已处理：成功启动 {started} 个"
@@ -636,6 +647,7 @@ async def _task_action(query: CallbackQuery, repo, nodes, task_manager, action: 
             row["id"], new_gid,
             reply_message_id=query.message.message_id if query.message else None,
         )
+        await vip.prioritize(repo, nodes, row["node"], new_gid, row["user_id"])
         row = await repo.get_by_id(row["id"])
         _attend(task_manager, new_gid)
         await _edit(

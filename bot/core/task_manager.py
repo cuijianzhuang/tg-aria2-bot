@@ -10,7 +10,7 @@ from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import FSInputFile
 
 from bot.config import settings
-from bot.core import gofile, quota
+from bot.core import gofile, quota, vip
 from bot.core.cards import render_task_card
 from bot.core.compress import compress_path, remove_path
 from bot.core.keyboards import task_keyboard
@@ -525,7 +525,9 @@ class TaskManager:
 
         # gofile 压缩上传 / 自动发送 TG 都要读本机磁盘上的产物，远程节点的
         # 文件在远端机器上，这两条流水线只对本机节点触发
-        if node_is_local and settings.gofile_enabled and target_path and os.path.exists(target_path):
+        uid = row["user_id"]
+        if (node_is_local and settings.gofile_enabled and target_path and os.path.exists(target_path)
+                and await vip.feature_allowed(self._repo, uid, "gofile")):
             # background task: a multi-GB compress+upload must not stall the
             # poll loop (it would freeze progress edits for every other task)
             self._spawn(self._run_gofile_pipeline(row, gid, target_path))
@@ -537,7 +539,8 @@ class TaskManager:
             )
         # 跟 gofile 流水线是否启用无关，独立触发；目录任务和超限文件在
         # send_file_to_tg 内部直接跳过，这里不用重复判断
-        if node_is_local and settings.auto_send_to_tg and target_path:
+        if (node_is_local and settings.auto_send_to_tg and target_path
+                and await vip.feature_allowed(self._repo, uid, "autosend")):
             self._spawn(self._auto_send_to_tg(row, gid, target_path))
 
     async def _handle_error(self, row, download):

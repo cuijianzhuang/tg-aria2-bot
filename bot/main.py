@@ -8,13 +8,14 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.types import BotCommand
 
 from bot.config import settings
-from bot.core import expiry, gofile, health, rss, schedule, upgrade
+from bot.core import expiry, gofile, health, rss, schedule, upgrade, vip
 from bot.core.node_pool import NodePool
 from bot.core.task_manager import TaskManager
 from bot.db.repo import TaskRepo
 from bot.handlers import access, admin, callbacks, commands, files, links, media, ops, settings_menu
 from bot.handlers import rss as rss_handler
 from bot.handlers import upgrade as upgrade_handler
+from bot.handlers import vip as vip_handler
 from bot.middlewares.auth import AuthMiddleware
 
 BOT_COMMANDS = [
@@ -23,6 +24,8 @@ BOT_COMMANDS = [
     BotCommand(command="find", description="按文件名搜索任务"),
     BotCommand(command="stats", description="下载统计"),
     BotCommand(command="rss", description="RSS 订阅自动下载"),
+    BotCommand(command="vip", description="我的 VIP 状态"),
+    BotCommand(command="redeem", description="兑换 VIP 兑换码"),
     BotCommand(command="quota", description="我的额度和今日用量"),
     BotCommand(command="settings", description="设置与管理"),
 ]
@@ -67,6 +70,7 @@ async def main():
     dp.include_router(ops.router)
     dp.include_router(rss_handler.router)
     dp.include_router(files.router)
+    dp.include_router(vip_handler.router)
     dp.include_router(callbacks.router)
     dp.include_router(links.router)
     dp.include_router(media.router)
@@ -91,6 +95,7 @@ async def main():
         asyncio.create_task(schedule.schedule_loop(aria2)),
         asyncio.create_task(expiry.expiry_loop(bot, repo, nodes)),
         asyncio.create_task(rss.rss_loop(bot, repo, nodes, task_manager)),
+        asyncio.create_task(vip.notice_loop(bot, repo, task_manager)),
     ]
     if health.record_start():
         background.append(asyncio.create_task(health.alert_restart_loop(bot)))

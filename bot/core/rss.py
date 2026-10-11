@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 from bot.config import settings
-from bot.core import quota, storage
+from bot.core import quota, storage, vip
 
 log = logging.getLogger(__name__)
 
@@ -161,6 +161,9 @@ async def poll_feed(feed, *, bot, repo, nodes, task_manager=None) -> int:
     from bot.core.keyboards import task_keyboard
     from bot.handlers.callbacks import _add_source
 
+    # RSS 被设为"仅 VIP"时，主人不再是 VIP（比如到期了）的订阅暂停轮询，续上 VIP 后自动恢复
+    if not await vip.feature_allowed(repo, feed["user_id"], "rss"):
+        return 0
     try:
         title, items = parse_feed(await fetch(feed["url"]))
     except FeedError as e:
@@ -210,6 +213,7 @@ async def poll_feed(feed, *, bot, repo, nodes, task_manager=None) -> int:
         )
         done.append(it.guid)
         added += 1
+        await vip.prioritize(repo, nodes, node.name, gid, feed["user_id"])
         row = await repo.get_by_id(task_id)
         try:
             msg = await bot.send_message(

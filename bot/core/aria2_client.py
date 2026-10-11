@@ -217,6 +217,11 @@ class Aria2Client:
         struct = await self._rpc.call("tellStatus", gid)
         return Download.from_struct(struct)
 
+    async def change_position(self, gid: str, pos: int, how: str = "POS_SET"):
+        """调整任务在等待队列里的位置（POS_SET + 0 = 排到最前）。只对等待中的任务有意义，
+        正在下载的任务调用会报错，调用方按需忽略。"""
+        await self._rpc.call("changePosition", gid, pos, how)
+
     async def pause(self, gid: str):
         await self._rpc.call("pause", gid)
 

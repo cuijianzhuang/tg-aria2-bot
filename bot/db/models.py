@@ -84,6 +84,29 @@ CREATE TABLE IF NOT EXISTS rss_seen (
     PRIMARY KEY (feed_id, guid)
 );
 
+-- VIP 用户。expires_at 为空 = 永久。到期不用删行：判断时比较时间即可，
+-- 这样"已到期"的通知和历史记录都还在。
+CREATE TABLE IF NOT EXISTS vip_users (
+    user_id           INTEGER PRIMARY KEY,
+    expires_at        REAL,
+    granted_by        INTEGER,
+    granted_at        REAL NOT NULL,
+    note              TEXT,
+    warned_expiring   INTEGER NOT NULL DEFAULT 0,
+    notified_expired  INTEGER NOT NULL DEFAULT 0
+);
+
+-- VIP 兑换码。days = 0 表示永久 VIP。redeemed_by 为空 = 还没用过（一次性）。
+CREATE TABLE IF NOT EXISTS vip_codes (
+    code         TEXT PRIMARY KEY,
+    days         INTEGER NOT NULL,
+    created_by   INTEGER,
+    created_at   REAL NOT NULL,
+    expires_at   REAL,
+    redeemed_by  INTEGER,
+    redeemed_at  REAL
+);
+
 -- Unconfirmed "开始下载" cards. Used to be an in-memory dict, which meant a bot
 -- restart silently expired every pending confirmation; persisting it lets a
 -- restart mid-confirmation still resolve correctly.

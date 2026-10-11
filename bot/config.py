@@ -56,6 +56,21 @@ class Settings(BaseSettings):
     disk_alert_threshold_gb: int = 10
     # 已完成任务记录自动清理：保留天数，0 表示关闭；只删数据库记录，不动磁盘文件
     auto_cleanup_days: int = 0
+    # ---- VIP 等级（需要 Pro 授权，见 LICENSE_KEY；没有启用授权校验的版本默认可用）----
+    # VIP 用户的默认额度，0 = 不限制。个别用户仍可以用 /setquota 覆盖。管理员给 VIP：
+    # /vip grant 用户ID 天数，或 /vip code 天数 生成兑换码发给用户，用户 /redeem 兑换。
+    vip_max_active_tasks: int = 0
+    vip_max_task_size_gb: float = 0
+    vip_daily_quota_gb: float = 0
+    # 只对 VIP 开放的功能，逗号分隔，可选 rss / node / gofile / autosend；留空 = 所有人可用
+    vip_only_features: str = ""
+    # VIP 的新任务插到 aria2 等待队列最前面
+    vip_priority: bool = True
+    # VIP 到期前几天提醒用户
+    vip_warn_days: int = 3
+    rss_max_feeds_vip: int = 20
+    # 软件授权码（Pro）。也可以由管理员在机器人里 /license <授权码> 设置（存到 data/license.key）
+    license_key: str = ""
     # 限速时段，如 "23:00-07:00=0;07:00-23:00=2M"（0 = 不限速，不在任何时段内时也不限速）。
     # 留空 = 不启用。管理员可以用 /schedule 在机器人里修改。
     speed_schedule: str = ""

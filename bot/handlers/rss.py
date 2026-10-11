@@ -7,7 +7,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.config import settings
-from bot.core import rss
+from bot.core import rss, vip
 from bot.core.rss import FeedError
 
 log = logging.getLogger(__name__)
@@ -80,8 +80,12 @@ async def cmd_rss(message: Message, command: CommandObject, repo, nodes, task_ma
     exclude = " ".join(w[1:] for w in words if w.startswith("-") and len(w) > 1)
     keyword = " ".join(w for w in words if not w.startswith("-"))
 
-    if not _is_admin(user.id) and len(await repo.list_feeds(user_id=user.id)) >= settings.rss_max_feeds_per_user:
-        await message.reply(f"⚠️ 每人最多订阅 {settings.rss_max_feeds_per_user} 个源，请先删除不用的。")
+    if not await vip.feature_allowed(repo, user.id, "rss"):
+        await message.reply(vip.denied_text("rss"))
+        return
+    limit = vip.max_feeds(await vip.is_vip(repo, user.id))
+    if not _is_admin(user.id) and len(await repo.list_feeds(user_id=user.id)) >= limit:
+        await message.reply(f"⚠️ 你最多订阅 {limit} 个源，请先删除不用的。")
         return
     node = nodes.resolve(await repo.get_current_node(user.id)).name
     feed_id = await repo.add_feed(

@@ -154,6 +154,92 @@ class TaskRepo:
         await self._conn.execute("UPDATE tasks SET expiry_keep = ? WHERE id = ?", (1 if keep else 0, task_id))
         await self._conn.commit()
 
+    # ---------- VIP ----------
+
+    async def get_vip(self, user_id: int) -> aiosqlite.Row | None:
+        cur = await self._conn.execute("SELECT * FROM vip_users WHERE user_id = ?", (user_id,))
+        return await cur.fetchone()
+
+    async def set_vip(self, user_id: int, expires_at: float | None, *, granted_by: int | None, note: str | None = None):
+        """授予/续期（覆盖到期时间）。续期后重置"快到期/已到期"通知标记。"""
+        await self._conn.execute(
+            "INSERT INTO vip_users (user_id, expires_at, granted_by, granted_at, note) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET expires_at = excluded.expires_at, granted_by = excluded.granted_by, "
+            "granted_at = excluded.granted_at, note = COALESCE(excluded.note, vip_users.note), "
+            "warned_expiring = 0, notified_expired = 0",
+            (user_id, expires_at, granted_by, time(), note),
+        )
+        await self._conn.commit()
+
+    async def remove_vip(self, user_id: int) -> bool:
+        cur = await self._conn.execute("DELETE FROM vip_users WHERE user_id = ?", (user_id,))
+        await self._conn.commit()
+        return cur.rowcount > 0
+
+    async def list_vips(self) -> list[aiosqlite.Row]:
+        cur = await self._conn.execute("SELECT * FROM vip_users ORDER BY expires_at IS NULL DESC, expires_at DESC")
+        return await cur.fetchall()
+
+    async def count_active_vips(self, now: float) -> int:
+        cur = await self._conn.execute(
+            "SELECT COUNT(*) FROM vip_users WHERE expires_at IS NULL OR expires_at > ?", (now,),
+        )
+        return (await cur.fetchone())[0]
+
+    async def vips_needing_notice(self, now: float, warn_before_seconds: float) -> tuple[list, list]:
+        """(快到期还没提醒过的, 已到期还没通知过的)。永久 VIP 不会出现在这里。"""
+        cur = await self._conn.execute(
+            "SELECT * FROM vip_users WHERE expires_at IS NOT NULL AND expires_at > ? AND expires_at <= ? "
+            "AND warned_expiring = 0", (now, now + warn_before_seconds),
+        )
+        soon = await cur.fetchall()
+        cur = await self._conn.execute(
+            "SELECT * FROM vip_users WHERE expires_at IS NOT NULL AND expires_at <= ? AND notified_expired = 0", (now,),
+        )
+        return soon, await cur.fetchall()
+
+    async def mark_vip_notified(self, user_id: int, *, expired: bool):
+        col = "notified_expired" if expired else "warned_expiring"
+        await self._conn.execute(f"UPDATE vip_users SET {col} = 1 WHERE user_id = ?", (user_id,))  # noqa: S608 - 固定列名
+        await self._conn.commit()
+
+    async def create_vip_codes(self, codes: list[str], *, days: int, created_by: int | None, expires_at: float | None):
+        now = time()
+        await self._conn.executemany(
+            "INSERT INTO vip_codes (code, days, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+            [(c, days, created_by, now, expires_at) for c in codes],
+        )
+        await self._conn.commit()
+
+    async def get_vip_code(self, code: str) -> aiosqlite.Row | None:
+        cur = await self._conn.execute("SELECT * FROM vip_codes WHERE code = ?", (code,))
+        return await cur.fetchone()
+
+    async def claim_vip_code(self, code: str, user_id: int, now: float) -> bool:
+        """原子地把兑换码标记为已用。两个人同时兑换同一个码，只有先到的成功。"""
+        cur = await self._conn.execute(
+            "UPDATE vip_codes SET redeemed_by = ?, redeemed_at = ? "
+            "WHERE code = ? AND redeemed_by IS NULL AND (expires_at IS NULL OR expires_at > ?)",
+            (user_id, now, code, now),
+        )
+        await self._conn.commit()
+        return cur.rowcount == 1
+
+    async def unclaim_vip_code(self, code: str):
+        """兑换到一半失败时把码还回去。"""
+        await self._conn.execute("UPDATE vip_codes SET redeemed_by = NULL, redeemed_at = NULL WHERE code = ?", (code,))
+        await self._conn.commit()
+
+    async def list_vip_codes(self, *, unused_only: bool = True, limit: int = 50) -> list[aiosqlite.Row]:
+        where = " WHERE redeemed_by IS NULL" if unused_only else ""
+        cur = await self._conn.execute(f"SELECT * FROM vip_codes{where} ORDER BY created_at DESC LIMIT ?", (limit,))  # noqa: S608
+        return await cur.fetchall()
+
+    async def delete_vip_code(self, code: str) -> bool:
+        cur = await self._conn.execute("DELETE FROM vip_codes WHERE code = ? AND redeemed_by IS NULL", (code,))
+        await self._conn.commit()
+        return cur.rowcount > 0
+
     # ---------- RSS 订阅 ----------
 
     async def add_feed(self, *, user_id: int, chat_id: int, url: str, keyword: str, exclude: str, node: str) -> int | None:

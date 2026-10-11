@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 from bot.config import settings
 
@@ -50,9 +50,9 @@ def default_limits() -> Limits:
     )
 
 
-def merge_limits(row) -> Limits:
-    """默认值 + 个别覆盖。row 是 user_quotas 的一行（或 None）。"""
-    base = default_limits()
+def merge_limits(row, base: Limits | None = None) -> Limits:
+    """默认值 + 个别覆盖。row 是 user_quotas 的一行（或 None）；base 是 VIP 用户用的默认值。"""
+    base = base or default_limits()
     if row is None:
         return base
 
@@ -69,7 +69,9 @@ def merge_limits(row) -> Limits:
 async def limits_for(repo, user_id: int) -> Limits:
     if settings.is_admin(user_id):
         return Limits()
-    return merge_limits(await repo.get_user_quota(user_id))
+    from bot.core import vip  # 延迟导入：vip 反过来也用到这里的 Limits
+    base = vip.vip_limits() if await vip.is_vip(repo, user_id) else default_limits()
+    return merge_limits(await repo.get_user_quota(user_id), base)
 
 
 async def admission_error(
@@ -109,6 +111,11 @@ async def render_quota(repo, user_id: int, *, pending_usage: int = 0, title: str
     limits = await limits_for(repo, user_id)
     if is_admin:
         return f"{title}\n\n管理员不受任何额度限制。"
+    from bot.core import vip
+    vip_now, vip_exp = await vip.get_status(repo, user_id)
+    if vip_now:
+        until = "永久" if vip_exp is None else f"到期 {datetime.fromtimestamp(vip_exp):%Y-%m-%d %H:%M}"
+        title += f"\n👑 VIP（{until}）"
     if limits.unlimited:
         return f"{title}\n\n目前没有任何限制。"
     active = await repo.count_active_by_user(user_id)
