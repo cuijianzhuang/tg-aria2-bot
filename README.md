@@ -29,6 +29,7 @@ Telegram 下载机器人：给机器人发送 **HTTP(S) 链接 / 磁力链接 / 
 **权限**
 
 - 白名单：`.env` 种子名单（`ALLOWED_USER_IDS`）+ SQLite 动态名单（Telegram/Web 后台均可增删，即时生效，无需重启）
+- **没有权限的人会收到明确的提示**：显示他自己的 ID（点一下就能复制）和管理员的 Telegram 用户名，让他把 ID 发给管理员即可，管理员用 `/adduser <ID>` 添加。管理员用户名默认自动取自 `ADMIN_USER_IDS`（或 `ALLOWED_USER_IDS`）账号，也可以用 `ADMIN_CONTACT=@你的用户名` 手动指定；同一个人一分钟内只回复一次，防刷屏
 
 ## 机器人命令
 
