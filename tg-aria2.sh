@@ -35,6 +35,18 @@
 #   info                    Web 后台访问信息
 #   backup | restore        立即备份 / 从备份恢复 .env 和数据库
 #   rollback                回退到历史版本（交互选择）
+#   node-install [选项]     在另一台服务器上安装「子节点」（只装 aria2，不装机器人），
+#                           装完打印一条 /addnode 命令，发给主机器人即可注册
+#       --name NAME            节点名（默认主机名）
+#       --port PORT            RPC 端口（默认 6800）
+#       --dir DIR              下载目录（默认 /downloads）
+#       --allow-from IP        只对主机器人所在服务器的 IP 放行 RPC 端口（ufw / firewalld）
+#       --local-only           RPC 只监听 127.0.0.1（配合 SSH 隧道 / VPN）
+#       --host HOST            /addnode 里写的地址（默认自动探测公网 IP）
+#       --secret S             RPC 密钥（默认随机生成；重跑沿用已有的）
+#       --dry-run              只打印将要生成的配置，不安装
+#   node-info               重新显示子节点的 /addnode 命令
+#   node-uninstall [--purge] 卸载子节点（--purge 同时删配置和会话数据）
 #
 # 环境变量：BOT_API_PORT（bare 模式 telegram-bot-api 端口，默认 8081）、
 #          UPDATE_HEALTH_WAIT（升级后健康检查观察秒数，默认 20）
@@ -1533,8 +1545,17 @@ version_line() {
 show_header() {
   clear 2>/dev/null || true
   printf '%s========== tg-aria2-bot 管理菜单 ==========%s\n' "$C_BOLD" "$C_RESET"
+  if [[ -f "$(node_info_file)" ]]; then
+    local node_st=stopped
+    [[ "$(systemctl is-active "$NODE_UNIT" 2>/dev/null)" == active ]] && node_st=running
+    printf ' 子节点: %s  （选 16 查看 /addnode 命令）\n' "$(state_label "$node_st")"
+  fi
   if [[ -z "$MODE" ]]; then
-    printf ' 状态: %s未安装%s —— 选 12 开始安装\n' "$C_YELLOW" "$C_RESET"
+    if [[ -f "$(node_info_file)" ]]; then
+      printf ' 主机器人: %s未安装%s（这台机器是子节点）\n' "$C_DIM" "$C_RESET"
+    else
+      printf ' 状态: %s未安装%s —— 选 12 安装主机器人，或选 15 把这台机器装成子节点\n' "$C_YELLOW" "$C_RESET"
+    fi
     return
   fi
   printf ' 部署模式: %s%s%s    版本: %s\n' "$C_CYAN" "$MODE" "$C_RESET" "$(version_line)"
@@ -1578,6 +1599,10 @@ main_menu() {
   ${C_CYAN}12.${C_RESET} 安装 / 修复安装
   ${C_CYAN}13.${C_RESET} 安装 / 修复 Web 管理后台
   ${C_CYAN}14.${C_RESET} 安装快捷命令 tg-aria2
+ ${C_DIM}—— 子节点（这台机器只当远程下载节点，不装机器人）——${C_RESET}
+  ${C_CYAN}15.${C_RESET} 安装子节点
+  ${C_CYAN}16.${C_RESET} 查看子节点信息（/addnode 命令）
+  ${C_CYAN}17.${C_RESET} 卸载子节点
   ${C_CYAN} 0.${C_RESET} 退出
 EOF
     local choice
@@ -1599,6 +1624,9 @@ EOF
       12) require_root install && { bash "$SCRIPT_PATH" install || true; }; pause ;;
       13) require_root web-install && { bash "$SCRIPT_PATH" web-install || true; }; pause ;;
       14) install_shortcut; pause ;;
+      15) node_install_menu; pause ;;
+      16) { bash "$SCRIPT_PATH" node-info || true; }; pause ;;
+      17) require_root node-uninstall && { bash "$SCRIPT_PATH" node-uninstall || true; }; pause ;;
       0|q|exit) exit 0 ;;
       *) err "无效选择"; sleep 1 ;;
     esac
@@ -1609,6 +1637,306 @@ pick_svc_logs() {
   local s
   s="$(pick_service 0)" || return 0
   svc_logs "$s"
+}
+
+# =============================================================== 子节点（只装 aria2，给主机器人当远程节点用）
+#
+# 在另一台服务器上运行：sudo ./tg-aria2.sh node-install
+# 只安装 aria2 + systemd 服务，不装机器人、不需要 Telegram 凭据。装完会打印一条
+# /addnode 命令，复制到主机器人里发送即可注册。这个脚本是自包含的：只拿到
+# tg-aria2.sh 一个文件也能跑（配置全部由脚本生成，不依赖仓库里的其它文件）。
+
+NODE_USER=aria2node
+NODE_UNIT=tg-aria2-node
+# 这几个路径可以用环境变量覆盖，方便在没有 systemd 的环境里测试
+NODE_CONF_DIR="${NODE_CONF_DIR:-/etc/tg-aria2-node}"
+NODE_STATE_DIR="${NODE_STATE_DIR:-/var/lib/tg-aria2-node}"
+NODE_UNIT_FILE="${NODE_UNIT_FILE:-/etc/systemd/system/${NODE_UNIT}.service}"
+
+node_conf_file() { echo "${NODE_CONF_DIR}/aria2.conf"; }
+node_info_file() { echo "${NODE_CONF_DIR}/node.info"; }
+
+parse_node_args() {
+  N_NAME=""; N_PORT=6800; N_DIR=/downloads; N_SECRET=""; N_ALLOW=""; N_HOST=""
+  N_LOCAL_ONLY=0; N_DRY=0; N_PURGE=0; N_YES=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) N_NAME="$2"; shift 2 ;;
+      --port) N_PORT="$2"; shift 2 ;;
+      --dir) N_DIR="$2"; shift 2 ;;
+      --secret) N_SECRET="$2"; shift 2 ;;
+      --allow-from) N_ALLOW="$2"; shift 2 ;;
+      --host) N_HOST="$2"; shift 2 ;;
+      --local-only) N_LOCAL_ONLY=1; shift ;;
+      --dry-run) N_DRY=1; shift ;;
+      --purge) N_PURGE=1; shift ;;
+      -y|--yes) N_YES=1; shift ;;
+      *) die "未知选项: $1（$0 --help 查看用法）" ;;
+    esac
+  done
+  [[ "$N_PORT" =~ ^[0-9]+$ ]] && (( N_PORT >= 1 && N_PORT <= 65535 )) || die "--port 必须是 1-65535 的数字"
+  [[ "$N_DIR" == /* ]] || die "--dir 必须是绝对路径"
+  [[ "$N_DIR" =~ ^[A-Za-z0-9._/-]+$ ]] || die "--dir 只能包含字母、数字、. _ - /（不能有空格，/addnode 命令里目录是用空格分隔的）"
+  [[ -z "$N_NAME" || "$N_NAME" =~ ^[A-Za-z0-9_-]+$ ]] || die "--name 只能包含字母、数字、下划线和连字符"
+  [[ -z "$N_SECRET" || "$N_SECRET" =~ ^[A-Za-z0-9._-]{8,}$ ]] || die "--secret 至少 8 位，只能包含字母、数字、. _ -"
+  [[ -z "$N_ALLOW" || "$N_ALLOW" =~ ^[0-9a-fA-F:./]+$ ]] || die "--allow-from 请填主机器人所在服务器的 IP（或网段）"
+}
+
+# 生成 aria2.conf。密钥由调用方传入；其余参数跟主仓库的 aria2-config/aria2.conf 保持一致的
+# 取向（断点续传、会话持久化、BT 参数）
+render_node_conf() {
+  local secret="$1" dir="$2" port="$3" state="$4" listen_all="$5"
+  cat <<CONF
+# 由 tg-aria2.sh node-install 生成。改完后重启：systemctl restart ${NODE_UNIT}
+dir=${dir}
+disk-cache=64M
+file-allocation=none
+no-file-allocation-limit=64M
+continue=true
+max-resume-failure-tries=0
+remote-time=true
+input-file=${state}/aria2.session
+save-session=${state}/aria2.session
+save-session-interval=1
+auto-save-interval=20
+max-file-not-found=10
+max-tries=0
+retry-wait=10
+connect-timeout=10
+timeout=10
+max-concurrent-downloads=3
+max-connection-per-server=16
+split=16
+min-split-size=4M
+piece-length=1M
+disable-ipv6=true
+http-accept-gzip=true
+no-netrc=true
+allow-overwrite=true
+auto-file-renaming=true
+content-disposition-default-utf8=true
+listen-port=51413
+dht-listen-port=51413
+enable-dht=true
+dht-file-path=${state}/dht.dat
+bt-enable-lpd=true
+enable-peer-exchange=true
+bt-max-peers=128
+max-overall-upload-limit=2M
+seed-ratio=1.0
+seed-time=0
+bt-save-metadata=true
+bt-load-saved-metadata=true
+follow-torrent=true
+rpc-save-upload-metadata=true
+enable-rpc=true
+rpc-listen-all=${listen_all}
+rpc-listen-port=${port}
+rpc-secret=${secret}
+rpc-max-request-size=10M
+rpc-allow-origin-all=true
+CONF
+}
+
+render_node_unit() {
+  local conf="$1" dir="$2" state="$3" aria2c_bin="$4"
+  cat <<UNIT
+[Unit]
+Description=aria2 子节点（tg-aria2-bot）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=${NODE_USER}
+ExecStart=${aria2c_bin} --conf-path=${conf}
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=full
+ReadWritePaths="${dir}" ${state}
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+}
+
+node_public_host() {
+  local h=""
+  if [[ -n "$N_HOST" ]]; then echo "$N_HOST"; return; fi
+  h="$(curl -fsS --max-time 4 https://api.ipify.org 2>/dev/null || true)"
+  [[ "$h" =~ ^[0-9a-fA-F:.]+$ ]] || h="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  echo "${h:-你的服务器IP}"
+}
+
+# 现有配置里的密钥（重跑 node-install 时沿用，避免主机器人那边的节点配置失效）
+node_existing_secret() {
+  [[ -f "$(node_conf_file)" ]] && grep -m1 '^rpc-secret=' "$(node_conf_file)" | cut -d= -f2- || true
+}
+
+node_firewall() {
+  local port="$1" allow="$2"
+  if [[ -n "$allow" ]]; then
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+      ufw allow from "$allow" to any port "$port" proto tcp >/dev/null && log "ufw：已放行 ${allow} → ${port}/tcp"
+    elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+      firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${allow} port port=${port} protocol=tcp accept" >/dev/null \
+        && firewall-cmd --reload >/dev/null && log "firewalld：已放行 ${allow} → ${port}/tcp"
+    else
+      warn "没有检测到启用中的 ufw / firewalld，请自己确保 ${port}/tcp 只对 ${allow} 开放（云服务器还要看安全组）"
+    fi
+  else
+    warn "RPC 端口 ${port}/tcp 没有限制来源，任何人都能连（有密钥保护，但走的是明文 HTTP）。"
+    warn "建议加 --allow-from 主机器人IP，或用 --local-only 配合 SSH 隧道 / WireGuard。"
+  fi
+}
+
+node_wait_rpc() {
+  local port="$1" secret="$2" i
+  for i in {1..15}; do
+    if curl -fsS --max-time 2 -H 'Content-Type: application/json' \
+         -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.getVersion\",\"params\":[\"token:${secret}\"]}" \
+         "http://127.0.0.1:${port}/jsonrpc" 2>/dev/null | grep -q '"version"'; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+node_print_summary() {
+  local name="$1" host="$2" port="$3" secret="$4" dir="$5"
+  echo
+  printf '%s子节点已就绪%s\n' "$C_BOLD$C_GREEN" "$C_RESET"
+  echo
+  echo "在主机器人（Telegram，管理员账号）里发送下面这一行注册节点："
+  echo
+  printf '  %s/addnode %s http://%s:%s/jsonrpc %s %s%s\n' "$C_BOLD" "$name" "$host" "$port" "$secret" "$dir" "$C_RESET"
+  echo
+  echo "· 机器人会自动删除你发的这条消息（里面有密钥）；之后在 设置 → 节点管理 里管理"
+  echo "· 再次查看这些信息：sudo $0 node-info"
+  echo "· 日志：journalctl -u ${NODE_UNIT} -f    重启：systemctl restart ${NODE_UNIT}"
+  echo "· 卸载：sudo $0 node-uninstall"
+}
+
+cmd_node_install() {
+  LOG_TAG="node"
+  parse_node_args "$@"
+  local secret listen_all=true name host conf state aria2c_bin
+  conf="$(node_conf_file)"; state="$NODE_STATE_DIR"
+  [[ "$N_LOCAL_ONLY" -eq 1 ]] && listen_all=false
+  secret="${N_SECRET:-$(node_existing_secret)}"
+  [[ -n "$secret" ]] || secret="$(rand_hex 16)"
+  name="${N_NAME:-$(hostname -s 2>/dev/null | tr -c 'A-Za-z0-9_\n-' '-' )}"
+  name="${name:-node1}"
+
+  if [[ "$N_DRY" -eq 1 ]]; then
+    echo "# ---- ${conf} ----"
+    render_node_conf "$secret" "$N_DIR" "$N_PORT" "$state" "$listen_all"
+    echo "# ---- ${NODE_UNIT_FILE} ----"
+    render_node_unit "$conf" "$N_DIR" "$state" "/usr/bin/aria2c"
+    echo "# ---- /addnode ----"
+    echo "/addnode ${name} http://HOST:${N_PORT}/jsonrpc ${secret} ${N_DIR}"
+    return 0
+  fi
+
+  require_root node-install || exit 1
+  command -v systemctl >/dev/null 2>&1 || die "子节点需要 systemd（找不到 systemctl）"
+  step "安装 aria2"
+  if command -v aria2c >/dev/null 2>&1; then
+    log "aria2c 已安装: $(aria2c --version | head -1)"
+  else
+    pkg_install aria2 curl || die "无法自动安装 aria2（只支持 apt / dnf / yum），请手动安装后重新运行"
+    command -v aria2c >/dev/null 2>&1 || die "aria2 安装失败，请查看上面的输出"
+  fi
+  aria2c_bin="$(command -v aria2c)"
+
+  step "创建运行用户和目录"
+  id "$NODE_USER" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$NODE_USER"
+  mkdir -p "$N_DIR" "$state" "$NODE_CONF_DIR"
+  chown -R "$NODE_USER":"$NODE_USER" "$N_DIR" "$state"
+  chmod 750 "$NODE_CONF_DIR"; chown root:"$NODE_USER" "$NODE_CONF_DIR"
+
+  step "写入配置和 systemd 服务"
+  render_node_conf "$secret" "$N_DIR" "$N_PORT" "$state" "$listen_all" > "${conf}.tmp"
+  chown root:"$NODE_USER" "${conf}.tmp"; chmod 640 "${conf}.tmp"   # 里面有 RPC 密钥
+  mv -f "${conf}.tmp" "$conf"
+  render_node_unit "$conf" "$N_DIR" "$state" "$aria2c_bin" > "$NODE_UNIT_FILE"
+  systemctl daemon-reload
+  systemctl enable "$NODE_UNIT" >/dev/null 2>&1
+  systemctl restart "$NODE_UNIT"
+
+  step "防火墙"
+  if [[ "$N_LOCAL_ONLY" -eq 1 ]]; then
+    log "--local-only：RPC 只监听 127.0.0.1，主机器人需要通过 SSH 隧道 / VPN 访问"
+  else
+    node_firewall "$N_PORT" "$N_ALLOW"
+  fi
+
+  step "检查服务"
+  node_wait_rpc "$N_PORT" "$secret" || { journalctl -u "$NODE_UNIT" -n 20 --no-pager 2>/dev/null || true
+    die "aria2 没有在 15 秒内响应 RPC，请查看上面的日志"; }
+  log "aria2 RPC 正常"
+
+  host="$(node_public_host)"
+  {
+    printf 'name=%s\nhost=%s\nport=%s\nsecret=%s\ndir=%s\n' "$name" "$host" "$N_PORT" "$secret" "$N_DIR"
+  } > "$(node_info_file)"
+  chmod 600 "$(node_info_file)"
+  node_print_summary "$name" "$host" "$N_PORT" "$secret" "$N_DIR"
+}
+
+cmd_node_info() {
+  local f; f="$(node_info_file)"
+  [[ -f "$f" ]] || die "这台机器还没有安装子节点（先运行：sudo $0 node-install）"
+  require_root node-info || exit 1
+  local name host port secret dir
+  name="$(env_get name "$f")"; host="$(env_get host "$f")"; port="$(env_get port "$f")"
+  secret="$(env_get secret "$f")"; dir="$(env_get dir "$f")"
+  printf '服务状态：%s\n' "$(systemctl is-active "$NODE_UNIT" 2>/dev/null || echo 未运行)"
+  node_print_summary "$name" "$host" "$port" "$secret" "$dir"
+}
+
+cmd_node_uninstall() {
+  LOG_TAG="node"
+  parse_node_args "$@"
+  require_root node-uninstall || exit 1
+  [[ -f "$NODE_UNIT_FILE" || -d "$NODE_CONF_DIR" ]] || die "这台机器上没有子节点"
+  if [[ "$N_YES" -ne 1 ]]; then
+    confirm "确认卸载子节点服务？（下载的文件不会删除）" || { log "已取消"; return 0; }
+  fi
+  systemctl disable --now "$NODE_UNIT" >/dev/null 2>&1 || true
+  rm -f "$NODE_UNIT_FILE"
+  systemctl daemon-reload
+  if [[ "$N_PURGE" -eq 1 ]]; then
+    rm -rf "$NODE_CONF_DIR" "$NODE_STATE_DIR"
+    log "已删除配置和会话数据（下载目录里的文件保留）"
+  else
+    log "已卸载服务，配置保留在 ${NODE_CONF_DIR}（加 --purge 一并删除）"
+  fi
+  warn "别忘了在主机器人里删除这个节点：设置 → 🌐 节点管理"
+}
+
+# 菜单里的"安装子节点"：问几个问题，再交给 node-install 子命令（参数校验都在那里）
+node_install_menu() {
+  require_root node-install || return 0
+  echo "安装子节点：这台机器只装 aria2，装完会给你一条 /addnode 命令，发给主机器人即可。"
+  echo "每项直接回车用默认值。"
+  echo
+  local name dir port allow host args=()
+  read -rp "节点名 [$(hostname -s 2>/dev/null || echo node1)]: " name || return 0
+  read -rp "下载目录 [/downloads]: " dir || return 0
+  read -rp "RPC 端口 [6800]: " port || return 0
+  read -rp "主机器人所在服务器的 IP（只对它放行 RPC 端口；不填则对所有人开放，不推荐）: " allow || return 0
+  read -rp "主机器人用来访问这台机器的地址 [自动探测公网 IP]: " host || return 0
+  [[ -n "$name" ]] && args+=(--name "$name")
+  [[ -n "$dir" ]] && args+=(--dir "$dir")
+  [[ -n "$port" ]] && args+=(--port "$port")
+  [[ -n "$allow" ]] && args+=(--allow-from "$allow")
+  [[ -n "$host" ]] && args+=(--host "$host")
+  echo
+  bash "$SCRIPT_PATH" node-install "${args[@]}" || true
 }
 
 usage() {
@@ -1652,6 +1980,9 @@ main() {
     backup) do_backup ;;
     restore) do_restore ;;
     rollback) do_rollback ;;
+    node-install) cmd_node_install "$@" ;;
+    node-info) cmd_node_info ;;
+    node-uninstall) cmd_node_uninstall "$@" ;;
     -h|--help|help) usage ;;
     *) die "未知命令: $cmd（$0 --help 查看用法）" ;;
   esac

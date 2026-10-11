@@ -394,7 +394,10 @@ async def delete_node(query: CallbackQuery, nodes):
 
 @router.message(Command("addnode"))
 async def cmd_addnode(message: Message, command: CommandObject, nodes):
-    usage = "用法: /addnode 名称 rpc地址 密钥 [下载目录]\n例: /addnode 群晖 http://192.168.1.5:6800/jsonrpc s3cret /volume1/downloads"
+    usage = (
+        "用法: /addnode 名称 rpc地址 密钥 [下载目录]\n例: /addnode 群晖 http://192.168.1.5:6800/jsonrpc s3cret /volume1/downloads\n\n"
+        "还没有子节点？在那台服务器上运行 sudo ./tg-aria2.sh node-install，装完会直接给你一条可以复制过来的 /addnode 命令。"
+    )
     parts = (command.args or "").split()
     if len(parts) not in (3, 4):
         await message.reply(usage)
