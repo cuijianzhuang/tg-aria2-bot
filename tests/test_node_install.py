@@ -75,8 +75,12 @@ class TestDryRun(unittest.TestCase):
             input="15\n\n\n\nnot an ip!\n\n\n0\n", env={**os.environ, "TERM": "dumb"},
         )
         out = r.stdout
-        self.assertIn("--allow-from 请填主机器人所在服务器的 IP", out)
         self.assertNotIn("子节点已就绪", out)
+        if os.geteuid() == 0:
+            self.assertIn("--allow-from 请填主机器人所在服务器的 IP", out)
+        else:
+            # 非 root（比如 CI）：菜单在问问题之前就先拦下，什么都不会装
+            self.assertIn("需要 root 权限", out)
 
     def test_script_is_valid_bash(self):
         self.assertEqual(subprocess.run([BASH, "-n", str(SCRIPT)]).returncode, 0)
