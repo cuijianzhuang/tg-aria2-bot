@@ -9,9 +9,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from bot.config import settings
+from bot.core import license as lic
+from bot.core import vip
 from bot.core.aria2_client import Aria2Client
 from bot.core.conf_editor import is_safe_value, list_rclone_remotes, read_kv, write_kv
 from bot.core.storage import disk_usage_summary
+from bot.core.vip import VipError
 from bot.db.repo import TaskRepo
 from bot.web.auth import (
     SESSION_COOKIE,
@@ -129,6 +132,20 @@ class ChangePasswordRequest(BaseModel):
 
 class RestartRequest(BaseModel):
     service: str  # only ever "bot" or "aria2" — never a raw systemd unit name
+
+
+class LicenseRequest(BaseModel):
+    token: str
+
+
+class VipGrantRequest(BaseModel):
+    user_id: int
+    days: int = 30            # 0 = 永久
+
+
+class VipCodesRequest(BaseModel):
+    days: int = 30            # 0 = 永久
+    count: int = 1
 
 
 class GofileSettingsRequest(BaseModel):
@@ -338,6 +355,112 @@ async def set_gofile_settings(body: GofileSettingsRequest):
     # by the separate bot process (task_manager.py), which only reloads .env at
     # its own startup.
     return {"ok": True, "restart_required": True}
+
+
+# ---------------------------------------------------------------- 授权 / VIP
+#
+# bot 和 web 是两个进程，共用 .env、数据库和 data/ 目录。授权码存在 data/license.key、VIP 在
+# 数据库里，bot 每次都现读现算，所以这里改完不用重启。唯一的延迟是 bot 的额度缓存（30 秒）。
+# web 进程没有 Telegram 连接，授予/到期不会给用户发通知——需要通知请用机器人里的 /vip 命令。
+
+def _license_view() -> dict:
+    info = lic.current()
+    token = lic.load_token()
+    error = None
+    if lic.enforced() and token and info is None:
+        try:
+            lic.verify(token)
+        except lic.LicenseError as e:
+            error = str(e)
+    return {
+        "enforced": lic.enforced(),
+        "active": lic.pro_active(),
+        "bot_id": lic.bot_id(),
+        "name": info.name if info else None,
+        "bound_bot_id": info.bot_id if info else None,
+        "expires_at": (info.expires_at or None) if info else None,
+        "max_vip": info.max_vip if info else None,
+        "has_token": bool(token),
+        "error": error,
+    }
+
+
+@app.get("/api/license", dependencies=[Depends(require_login)])
+async def get_license():
+    return _license_view()
+
+
+@app.post("/api/license", dependencies=[Depends(require_login)])
+async def set_license(body: LicenseRequest):
+    try:
+        lic.verify(body.token)
+    except lic.LicenseError as e:
+        raise HTTPException(400, str(e)) from None
+    lic.save_token(body.token)
+    return _license_view()
+
+
+@app.delete("/api/license", dependencies=[Depends(require_login)])
+async def remove_license():
+    if settings.license_key.strip():
+        raise HTTPException(400, "授权码来自 .env 的 LICENSE_KEY，请直接编辑 .env 删除")
+    try:
+        lic.key_path().unlink()
+    except FileNotFoundError:
+        pass
+    return _license_view()
+
+
+@app.get("/api/vip", dependencies=[Depends(require_login)])
+async def list_vips():
+    now = time.time()
+    rows = await state["repo"].list_vips()
+    return {
+        "system_active": vip.system_active(),
+        "active_count": await state["repo"].count_active_vips(now),
+        "users": [
+            {
+                "user_id": r["user_id"], "expires_at": r["expires_at"], "note": r["note"],
+                "active": r["expires_at"] is None or r["expires_at"] > now,
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.post("/api/vip", dependencies=[Depends(require_login)])
+async def grant_vip(body: VipGrantRequest):
+    try:
+        exp = await vip.extend(state["repo"], body.user_id, body.days, granted_by=None, note="Web 后台")
+    except VipError as e:
+        raise HTTPException(400, str(e)) from None
+    return {"ok": True, "expires_at": exp}
+
+
+@app.delete("/api/vip/{user_id}", dependencies=[Depends(require_login)])
+async def revoke_vip(user_id: int):
+    return {"ok": await state["repo"].remove_vip(user_id)}
+
+
+@app.get("/api/vip/codes", dependencies=[Depends(require_login)])
+async def list_vip_codes():
+    rows = await state["repo"].list_vip_codes()
+    return [{"code": r["code"], "days": r["days"], "created_at": r["created_at"]} for r in rows]
+
+
+@app.post("/api/vip/codes", dependencies=[Depends(require_login)])
+async def create_vip_codes(body: VipCodesRequest):
+    try:
+        codes = await vip.create_codes(state["repo"], body.days, body.count, created_by=0)
+    except VipError as e:
+        raise HTTPException(400, str(e)) from None
+    return {"codes": codes}
+
+
+@app.delete("/api/vip/codes/{code}", dependencies=[Depends(require_login)])
+async def delete_vip_code(code: str):
+    normalized = vip.normalize_code(code)
+    return {"ok": bool(normalized) and await state["repo"].delete_vip_code(normalized)}
 
 
 @app.post("/api/settings/restart", dependencies=[Depends(require_login)])

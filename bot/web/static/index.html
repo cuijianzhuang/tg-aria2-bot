@@ -119,6 +119,62 @@
     </div>
   </section>
 
+  <section class="card" id="license-card">
+    <h2>授权与 VIP</h2>
+    <p id="license-status" class="hint"></p>
+    <form id="license-form" hidden>
+      <input id="license-token" placeholder="粘贴 Pro 授权码（TGA2.…）" style="min-width:320px" autocomplete="off">
+      <button type="submit">激活</button>
+      <button type="button" id="license-remove" class="secondary" hidden>移除授权</button>
+      <span id="license-saved" class="hint"></span>
+    </form>
+
+    <div id="vip-section" hidden>
+      <h3>VIP 用户 <span id="vip-count" class="hint"></span></h3>
+      <form id="vip-grant-form">
+        <input id="vip-user-id" placeholder="Telegram user id" type="number" required>
+        <select id="vip-days">
+          <option value="30">30 天</option>
+          <option value="90">90 天</option>
+          <option value="365">365 天</option>
+          <option value="0">永久</option>
+        </select>
+        <button type="submit">授予 / 顺延</button>
+        <span id="vip-saved" class="hint"></span>
+      </form>
+      <div class="table-wrap">
+        <table id="vip-table">
+          <thead><tr><th>User ID</th><th>到期</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <h3>兑换码</h3>
+      <form id="vip-codes-form">
+        <select id="vip-codes-days">
+          <option value="30">30 天</option>
+          <option value="90">90 天</option>
+          <option value="365">365 天</option>
+          <option value="0">永久</option>
+        </select>
+        <input id="vip-codes-count" type="number" min="1" max="20" value="1" style="width:70px">
+        <button type="submit">生成</button>
+        <span id="vip-codes-saved" class="hint"></span>
+      </form>
+      <textarea id="vip-codes-new" rows="3" readonly hidden style="width:100%"></textarea>
+      <div class="table-wrap">
+        <table id="vip-codes-table">
+          <thead><tr><th>未使用的兑换码</th><th>时长</th><th>操作</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="hint">
+        在这里授予 VIP 后用户最多约 30 秒生效（机器人的额度缓存），并且<b>不会</b>收到 Telegram 通知；
+        需要通知用户请在机器人里用 <code>/vip grant</code>。
+      </p>
+    </div>
+  </section>
+
   <section class="card">
     <h2>修改管理密码</h2>
     <form id="password-form">

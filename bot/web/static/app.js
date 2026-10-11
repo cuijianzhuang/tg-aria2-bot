@@ -309,8 +309,162 @@ async function loadGofileSettings() {
   document.getElementById("gofile-token").value = s.token;
 }
 
+function fmtDate(ts) {
+  if (ts === null || ts === undefined) return "永久";
+  return new Date(ts * 1000).toLocaleString();
+}
+
+function daysLabel(days) {
+  return days === 0 ? "永久" : `${days} 天`;
+}
+
+async function loadLicense() {
+  const s = await api("/api/license");
+  const status = document.getElementById("license-status");
+  const form = document.getElementById("license-form");
+  const removeBtn = document.getElementById("license-remove");
+  form.hidden = !s.enforced;
+  removeBtn.hidden = !s.has_token;
+  const idText = `Bot ID：${s.bot_id}（申请授权时把它发给发行方）`;
+  if (!s.enforced) {
+    status.textContent = "这个版本没有启用授权校验，所有功能可用。";
+  } else if (s.active) {
+    const left = s.expires_at ? `，到期 ${fmtDate(s.expires_at)}` : "，永久有效";
+    const cap = s.max_vip ? `，VIP 最多 ${s.max_vip} 人` : "，VIP 人数不限";
+    status.textContent = `✅ Pro 已授权给「${s.name || "-"}」${left}${cap}。${idText}`;
+  } else {
+    const why = s.error ? `授权无效：${s.error}` : "未授权（免费版），VIP 功能不可用";
+    status.textContent = `🔒 ${why}。${idText}`;
+  }
+  return s;
+}
+
+async function loadVip() {
+  const section = document.getElementById("vip-section");
+  const data = await api("/api/vip");
+  section.hidden = !data.system_active;
+  if (!data.system_active) return;
+  document.getElementById("vip-count").textContent = `（现有 ${data.active_count} 人）`;
+
+  const tbody = document.querySelector("#vip-table tbody");
+  tbody.innerHTML = "";
+  if (data.users.length === 0) {
+    tbody.innerHTML = `<tr><td class="empty-state" colspan="4">暂无 VIP 用户</td></tr>`;
+  }
+  for (const u of data.users) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${u.user_id}</td>
+      <td>${escapeHtml(fmtDate(u.expires_at))}</td>
+      <td>${u.active ? "有效" : "已过期"}</td>
+      <td class="actions"></td>
+    `;
+    const actions = tr.querySelector(".actions");
+    actions.appendChild(makeButton("+30 天", "secondary", async () => {
+      await api("/api/vip", { method: "POST", body: JSON.stringify({ user_id: u.user_id, days: 30 }) });
+      loadVip();
+    }));
+    actions.appendChild(makeButton("撤销", "danger", async () => {
+      if (!confirm(`确认撤销 ${u.user_id} 的 VIP？`)) return;
+      await api(`/api/vip/${u.user_id}`, { method: "DELETE" });
+      loadVip();
+    }));
+    tbody.appendChild(tr);
+  }
+
+  const codes = await api("/api/vip/codes");
+  const ctbody = document.querySelector("#vip-codes-table tbody");
+  ctbody.innerHTML = "";
+  if (codes.length === 0) {
+    ctbody.innerHTML = `<tr><td class="empty-state" colspan="3">没有未使用的兑换码</td></tr>`;
+  }
+  for (const c of codes) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td><code>${escapeHtml(c.code)}</code></td><td>${daysLabel(c.days)}</td><td class="actions"></td>`;
+    tr.querySelector(".actions").appendChild(makeButton("作废", "danger", async () => {
+      await api(`/api/vip/codes/${encodeURIComponent(c.code)}`, { method: "DELETE" });
+      loadVip();
+    }));
+    ctbody.appendChild(tr);
+  }
+}
+
+document.getElementById("license-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const savedEl = document.getElementById("license-saved");
+  savedEl.textContent = "";
+  try {
+    await api("/api/license", {
+      method: "POST",
+      body: JSON.stringify({ token: document.getElementById("license-token").value.trim() }),
+    });
+    document.getElementById("license-token").value = "";
+    savedEl.textContent = "已激活";
+    loadLicense();
+    loadVip();
+  } catch (err) {
+    savedEl.textContent = `激活失败：${err.message}`;
+  }
+});
+
+document.getElementById("license-remove").addEventListener("click", async () => {
+  if (!confirm("确认移除授权？移除后 VIP 功能会关闭。")) return;
+  const savedEl = document.getElementById("license-saved");
+  try {
+    await api("/api/license", { method: "DELETE" });
+    savedEl.textContent = "已移除";
+  } catch (err) {
+    savedEl.textContent = err.message;
+  }
+  loadLicense();
+  loadVip();
+});
+
+document.getElementById("vip-grant-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const savedEl = document.getElementById("vip-saved");
+  savedEl.textContent = "";
+  try {
+    await api("/api/vip", {
+      method: "POST",
+      body: JSON.stringify({
+        user_id: parseInt(document.getElementById("vip-user-id").value, 10),
+        days: parseInt(document.getElementById("vip-days").value, 10),
+      }),
+    });
+    document.getElementById("vip-user-id").value = "";
+    savedEl.textContent = "已授予";
+    loadVip();
+  } catch (err) {
+    savedEl.textContent = `失败：${err.message}`;
+  }
+});
+
+document.getElementById("vip-codes-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const savedEl = document.getElementById("vip-codes-saved");
+  const box = document.getElementById("vip-codes-new");
+  savedEl.textContent = "";
+  try {
+    const res = await api("/api/vip/codes", {
+      method: "POST",
+      body: JSON.stringify({
+        days: parseInt(document.getElementById("vip-codes-days").value, 10),
+        count: parseInt(document.getElementById("vip-codes-count").value, 10),
+      }),
+    });
+    box.value = res.codes.join("\n");
+    box.hidden = false;
+    savedEl.textContent = `已生成 ${res.codes.length} 个，复制后发给用户`;
+    loadVip();
+  } catch (err) {
+    savedEl.textContent = `失败：${err.message}`;
+  }
+});
+
 async function refreshAll() {
-  await Promise.all([loadStats(), loadTasks(), loadUsers(), loadRcloneSettings(), loadGofileSettings()]);
+  await Promise.all([loadStats(), loadTasks(), loadUsers(), loadRcloneSettings(), loadGofileSettings(),
+                     loadLicense(), loadVip()]);
 }
 
 let pollTimer = null;
