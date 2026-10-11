@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # toggles). Empty falls back to the env-seeded ALLOWED_USER_IDS — but never to
     # DB-added users, and never to "everyone" when the whitelist is off entirely.
     admin_user_ids: str = ""
+    # 没有权限的用户收到的提示里"联系谁"。填 Telegram 用户名（如 @cuiplus）或任意
+    # 文字/链接；留空则自动用管理员账号的用户名（管理员需要私聊过机器人）。
+    admin_contact: str = ""
     download_dir: str = "/downloads"
     # 逗号分隔的备选下载目录，配合设置菜单里的"下载目录"切换使用；当前 download_dir
     # 始终排在选项第一位，这里只补充其它可选目录
