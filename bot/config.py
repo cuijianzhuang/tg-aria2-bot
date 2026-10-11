@@ -56,6 +56,18 @@ class Settings(BaseSettings):
     disk_alert_threshold_gb: int = 10
     # 已完成任务记录自动清理：保留天数，0 表示关闭；只删数据库记录，不动磁盘文件
     auto_cleanup_days: int = 0
+    # 限速时段，如 "23:00-07:00=0;07:00-23:00=2M"（0 = 不限速，不在任何时段内时也不限速）。
+    # 留空 = 不启用。管理员可以用 /schedule 在机器人里修改。
+    speed_schedule: str = ""
+    # 已完成任务的文件超过这么多天自动从磁盘删除（连同任务记录里的保存路径），0 = 关闭。
+    # 删除前 FILE_EXPIRY_WARN_DAYS 天会提醒文件所有人。
+    file_expiry_days: int = 0
+    file_expiry_warn_days: int = 1
+    # RSS 订阅：轮询间隔（分钟）、每人最多订阅几个源
+    rss_check_minutes: int = 15
+    rss_max_feeds_per_user: int = 5
+    # 机器人 10 分钟内被启动 3 次以上，说明在反复崩溃重启，通知管理员
+    restart_alert_enabled: bool = True
     proxy_url: str | None = None
 
     db_path: str = "/app/data/tasks.db"

@@ -97,6 +97,7 @@ class Outcome:
     old: str
     new: str
     log_tail: str = ""
+    action: str = "upgrade"   # upgrade | rollback
 
 
 # ---------------------------------------------------------------- 路径 / 状态文件
@@ -197,6 +198,22 @@ async def current_version() -> Version:
     return Version(sha, short, subject, int(ts), branch.strip() if rc == 0 else "?")
 
 
+async def recent_versions(limit: int = 10) -> list[Commit]:
+    """当前版本往前数的最近 limit 个提交（第一个就是当前版本），供回退时选。"""
+    ok, reason = support()
+    if not ok:
+        raise UpgradeError(reason)
+    rc, out = await _git("log", f"-{limit}", "--first-parent", "--format=%H%x09%ct%x09%s")
+    if rc != 0:
+        raise UpgradeError(f"读取版本历史失败：{out[-200:]}")
+    commits = []
+    for line in out.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) == 3 and parts[1].isdigit():
+            commits.append(Commit(parts[0][:7], parts[2], int(parts[1])))
+    return commits
+
+
 async def check() -> UpdateInfo:
     """git fetch 并比较本地和远端。出任何问题抛 UpgradeError（信息给管理员看）。"""
     ok, reason = support()
@@ -243,7 +260,8 @@ async def unit_running() -> bool:
 
 
 async def start_upgrade(*, chat_id: int, message_id: int | None, user_id: int,
-                        from_sha: str, target_sha: str, reset: bool = False) -> None:
+                        from_sha: str, target_sha: str, reset: bool = False, rollback: bool = False) -> None:
+    """rollback=True：回退到 target_sha（脚本的 --to，本身就是 reset 到该提交）。"""
     ok, reason = support()
     if not ok:
         raise UpgradeError(reason)
@@ -258,12 +276,18 @@ async def start_upgrade(*, chat_id: int, message_id: int | None, user_id: int,
     write_job({
         "chat_id": chat_id, "message_id": message_id, "user_id": user_id,
         "from_sha": from_sha, "target_sha": target_sha, "reset": reset, "started_at": time.time(),
+        "action": "rollback" if rollback else "upgrade",
     })
     cmd = [
         "systemd-run", f"--unit={UNIT}", "--collect", "--quiet", f"--working-directory={REPO_DIR}",
         "bash", "-c", RUNNER, "_", str(log), str(REPO_DIR / SCRIPT_NAME), str(REPO_DIR),
     ]
-    if reset:
+    if rollback:
+        if not re.fullmatch(r"[0-9a-f]{7,40}", target_sha):
+            clear_job()
+            raise UpgradeError("版本号格式不对。")
+        cmd += ["--to", target_sha]
+    elif reset:
         cmd.append("--reset")
     rc, out = await _run(*cmd, timeout=30.0)
     if rc != 0:
@@ -297,27 +321,31 @@ def log_tail(lines: int = 12) -> str:
 
 def classify(job: dict, current_sha: str, tail: str) -> Outcome:
     old = job.get("from_sha", "")
+    action = job.get("action", "upgrade")
     if current_sha != old:
-        return Outcome("success", old, current_sha, tail)
+        return Outcome("success", old, current_sha, tail, action)
     if "已经是最新版本" in tail:
-        return Outcome("uptodate", old, current_sha, tail)
+        return Outcome("uptodate", old, current_sha, tail, action)
     # 版本没变：要么升级前就失败了，要么健康检查没过、已经自动回滚
-    return Outcome("failed", old, current_sha, tail)
+    return Outcome("failed", old, current_sha, tail, action)
 
 
 def render_outcome(outcome: Outcome, new_subject: str = "") -> str:
     old, new = outcome.old[:7], outcome.new[:7]
+    word = "回退" if outcome.action == "rollback" else "升级"
     if outcome.kind == "success":
-        text = f"✅ <b>升级完成</b>\n\n<code>{old}</code> → <code>{new}</code>"
+        text = f"✅ <b>{word}完成</b>\n\n<code>{old}</code> → <code>{new}</code>"
         if new_subject:
             text += f"\n{escape(new_subject, quote=False)}"
         return text
     if outcome.kind == "uptodate":
+        if outcome.action == "rollback":
+            return f"✅ 当前已经是这个版本（<code>{new}</code>），无需回退。"
         return f"✅ 已经是最新版本（<code>{new}</code>），无需升级。"
     head = (
-        "⚠️ <b>升级超时</b>\n\n升级任务 15 分钟还没结束，请登录服务器查看。"
+        f"⚠️ <b>{word}超时</b>\n\n{word}任务 15 分钟还没结束，请登录服务器查看。"
         if outcome.kind == "timeout"
-        else f"⚠️ <b>升级失败</b>\n\n版本没有变化（仍是 <code>{new}</code>）。如果升级过程中服务异常，脚本已自动回滚到升级前的版本。"
+        else f"⚠️ <b>{word}失败</b>\n\n版本没有变化（仍是 <code>{new}</code>）。如果{word}过程中服务异常，脚本已自动回滚到{word}前的版本。"
     )
     tail = f"\n\n<b>日志末尾：</b>\n<pre>{escape(outcome.log_tail, quote=False)}</pre>" if outcome.log_tail else ""
     return f"{head}{tail}\n\n完整日志：<code>{log_path()}</code>"
@@ -358,7 +386,7 @@ async def finish_pending_upgrade(bot, *, poll_seconds: float = 3.0, max_wait: fl
         tail = log_tail()
         outcome = classify(job, current_sha, tail)
         if timed_out and outcome.kind == "failed":
-            outcome = Outcome("timeout", outcome.old, outcome.new, tail)
+            outcome = Outcome("timeout", outcome.old, outcome.new, tail, outcome.action)
         await _report(bot, job, render_outcome(outcome, subject))
         clear_job()
         return True

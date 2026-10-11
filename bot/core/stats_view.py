@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.core.cards import render_stats
 from bot.core.keyboards import PERIOD_PRESETS, stats_period_keyboard
@@ -19,6 +19,40 @@ def _period_since(days: str) -> str | None:
     if n <= 0:
         return None
     return (datetime.now(UTC) - timedelta(days=n)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+DAILY_DAYS = 14
+BAR_WIDTH = 12
+
+
+async def render_daily_view(repo, *, user_id: int | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    """最近 14 天每天的实际下载量（来自额度统计的 usage_daily），管理员额外看到
+    谁下得最多。user_id=None 是管理员视角（所有人合计）。"""
+    from datetime import date
+
+    from bot.core.quota import fmt_bytes
+
+    today = date.today()
+    days = [(today - timedelta(days=i)).isoformat() for i in range(DAILY_DAYS - 1, -1, -1)]
+    data = dict(await repo.get_usage_since(days[0], user_id=user_id))
+    peak = max(data.values(), default=0)
+    lines = [f"📅 <b>最近 {DAILY_DAYS} 天下载量</b>" + ("" if user_id is None else "（我的）"), ""]
+    for day in days:
+        n = data.get(day, 0)
+        filled = max(1, round(n / peak * BAR_WIDTH)) if n and peak else 0
+        lines.append(f"<code>{day[5:]}</code> {'▰' * filled}{'▱' * (BAR_WIDTH - filled)} {fmt_bytes(n) if n else '-'}")
+    total = sum(data.values())
+    lines += ["", f"合计 {fmt_bytes(total)}，日均 {fmt_bytes(total / DAILY_DAYS)}"]
+    if user_id is None:
+        top = await repo.get_top_users_since(days[0])
+        if top:
+            lines += ["", "<b>下载最多的用户</b>"]
+            lines += [f"• <code>{uid}</code>　{fmt_bytes(b)}" for uid, b in top]
+    markup = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📊 返回统计", callback_data=f"stats:{DEFAULT_PERIOD}"),
+        InlineKeyboardButton(text="⬅️ 主菜单", callback_data="nav:start"),
+    ]])
+    return "\n".join(lines), markup
 
 
 async def render_stats_view(repo, days: str, *, user_id: int | None = None) -> tuple[str, InlineKeyboardMarkup]:

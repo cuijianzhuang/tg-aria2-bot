@@ -477,6 +477,7 @@ def stats_period_keyboard(current_days: str) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=[
         row,
+        [InlineKeyboardButton(text="📅 按天查看", callback_data="stats:daily")],
         [InlineKeyboardButton(text="⬅️ 主菜单", callback_data="nav:start")],
     ])
 

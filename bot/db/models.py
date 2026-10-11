@@ -59,6 +59,31 @@ CREATE TABLE IF NOT EXISTS usage_daily (
     PRIMARY KEY (user_id, day)
 );
 
+-- RSS 订阅：keyword 里每个词都要出现在标题里才下载，exclude 里任一词出现就跳过。
+CREATE TABLE IF NOT EXISTS rss_feeds (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER NOT NULL,
+    chat_id       INTEGER NOT NULL,
+    url           TEXT NOT NULL,
+    keyword       TEXT NOT NULL DEFAULT '',
+    exclude       TEXT NOT NULL DEFAULT '',
+    node          TEXT NOT NULL DEFAULT 'default',
+    title         TEXT,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    created_at    REAL NOT NULL,
+    last_checked  REAL,
+    last_error    TEXT,
+    UNIQUE (user_id, url)
+);
+
+-- 已经见过的条目（不管有没有下载），防止重复添加
+CREATE TABLE IF NOT EXISTS rss_seen (
+    feed_id  INTEGER NOT NULL,
+    guid     TEXT NOT NULL,
+    seen_at  REAL NOT NULL,
+    PRIMARY KEY (feed_id, guid)
+);
+
 -- Unconfirmed "开始下载" cards. Used to be an in-memory dict, which meant a bot
 -- restart silently expired every pending confirmation; persisting it lets a
 -- restart mid-confirmation still resolve correctly.
@@ -115,6 +140,10 @@ MIGRATIONS = [
     # 白名单页显示昵称/用户名（通过申请加入的用户会带上这两项）
     "ALTER TABLE allowed_users ADD COLUMN username TEXT",
     "ALTER TABLE allowed_users ADD COLUMN full_name TEXT",
+    # 过期文件自动清理：提醒过 / 文件已删 / 用户选了保留
+    "ALTER TABLE tasks ADD COLUMN expiry_warned REAL NOT NULL DEFAULT 0",   # 提醒时刻 epoch 秒，0 = 没提醒过
+    "ALTER TABLE tasks ADD COLUMN files_deleted INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE tasks ADD COLUMN expiry_keep INTEGER NOT NULL DEFAULT 0",
 ]
 
 # Valid status values, kept here as the single source of truth for the state machine.

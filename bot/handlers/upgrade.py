@@ -27,6 +27,8 @@ router.callback_query.middleware(AdminMiddleware())
 BACK = InlineKeyboardButton(text="⬅️ 返回设置", callback_data="nav:settings")
 RECHECK = InlineKeyboardButton(text="🔄 重新检查", callback_data="admin:upgrade")
 ACTION_RE = r"^upgrade:(ask|go):([0-9a-f]{7,40})(:reset)?$"
+ROLLBACK_RE = r"^rollback:(ask|go):([0-9a-f]{7,40})$"
+ROLLBACK = InlineKeyboardButton(text="⏪ 回退版本", callback_data="admin:rollback")
 
 # 后台 watcher 任务要留强引用：事件循环只弱引用任务，没人引用会被回收
 _tasks: set[asyncio.Task] = set()
@@ -64,7 +66,7 @@ def render_check(info: UpdateInfo, note: str = "") -> tuple[str, InlineKeyboardM
 
     if info.up_to_date:
         lines.append("✅ 已经是最新版本。")
-        return "\n".join(lines), _kb([RECHECK, BACK])
+        return "\n".join(lines), _kb([RECHECK, ROLLBACK], [BACK])
 
     if info.total:
         lines.append(f"🆕 <b>发现 {info.total} 个新提交</b>（最新 <code>{info.remote_short}</code>）：")
@@ -94,7 +96,7 @@ def render_check(info: UpdateInfo, note: str = "") -> tuple[str, InlineKeyboardM
         buttons = [InlineKeyboardButton(text="⚠️ 丢弃本地改动并升级", callback_data=f"upgrade:ask:{sha}:reset")]
     else:
         buttons = [InlineKeyboardButton(text="⬆️ 立即升级", callback_data=f"upgrade:ask:{sha}")]
-    return "\n".join(lines), _kb(buttons, [RECHECK, BACK])
+    return "\n".join(lines), _kb(buttons, [RECHECK, ROLLBACK], [BACK])
 
 
 def render_confirm(info: UpdateInfo, *, reset: bool) -> tuple[str, InlineKeyboardMarkup]:
@@ -210,6 +212,91 @@ async def upgrade_action(query: CallbackQuery, bot):
         pass
     # 升级在重启之前就失败时机器人不会被重启，由这个 watcher 汇报；
     # 机器人被重启的话，由新进程启动时的 finish_pending_upgrade 接着汇报
+    task = asyncio.create_task(_watch_after_start(bot))
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
+def render_rollback_list(commits: list) -> tuple[str, InlineKeyboardMarkup]:
+    lines = ["⏪ <b>回退版本</b>", "", "选择要回退到的版本（最近的在前，第一项是当前版本）："]
+    rows = []
+    for i, c in enumerate(commits):
+        mark = "（当前）" if i == 0 else ""
+        lines.append(f"• <code>{c.short}</code> {escape(c.subject, quote=False)} <i>({_ago(c.ts)})</i>{mark}")
+        if i > 0:
+            rows.append([InlineKeyboardButton(text=f"{c.short} {c.subject}"[:40], callback_data=f"rollback:ask:{c.short}")])
+    if len(commits) <= 1:
+        lines.append("\n没有更早的版本可以回退。")
+    lines.append("\n回退后如果又想升到最新，回到「检查更新」再升级即可。")
+    return "\n".join(lines), _kb(*rows, [BACK])
+
+
+def render_rollback_confirm(current, target) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "⚠️ <b>确认回退？</b>\n\n"
+        f"<code>{current.short}</code> → <code>{target.short}</code>\n"
+        f"{escape(target.subject, quote=False)}\n\n"
+        "• 先备份 <code>.env</code> 和数据库，再把代码切回这个版本、重启机器人（约 30 秒）\n"
+        "• 数据库升级只增不删，旧代码可以直接用\n"
+        "• 仓库里的本地改动会被丢弃\n"
+        "• 重启后做健康检查，没通过会自动恢复到现在的版本"
+    )
+    return text, _kb(
+        [InlineKeyboardButton(text="✅ 确认回退", callback_data=f"rollback:go:{target.short}")],
+        [InlineKeyboardButton(text="取消", callback_data="admin:rollback")],
+    )
+
+
+@router.callback_query(F.data == "admin:rollback")
+async def show_rollback(query: CallbackQuery):
+    try:
+        commits = await upgrade.recent_versions()
+    except UpgradeError as e:
+        await _show(query, *render_error(str(e)))
+        return
+    await _show(query, *render_rollback_list(commits))
+
+
+@router.callback_query(F.data.regexp(ROLLBACK_RE))
+async def rollback_action(query: CallbackQuery, bot):
+    m = re.match(ROLLBACK_RE, query.data)
+    action, sha = m.group(1), m.group(2)
+    if query.message is None:
+        await query.answer("消息已失效，请重新发起。", show_alert=True)
+        return
+    try:
+        commits = await upgrade.recent_versions()
+        current = await upgrade.current_version()
+    except UpgradeError as e:
+        await _show(query, *render_error(str(e)))
+        return
+    # 只允许回退到列表里出现过的版本（不接受任意输入）
+    target = next((c for c in commits[1:] if c.short.startswith(sha[:7])), None)
+    if target is None:
+        await _show(query, *render_rollback_list(commits))
+        return
+    if action == "ask":
+        await _show(query, *render_rollback_confirm(current, target))
+        return
+    try:
+        await upgrade.start_upgrade(
+            chat_id=query.message.chat.id, message_id=query.message.message_id,
+            user_id=query.from_user.id, from_sha=current.sha, target_sha=target.short, rollback=True,
+        )
+    except UpgradeError as e:
+        await _show(query, *render_error(str(e)))
+        return
+    log.info("rollback %s -> %s started by admin %s", current.short, target.short, query.from_user.id)
+    await query.answer("回退已开始")
+    try:
+        await query.message.edit_text(
+            "⏳ <b>正在回退…</b>\n\n"
+            f"<code>{current.short}</code> → <code>{target.short}</code>\n"
+            "备份 → 切换代码 → 重启 → 健康检查。机器人会短暂离线，完成后结果会显示在这条消息上。",
+            parse_mode="HTML", reply_markup=None,
+        )
+    except Exception:
+        pass
     task = asyncio.create_task(_watch_after_start(bot))
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
