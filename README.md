@@ -75,6 +75,33 @@ Telegram 下载机器人：给机器人发送 **HTTP(S) 链接 / 磁力链接 / 
 只对"本机"节点生效；远程节点的任务卡片上不会出现这些按钮，Telegram 文件转存固定走本机节点。
 设置菜单里的全局限速/同时下载数也只作用于本机节点。
 
+### 安装子节点
+
+子节点就是另一台服务器上的一个 aria2，不需要装机器人，也不需要 Telegram 凭据。在那台服务器上（root）：
+
+```bash
+# 只要这一个脚本文件；已经 git clone 了本仓库的话直接用仓库里的
+curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/tg-aria2-bot/master/tg-aria2.sh -o tg-aria2.sh
+sudo bash tg-aria2.sh node-install --allow-from 主机器人所在服务器的IP --dir /data/downloads
+```
+
+脚本会安装 aria2（apt / dnf / yum）、创建专用的 `aria2node` 用户、生成配置（随机 RPC 密钥）、注册并启动 systemd 服务 `tg-aria2-node`、放行防火墙（ufw / firewalld），确认 RPC 正常响应后，打印一条现成的命令：
+
+```
+/addnode tokyo http://203.0.113.5:6800/jsonrpc 7f3a…（密钥） /data/downloads
+```
+
+把它复制到主机器人里发送（管理员账号）就注册好了。机器人会自动删掉这条含密钥的消息。
+
+| 选项 | 说明 |
+|---|---|
+| `--allow-from IP` | 只对主机器人所在服务器放行 RPC 端口。**强烈建议加**——RPC 走明文 HTTP，不加的话端口对所有人开放，只靠密钥保护 |
+| `--local-only` | RPC 只监听 127.0.0.1，主机器人通过 SSH 隧道 / WireGuard 访问（此时 `/addnode` 里的地址要改成隧道地址） |
+| `--name` / `--port` / `--dir` / `--host` / `--secret` | 节点名（默认主机名）/ RPC 端口（默认 6800）/ 下载目录（默认 /downloads，不能含空格）/ `/addnode` 里写的地址（默认自动探测公网 IP）/ 指定密钥 |
+| `--dry-run` | 只打印将要生成的配置，不安装 |
+
+可以重复运行（沿用已有的密钥，不会让机器人那边的配置失效）。`sudo ./tg-aria2.sh node-info` 重新显示 `/addnode` 命令，`node-uninstall [--purge]` 卸载（下载的文件不会删除，别忘了在机器人的 设置 → 节点管理 里删掉节点）。云服务器还要在安全组里放行 RPC 端口。子节点上没有机器人，所以升级子节点上的 aria2 用系统包管理器（`apt upgrade aria2` 等），机器人的在线升级只管主机器人自己。
+
 ## 一键安装
 
 ```bash

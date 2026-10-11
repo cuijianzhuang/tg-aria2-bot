@@ -292,3 +292,13 @@ aria2p 是同步库，每次调用都要 `to_thread`。aria2 的 JSON-RPC 极简
 | 分类扩充 | 新增 document / software 两类，补全常见视频/音频/图片/压缩包后缀（只影响之后新增的下载） |
 | 没做的 | "按用户分目录/重命名规则"：分类目录已有；按用户分目录需要把 user_id 一路传到 `_add_source`（重试、RSS、批量都走它），改动面大、收益有限，暂缓 |
 
+## 实施记录（2026-10-11）：子节点安装
+
+| 项 | 说明 |
+|----|------|
+| 做法 | `tg-aria2.sh node-install` / `node-info` / `node-uninstall`：在另一台服务器上只装 aria2 + systemd 服务，装完打印一条可直接复制的 `/addnode` 命令。脚本自包含（配置由脚本生成，不依赖仓库其它文件），所以单独下载这一个文件就能用 |
+| 安全取舍 | RPC 要对主机器人开放就必须 `rpc-listen-all`，而 aria2 RPC 是明文 HTTP + 密钥：① 密钥默认随机 16 字节，配置文件 0640 只有 root 和 aria2node 能读；② `--allow-from` 通过 ufw/firewalld 只放行主机器人的 IP，不加会明确警告；③ `--local-only` 配合隧道；④ 以专用的 `aria2node` 用户运行，`NoNewPrivileges`、`ProtectSystem=full`，只给下载目录和状态目录写权限；⑤ 所有参数都过白名单正则（目录、名字、密钥、IP），不会拼进命令的东西才能进配置 |
+| 为什么目录不能有空格 | `/addnode` 的参数是按空格切的，带空格的目录会让机器人收到错误的节点配置 |
+| 幂等 | 重跑沿用已有密钥（换密钥会让主机器人那边的节点配置失效）；`--secret` 显式指定才替换；卸载默认保留配置，`--purge` 才删，下载文件任何情况下都不动 |
+| 验证 | `tests/test_node_install.py`：参数校验和生成的配置（dry-run），以及用替身 systemctl/useradd/curl/ufw 跑完整的安装→重跑→node-info→卸载流程（路径用环境变量指到临时目录）。**没有在真机上跑过真实的 apt/systemd** |
+
