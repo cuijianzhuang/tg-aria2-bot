@@ -3,6 +3,7 @@ import hmac
 import os
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
@@ -10,7 +11,7 @@ from pydantic import BaseModel
 
 from bot.config import settings
 from bot.core import license as lic
-from bot.core import vip
+from bot.core import notify, vip
 from bot.core.aria2_client import Aria2Client
 from bot.core.conf_editor import is_safe_value, list_rclone_remotes, read_kv, write_kv
 from bot.core.storage import disk_usage_summary
@@ -361,7 +362,8 @@ async def set_gofile_settings(body: GofileSettingsRequest):
 #
 # bot 和 web 是两个进程，共用 .env、数据库和 data/ 目录。授权码存在 data/license.key、VIP 在
 # 数据库里，bot 每次都现读现算，所以这里改完不用重启。唯一的延迟是 bot 的额度缓存（30 秒）。
-# web 进程没有 Telegram 连接，授予/到期不会给用户发通知——需要通知请用机器人里的 /vip 命令。
+# web 进程没有 aiogram Bot，授予 VIP 时直接调 Bot API 的 sendMessage 通知用户（尽力而为，
+# 见 core/notify.py）；到期提醒由机器人进程的定时任务发，不受影响。
 
 def _license_view() -> dict:
     info = lic.current()
@@ -434,7 +436,12 @@ async def grant_vip(body: VipGrantRequest):
         exp = await vip.extend(state["repo"], body.user_id, body.days, granted_by=None, note="Web 后台")
     except VipError as e:
         raise HTTPException(400, str(e)) from None
-    return {"ok": True, "expires_at": exp}
+    # 通知用户（尽力而为）。授予已经成功，通知失败不影响结果，只在返回里告诉页面
+    when = "永久" if exp is None else datetime.fromtimestamp(exp).strftime("%Y-%m-%d %H:%M")
+    notified = await notify.send_message(
+        body.user_id, f"👑 管理员给你开通了 VIP，有效期：{when}。发 /vip 查看权益。",
+    )
+    return {"ok": True, "expires_at": exp, "notified": notified}
 
 
 @app.delete("/api/vip/{user_id}", dependencies=[Depends(require_login)])

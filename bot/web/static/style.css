@@ -119,3 +119,9 @@ code { font-family: ui-monospace, monospace; background: #1a1d24; padding: 1px 5
 }
 
 h3 { font-size: 1rem; margin: 1.2rem 0 0.4rem; }
+
+.warning-banner {
+  background: #fff4e5; color: #8a4b00; border: 1px solid #ffcf8a; border-radius: 6px;
+  padding: 10px 14px; margin-bottom: 14px; line-height: 1.6;
+}
+.warning-banner code { background: rgba(0, 0, 0, 0.06); padding: 1px 4px; border-radius: 3px; }

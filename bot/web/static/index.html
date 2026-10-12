@@ -7,6 +7,12 @@
 </head>
 <body>
 
+<div id="insecure-banner" class="warning-banner" hidden>
+  ⚠️ 你正在用<b>明文 HTTP</b>访问这个后台：管理密码、兑换码、授权码都会在网络上明文传输，同一网络里的人能直接看到。
+  建议把 <code>.env</code> 里的 <code>WEB_BIND</code> 改成 <code>127.0.0.1</code>，改用 SSH 隧道
+  （<code>ssh -L 8080:localhost:8080 root@服务器</code>）或带 HTTPS 的反向代理访问。
+</div>
+
 <div id="login-view" class="view">
   <form id="login-form" class="login-box">
     <h1>tg-aria2-bot</h1>
@@ -169,8 +175,9 @@
         </table>
       </div>
       <p class="hint">
-        在这里授予 VIP 后用户最多约 30 秒生效（机器人的额度缓存），并且<b>不会</b>收到 Telegram 通知；
-        需要通知用户请在机器人里用 <code>/vip grant</code>。
+        授予 VIP 后用户最多约 30 秒生效（机器人的额度缓存），并会尝试给用户发一条 Telegram 通知；
+        用户没和机器人说过话、或 Bot API 没响应时发不出去，页面会提示，请另外告诉他。
+        兑换码相当于钱，生成后只通过可信渠道发给用户。
       </p>
     </div>
   </section>

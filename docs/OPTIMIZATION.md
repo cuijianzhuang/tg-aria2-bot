@@ -322,7 +322,16 @@ aria2p 是同步库，每次调用都要 `to_thread`。aria2 的 JSON-RPC 极简
 | 项 | 说明 |
 |----|------|
 | 接口 | `/api/license`（查看/激活/移除）、`/api/vip`（列表/授予/撤销）、`/api/vip/codes`（列表/生成/作废），全部走 `require_login`；业务逻辑复用 `core/vip.py` / `core/license.py`，规则（人数上限、授权失效时拒绝、码的原子认领）和机器人命令完全一致，没有第二套 |
-| 两个进程 | bot 和 web 是两个进程，共用数据库和 `data/license.key`。授权每次现算、VIP 在库里，所以改完不用重启；bot 的额度缓存 30 秒，是唯一延迟。web 没有 Telegram 连接，所以**不会通知用户**——页面上明说了 |
+| 两个进程 | bot 和 web 是两个进程，共用数据库和 `data/license.key`。授权每次现算、VIP 在库里，所以改完不用重启；bot 的额度缓存 30 秒，是唯一延迟。web 没有 aiogram Bot，授予 VIP 时用 `core/notify.py` 直接调 Bot API 的 `sendMessage` 通知用户（见下一条） |
 | 授权来自 `.env` | `LICENSE_KEY` 优先于 `data/license.key`；网页上"移除授权"遇到这种情况会拒绝并提示去改 `.env`，免得页面显示"已移除"而授权其实还在 |
 | 验证 | 没装 httpx 用不了 TestClient，所以接口函数直接调用测试，另外单独检查每条路由都挂了登录依赖。另外在沙箱里起了真实的 uvicorn，用 Playwright 驱动 Chromium 走了一遍：登录 → 未授权状态 → 激活失败提示 → 激活 → 授予 VIP → 生成兑换码 → 列表 → 撤销，页面无 JS 错误（唯一的 500 是沙箱里 aria2 没起，跟这个功能无关） |
+
+## 实施记录（2026-10-12）：Web 授予 VIP 的通知与明文 HTTP 警告
+
+| 项 | 说明 |
+|----|------|
+| 通知 | `core/notify.py`：Web 进程有 `BOT_TOKEN` 和 `BOT_API_URL`，授予成功后直接 POST `sendMessage`。尽力而为——授予已经成功，通知失败只在返回里 `notified=false`，页面提示管理员另外告知，不回滚。docker 下 web 和 telegram-bot-api 同在 `internal` 网络，用的是同一个地址。异常只记类型，不记信息（异常信息里可能带着含 token 的 URL），有测试盯着日志里不出现 token |
+| 验证 | 单测 mock 网络层；另有一组不 mock 的测试起假的 Bot API 服务，确认请求路径和 JSON 真的对；再用 Playwright 起真实 uvicorn + 假 Bot API，授予后假服务确实收到 `sendMessage` |
+| 明文 HTTP 警告 | 页面在非 HTTPS、非本机（localhost/127.0.0.1/[::1]）访问时顶部显示警告框，**登录页也显示**（密码是登录那一刻发出去的）。纯前端判断 `location`，所以在反向代理后面只要对外是 HTTPS 就不会误报。用 127.0.0.1 访问确认不显示、用服务器 IP 访问确认显示 |
+| 没改的 | 服务端不强制 HTTPS、也没有改 docker 默认的 `0.0.0.0`——改默认值会让现有部署升级后突然打不开后台，要改应该是单独的、有迁移提示的变更。`tg-aria2.sh` 的 `info`/安装摘要原本就会在 `0.0.0.0` 时警告，不重复加 |
 

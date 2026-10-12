@@ -1,3 +1,10 @@
+// 明文 HTTP 且不是本机访问：登录密码、兑换码都在网络上裸奔。登录页也要提示——
+// 密码恰恰是在登录那一刻发出去的
+(function showInsecureBanner() {
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+  document.getElementById("insecure-banner").hidden = location.protocol === "https:" || local;
+})();
+
 const loginView = document.getElementById("login-view");
 const dashboardView = document.getElementById("dashboard-view");
 
@@ -425,7 +432,7 @@ document.getElementById("vip-grant-form").addEventListener("submit", async (e) =
   const savedEl = document.getElementById("vip-saved");
   savedEl.textContent = "";
   try {
-    await api("/api/vip", {
+    const res = await api("/api/vip", {
       method: "POST",
       body: JSON.stringify({
         user_id: parseInt(document.getElementById("vip-user-id").value, 10),
@@ -433,7 +440,9 @@ document.getElementById("vip-grant-form").addEventListener("submit", async (e) =
       }),
     });
     document.getElementById("vip-user-id").value = "";
-    savedEl.textContent = "已授予";
+    savedEl.textContent = res.notified
+      ? "已授予，并已通知用户"
+      : "已授予，但没能通知到用户（他可能还没和机器人说过话，或 Bot API 没响应），请另外告诉他";
     loadVip();
   } catch (err) {
     savedEl.textContent = `失败：${err.message}`;

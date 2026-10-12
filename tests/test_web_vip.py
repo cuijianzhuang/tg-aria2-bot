@@ -6,6 +6,7 @@ import os
 import tempfile
 import time
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -14,7 +15,7 @@ from fastapi.routing import APIRoute
 
 from bot.config import settings
 from bot.core import license as lic
-from bot.core import vip
+from bot.core import notify, vip
 from bot.db.repo import TaskRepo
 from bot.web import app as web
 
@@ -42,6 +43,10 @@ class WebVipBase(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(lambda: (setattr(settings, "db_path", self._orig[0]), setattr(settings, "license_key", self._orig[1]),
                                  setattr(settings, "bot_token", self._orig[2]), setattr(lic, "PUBLIC_KEY_B64", self._orig[3])))
         vip.reset_rate_limits()
+        # 授予 VIP 会通知用户：测试里不能真的去连 Bot API
+        p = patch.object(notify, "send_message", AsyncMock(return_value=True))
+        self.notify = p.start()
+        self.addCleanup(p.stop)
 
     def token(self, **over):
         data = {"v": 1, "name": "张三", "bot_id": "123456", "iat": int(time.time()),
@@ -112,6 +117,34 @@ class TestVipApi(WebVipBase):
         self.assertTrue(data["users"][0]["active"])
         self.assertTrue((await web.revoke_vip(5))["ok"])
         self.assertEqual((await web.list_vips())["users"], [])
+
+    async def test_grant_notifies_the_user(self):
+        await self._license()
+        r = await web.grant_vip(web.VipGrantRequest(user_id=5, days=30))
+        self.assertTrue(r["notified"])
+        chat_id, text = self.notify.await_args.args
+        self.assertEqual(chat_id, 5)
+        self.assertIn("VIP", text)
+        self.assertIn("/vip", text)
+
+    async def test_failed_notification_does_not_undo_the_grant(self):
+        await self._license()
+        self.notify.return_value = False
+        r = await web.grant_vip(web.VipGrantRequest(user_id=5, days=30))
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["notified"])
+        self.assertTrue(await vip.is_vip(self.repo, 5))
+
+    async def test_refused_grants_send_nothing(self):
+        # 没授权：被拒绝，当然不能通知用户"已开通"
+        with self.assertRaises(HTTPException):
+            await web.grant_vip(web.VipGrantRequest(user_id=5, days=30))
+        self.notify.assert_not_awaited()
+
+    async def test_permanent_grant_message(self):
+        await self._license()
+        await web.grant_vip(web.VipGrantRequest(user_id=5, days=0))
+        self.assertIn("永久", self.notify.await_args.args[1])
 
     async def test_permanent(self):
         await self._license()
