@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     rss_max_feeds_vip: int = 20
     # 软件授权码（Pro）。也可以由管理员在机器人里 /license <授权码> 设置（存到 data/license.key）
     license_key: str = ""
+    # 发行方的授权公钥（Ed25519 公钥，base64），读自 .env。留空 = 不启用授权校验。
+    # 源码里 bot/core/license.py 的 PUBLIC_KEY_B64 如果填了，以源码里的为准、这一项被忽略。
+    license_public_key: str = ""
     # 限速时段，如 "23:00-07:00=0;07:00-23:00=2M"（0 = 不限速，不在任何时段内时也不限速）。
     # 留空 = 不启用。管理员可以用 /schedule 在机器人里修改。
     speed_schedule: str = ""

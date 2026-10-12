@@ -3,7 +3,7 @@
 
     python tools/license.py keygen [--out license-private.key]
         生成一对 Ed25519 密钥：私钥写到文件（权限 600），公钥打印出来——把公钥填进
-        bot/core/license.py 的 PUBLIC_KEY_B64 再发布。私钥丢了就没法再签发，泄露了谁都能
+        .env 的 LICENSE_PUBLIC_KEY（或 bot/core/license.py 的 PUBLIC_KEY_B64）。私钥丢了就没法再签发，泄露了谁都能
         给自己签授权，务必离线备份、不要提交进仓库（.gitignore 已排除 *.key）。
 
     python tools/license.py issue --key license-private.key --bot-id 123456789 \\
@@ -41,7 +41,7 @@ def keygen(args):
     with os.fdopen(fd, "w") as f:
         f.write(b64e(raw) + "\n")
     print(f"私钥已写入 {args.out}（权限 600）——离线备份，不要提交进仓库。")
-    print("公钥（填进 bot/core/license.py 的 PUBLIC_KEY_B64）：")
+    print("公钥（写进 .env：LICENSE_PUBLIC_KEY=<下面这串>；或填进 bot/core/license.py 的 PUBLIC_KEY_B64）：")
     print(b64e(pub))
 
 

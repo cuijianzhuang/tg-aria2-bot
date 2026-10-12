@@ -100,6 +100,70 @@ class TestVerify(LicenseBase):
         self.assertIsNone(lic.current())
 
 
+class TestPublicKeySource(LicenseBase):
+    """公钥来自本地配置（.env 的 LICENSE_PUBLIC_KEY）；源码里写死的优先。"""
+
+    def setUp(self):
+        super().setUp()
+        self.pub = lic.PUBLIC_KEY_B64          # LicenseBase 把真公钥放在源码常量里
+        self._orig_cfg = settings.license_public_key
+        self.addCleanup(lambda: setattr(settings, "license_public_key", self._orig_cfg))
+
+    def test_config_key_enables_verification_when_the_constant_is_empty(self):
+        lic.PUBLIC_KEY_B64 = ""
+        self.assertFalse(lic.enforced())
+        settings.license_public_key = self.pub
+        self.assertTrue(lic.enforced())
+        self.assertEqual(lic.verify(self.token()).name, "张三")
+
+    def test_whitespace_around_the_configured_key_is_ignored(self):
+        lic.PUBLIC_KEY_B64 = ""
+        settings.license_public_key = f"  {self.pub}\n"
+        self.assertEqual(lic.verify(self.token()).name, "张三")
+
+    def test_embedded_key_wins_over_the_config(self):
+        other = b64e(Ed25519PrivateKey.generate().public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw))
+        settings.license_public_key = other                   # 想用自己的公钥顶掉发布版里写死的
+        self.assertEqual(lic.verify(self.token()).name, "张三")   # 仍然按源码里的公钥校验
+
+    def test_wrong_key_in_config_rejects_the_license(self):
+        lic.PUBLIC_KEY_B64 = ""
+        settings.license_public_key = b64e(Ed25519PrivateKey.generate().public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw))
+        with self.assertRaises(lic.LicenseError) as cm:
+            lic.verify(self.token())
+        self.assertIn("签名无效", str(cm.exception))
+
+    def test_malformed_config_key_is_reported_as_such_not_as_a_bad_license(self):
+        lic.PUBLIC_KEY_B64 = ""
+        for bad in ("not-base64!!", b64e(b"too short")):
+            settings.license_public_key = bad
+            with self.assertRaises(lic.LicenseError) as cm:
+                lic.verify(self.token())
+            self.assertIn("公钥配置无效", str(cm.exception), bad)
+
+    def test_malformed_config_key_means_not_pro_and_says_why(self):
+        lic.PUBLIC_KEY_B64 = ""
+        settings.license_public_key = "garbage"
+        lic.save_token(self.token())
+        self.assertFalse(lic.pro_active())
+        self.assertIn("公钥配置无效", lic.status_text())
+
+    def test_nothing_configured_anywhere_means_open(self):
+        lic.PUBLIC_KEY_B64 = ""
+        settings.license_public_key = ""
+        self.assertFalse(lic.enforced())
+        self.assertTrue(lic.pro_active())
+
+    def test_loads_from_a_real_dotenv_file(self):
+        from bot.config import Settings
+        path = os.path.join(self._dir.name, ".env")
+        with open(path, "w") as f:
+            f.write(f"BOT_TOKEN=t\nAPI_ID=1\nAPI_HASH=h\nARIA2_SECRET=s\nLICENSE_PUBLIC_KEY={self.pub}\n")
+        self.assertEqual(Settings(_env_file=path).license_public_key, self.pub)
+
+
 class TestStorage(LicenseBase):
     def test_no_license_is_not_pro(self):
         self.assertFalse(lic.pro_active())

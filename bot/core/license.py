@@ -1,13 +1,14 @@
 """软件授权（Pro）：用 Ed25519 签名的授权码，离线校验，不需要联网。
 
 做法
-- 发行方保管私钥（tools/license.py keygen 生成，**不要提交进仓库**），把对应的公钥填到
-  下面的 PUBLIC_KEY_B64 再发布。授权码 = 签名过的 JSON：授权给谁、绑定哪个机器人、
+- 发行方保管私钥（tools/license.py keygen 生成，**不要提交进仓库**），公钥配到 .env 的
+  LICENSE_PUBLIC_KEY（本地配置），或者填到下面的 PUBLIC_KEY_B64 再发布。授权码 = 签名过的 JSON：授权给谁、绑定哪个机器人、
   什么时候到期、最多多少个 VIP。
 - 买家用 /license 看到自己的 Bot ID，发给发行方；发行方用 tools/license.py issue 签发；
   买家（管理员）发 /license <授权码> 激活。授权码绑定 Bot ID，不能拿去给别的机器人用。
-- PUBLIC_KEY_B64 为空 = 不启用授权校验，所有功能直接可用（源码默认就是这样，fork 出去
-  自己用不受影响）。
+- 公钥来源：源码里的 PUBLIC_KEY_B64 优先（发布时写死的版本不会被 .env 改掉）；它为空时
+  才读 .env 的 LICENSE_PUBLIC_KEY。两处都为空 = 不启用授权校验，所有功能直接可用（源码
+  默认就是这样，fork 出去自己用不受影响）。
 
 诚实的说明：这是开源项目，校验代码就在仓库里，有能力的人改掉它是几分钟的事。
 授权校验只能挡住普通用户、让"正规渠道"有据可依，不能当作防破解手段。
@@ -27,7 +28,8 @@ from bot.config import settings
 
 log = logging.getLogger(__name__)
 
-# 发行方的公钥（Ed25519，32 字节，base64）。留空 = 不启用授权校验。
+# 发行方的公钥（Ed25519，32 字节，base64），写死在发布的代码里。留空 = 改读 .env 的
+# LICENSE_PUBLIC_KEY；那个也空 = 不启用授权校验。
 PUBLIC_KEY_B64 = ""
 
 PREFIX = "TGA2"
@@ -60,8 +62,13 @@ def _b64e(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
+def public_key_b64() -> str:
+    """生效的公钥：源码里写死的优先，否则读本地配置（.env 的 LICENSE_PUBLIC_KEY）。"""
+    return (PUBLIC_KEY_B64 or settings.license_public_key).strip()
+
+
 def enforced() -> bool:
-    return bool(PUBLIC_KEY_B64)
+    return bool(public_key_b64())
 
 
 def bot_id() -> str:
@@ -74,21 +81,26 @@ def verify(token: str, *, now: float | None = None) -> LicenseInfo:
     if not enforced():
         raise LicenseError("这个版本没有启用授权校验。")
     now = time.time() if now is None else now
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError:
+        raise LicenseError("缺少 cryptography 库，无法校验授权码（pip install cryptography）。") from None
+    try:
+        pub = Ed25519PublicKey.from_public_bytes(_b64d(public_key_b64()))
+    except (binascii.Error, ValueError):
+        raise LicenseError("授权公钥配置无效（LICENSE_PUBLIC_KEY 应是 32 字节 Ed25519 公钥的 base64）。") from None
     parts = (token or "").strip().split(".")
     if len(parts) != 3 or parts[0] != PREFIX:
         raise LicenseError("授权码格式不对。")
     try:
         payload_raw, sig = _b64d(parts[1]), _b64d(parts[2])
-        from cryptography.exceptions import InvalidSignature
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-        Ed25519PublicKey.from_public_bytes(_b64d(PUBLIC_KEY_B64)).verify(sig, payload_raw)
+        pub.verify(sig, payload_raw)
         data = json.loads(payload_raw)
     except (binascii.Error, ValueError):
         raise LicenseError("授权码格式不对。") from None
     except InvalidSignature:
         raise LicenseError("授权码签名无效（可能被改过，或不是这个发行方签发的）。") from None
-    except ImportError:
-        raise LicenseError("缺少 cryptography 库，无法校验授权码（pip install cryptography）。") from None
     if not isinstance(data, dict) or data.get("v") != VERSION:
         raise LicenseError("授权码版本不支持，请向发行方换一个新的。")
     try:
