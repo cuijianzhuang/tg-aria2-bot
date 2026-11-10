@@ -1,9 +1,7 @@
 import asyncio
 import os
-import re
 import shutil
 from pathlib import Path
-from urllib.parse import parse_qsl, unquote, urlparse
 from uuid import uuid4
 
 from aiogram import F, Router
@@ -14,41 +12,14 @@ from bot.core import storage
 from bot.core.cards import render_batch_pending, render_pending_card
 from bot.core.keyboards import batch_pending_keyboard, pending_task_keyboard, redownload_keyboard
 from bot.core.metalink import MAX_METALINK_BYTES, split_metalink
+from bot.core.sources import INFOHASH_RE, URL_RE, extract_links, extract_magnets, url_display_name
 from bot.core.telegram_files import to_local_path
 
 router = Router(name="links")
 
-URL_RE = re.compile(r"^(?:https?|ftp|sftp)://\S+$", re.IGNORECASE)
-# Match the complete URI, including optional parameters in any order.
-MAGNET_RE = re.compile(r"\bmagnet:\?[^\s<>\"'，。；）】]+", re.IGNORECASE)
-
-
-def _extract_magnets(text: str) -> list[str]:
-    magnets = []
-    for match in MAGNET_RE.finditer(text):
-        uri = match.group().rstrip(")]")
-        params = parse_qsl(uri.split("?", 1)[1], keep_blank_values=True)
-        if any(key.lower() == "xt" and value.lower().startswith("urn:btih:")
-               and value[len("urn:btih:"):] for key, value in params):
-            # aria2 expects the standard lowercase scheme; preserve query data.
-            magnets.append("magnet:" + uri.split(":", 1)[1])
-    return magnets
-
-# 裸 BT infohash（种子站常见的复制粘贴格式，没有 magnet: 前缀）：40 位十六进制。
-# 只认这一种格式——BEP3 也允许 32 位 base32，但那跟普通随机字符串太像，
-# 误判风险不值得，用户真要用 base32 hash 自己拼成完整 magnet 链接即可。
-INFOHASH_RE = re.compile(r"^[a-fA-F0-9]{40}$")
-
 # 一条消息最多同时处理这么多条链接，超出的部分提示用户分批发送，避免一条
 # 消息就把待确认队列灌满
 MAX_BATCH_LINKS = 20
-
-
-def _url_display_name(url: str) -> str:
-    """Filename from the URL *path* only — basename(url) would drag the query
-    string into the name (file.zip?key=abc)."""
-    name = os.path.basename(unquote(urlparse(url).path))
-    return name or url
 
 
 def _torrent_store_path(file_unique_id: str) -> str:
@@ -72,7 +43,7 @@ async def _create_url_pending(message: Message, repo, url: str, *, node: str, ba
     ref = storage.url_hash(url)
     if await repo.get_completed_by_source("url", ref):
         return None
-    display_name = _url_display_name(url)
+    display_name = url_display_name(url)
     token = await repo.create_pending(
         kind="url",
         user_id=message.from_user.id,
@@ -120,7 +91,7 @@ async def handle_url(message: Message, repo, nodes):
     token = await _create_url_pending(message, repo, url, node=node)
     await message.reply(
         render_pending_card(
-            "url", _url_display_name(url),
+            "url", url_display_name(url),
             node_label=nodes.label(node), download_dir=nodes.get_node(node).download_dir,
         ),
         reply_markup=pending_task_keyboard(token, show_node_switch=nodes.is_multi()),
@@ -150,13 +121,13 @@ async def _handle_single_magnet(message: Message, repo, nodes, magnet: str):
 
 
 def _is_single_magnet_message(message: Message) -> bool:
-    links = _extract_links(message.text or "")
-    return len(links) == 1 and bool(_extract_magnets(message.text or ""))
+    links = extract_links(message.text or "")
+    return len(links) == 1 and bool(extract_magnets(message.text or ""))
 
 
 @router.message(F.text, _is_single_magnet_message)
 async def handle_magnet(message: Message, repo, nodes):
-    await _handle_single_magnet(message, repo, nodes, _extract_links(message.text)[0][1])
+    await _handle_single_magnet(message, repo, nodes, extract_links(message.text)[0][1])
 
 
 @router.message(F.text.regexp(INFOHASH_RE.pattern))
@@ -165,33 +136,16 @@ async def handle_infohash(message: Message, repo, nodes):
     await _handle_single_magnet(message, repo, nodes, magnet)
 
 
-def _extract_links(text: str) -> list[tuple[str, str]]:
-    """把消息按行拆开，挑出能识别成 url/magnet 的行；顺序无关的其它行
-    （空行、说明文字等）直接忽略，不当错误处理。"""
-    links = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if magnets := _extract_magnets(line):
-            links.extend(("magnet", uri) for uri in magnets)
-        elif INFOHASH_RE.match(line):
-            links.append(("magnet", f"magnet:?xt=urn:btih:{line}"))
-        elif URL_RE.match(line):
-            links.append(("url", line))
-    return links
-
-
 def _is_multi_link_message(message: Message) -> bool:
     """识别出至少两条链接才进入批量流程，单条由对应 handler 处理。"""
     if not message.text:
         return False
-    return len(_extract_links(message.text)) >= 2
+    return len(extract_links(message.text)) >= 2
 
 
 @router.message(F.text, _is_multi_link_message)
 async def handle_batch_links(message: Message, repo, nodes):
-    all_links = _extract_links(message.text)
+    all_links = extract_links(message.text)
     overflow = max(0, len(all_links) - MAX_BATCH_LINKS)
     links = all_links[:MAX_BATCH_LINKS]
 
@@ -205,7 +159,7 @@ async def handle_batch_links(message: Message, repo, nodes):
             name = "磁力链接任务"
         else:
             token = await _create_url_pending(message, repo, payload, node=node, batch_id=batch_id)
-            name = _url_display_name(payload)
+            name = url_display_name(payload)
         if token is None:
             duplicates += 1
             continue

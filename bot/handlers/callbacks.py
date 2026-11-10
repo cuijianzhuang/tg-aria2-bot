@@ -17,6 +17,7 @@ from bot.core.cards import (
     render_task_limit_chooser,
 )
 from bot.core.compress import remove_path
+from bot.core.download_service import add_source
 from bot.core.keyboards import (
     BACK_TO_LIST_TEXT,
     LIMIT_PRESETS,
@@ -34,7 +35,6 @@ from bot.core.keyboards import (
 from bot.core.list_view import LIST_STATUS_MAP, render_task_list
 from bot.core.node_pool import NodeUnavailable
 from bot.core.stats_view import render_daily_view, render_stats_view
-from bot.core.telegram_files import to_download_uri
 
 log = logging.getLogger(__name__)
 router = Router(name="callbacks")
@@ -319,40 +319,6 @@ async def show_stats(query: CallbackQuery, repo):
     await _edit(query, text, reply_markup=markup, parse_mode="HTML")
 
 
-async def _add_source(nodes, node_name: str, kind: str, payload: str, file_name: str | None) -> str:
-    """Add a download to the task's node; returns the new gid.
-    Shared by pending:start and task:retry so both stay in sync."""
-    node = nodes.get_node(node_name)
-    if node is None or not node.enabled:
-        raise NodeUnavailable(node_name)
-    client = nodes.get(node_name)
-    # 远程节点的 download_dir 是远端路径，绝不能在本地 makedirs（只会在 bot
-    # 机器上造垃圾目录）；路径作为 dir 选项传给 aria2，由它在自己那边创建
-    if kind == "tg_media":
-        # payload is Telegram's raw getFile() file_path (no bot token baked in —
-        # that's deliberate, see the comment where it's persisted in media.py).
-        # The token only gets stitched into the URI here, right before the RPC
-        # call, so it never touches the database.
-        subdir = storage.build_subdir(node.download_dir, file_name or payload, create=node.is_local)
-        return await client.add_uri(
-            to_download_uri(payload),
-            out=file_name,
-            download_dir=subdir,
-        )
-    if kind == "url":
-        subdir = storage.build_subdir(node.download_dir, file_name or payload, create=node.is_local)
-        return await client.add_uri(payload, download_dir=subdir)
-    if kind == "magnet":
-        return await client.add_magnet(payload, download_dir=node.download_dir)
-    if kind == "metalink":
-        return await client.add_metalink(payload, download_dir=node.download_dir)
-    if kind == "torrent":
-        # add_torrent 读 bot 本地的种子副本、以 base64 走 RPC 传给目标
-        # aria2 —— 不要求目标节点能访问这个文件路径，天然跨节点
-        return await client.add_torrent(payload, download_dir=node.download_dir)
-    raise ValueError(f"unknown source kind: {kind}")
-
-
 @router.callback_query(F.data.startswith("pending:"))
 async def handle_pending(query: CallbackQuery, repo, nodes, task_manager=None):
     _, action, token = query.data.split(":", 2)
@@ -423,7 +389,7 @@ async def handle_pending(query: CallbackQuery, repo, nodes, task_manager=None):
         return
 
     try:
-        gid = await _add_source(nodes, pending.node, pending.kind, pending.payload, pending.file_name)
+        gid = await add_source(nodes, pending.node, pending.kind, pending.payload, pending.file_name)
     except ValueError:
         await query.answer("未知任务类型", show_alert=True)
         return
@@ -517,7 +483,7 @@ async def _handle_batch_start(query: CallbackQuery, repo, nodes, task_manager, *
             skipped += 1
             continue
         try:
-            gid = await _add_source(nodes, claimed.node, claimed.kind, claimed.payload, claimed.file_name)
+            gid = await add_source(nodes, claimed.node, claimed.kind, claimed.payload, claimed.file_name)
         except Exception:
             log.exception("batch start failed for token %s", claimed.token)
             skipped += 1
@@ -629,7 +595,7 @@ async def _task_action(query: CallbackQuery, repo, nodes, task_manager, action: 
             await query.answer(f"⛔ {refusal}"[:200], show_alert=True)
             return
         try:
-            new_gid = await _add_source(nodes, row["node"], row["source_type"], payload, row["file_name"])
+            new_gid = await add_source(nodes, row["node"], row["source_type"], payload, row["file_name"])
         except Exception:
             log.exception("retry failed for task %s", row["id"])
             await query.answer("重试失败，请稍后再试。", show_alert=True)
