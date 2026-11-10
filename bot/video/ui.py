@@ -90,13 +90,6 @@ def video_card(row, job):
     return "\n".join(lines)
 
 
-def accounts_keyboard(admin=False):
-    rows = []
-    for platform, label in (("bilibili", "B站"), ("douyin", "抖音"), ("xhs", "小红书")):
-        rows.append([Button(text="🔑 " + label, callback_data=f"vacc:platform:{platform}")])
-    return Markup(inline_keyboard=rows)
-
-
 def login_keyboard(login_id):
     return Markup(
         inline_keyboard=[
