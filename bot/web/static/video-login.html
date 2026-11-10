@@ -1,0 +1,11 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>平台扫码登录</title>
+<style>body{font:16px system-ui;background:#101827;color:#e5eaf3;margin:0;display:grid;place-items:center;min-height:100vh}main{padding:28px;max-width:420px;text-align:center;background:#1b273b;border-radius:20px}img{width:240px;height:240px;object-fit:contain;background:white;border-radius:12px}button{font:inherit;border:0;border-radius:9px;padding:12px;margin:6px;cursor:pointer}p{line-height:1.7;color:#b5c5dc}</style>
+<main><h1>📱 平台扫码登录</h1><p id="status">正在验证专属链接…</p><img id="qr" hidden alt="平台登录二维码"><p>使用对应平台官方 App 扫码并确认。此页面只能管理当前登录会话。</p><button id="refresh">🔄 刷新二维码</button><button id="cancel">取消登录</button></main>
+<script>
+let stopped=false, shown=false;
+async function api(path,body){const r=await fetch('/api/video-login/'+path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined,cache:'no-store'});if(!r.ok){const e=await r.json();throw Error(e.detail||'请求失败')}return r.json()}
+async function poll(){if(stopped)return;try{const s=await api('status');document.querySelector('#status').textContent=s.platform+' · '+s.message;if(s.qr_ready&&!shown){document.querySelector('#qr').src='/api/video-login/qr?t='+Date.now();document.querySelector('#qr').hidden=false;shown=true}if(['success','expired','cancelled','failed','verification_required'].includes(s.state)){document.querySelector('#qr').hidden=true;stopped=true;return}setTimeout(poll,2000)}catch(e){document.querySelector('#status').textContent=e.message;stopped=true}}
+async function action(name){try{await api(name,{});shown=false;document.querySelector('#qr').hidden=true;stopped=false;poll()}catch(e){document.querySelector('#status').textContent=e.message}}
+document.querySelector('#refresh').onclick=()=>action('refresh');document.querySelector('#cancel').onclick=()=>action('cancel');
+(async()=>{try{const token=location.hash.slice(1);history.replaceState(null,'','/video-login');if(token)await api('exchange',{token});poll()}catch(e){document.querySelector('#status').textContent=e.message}})();
+</script></html>

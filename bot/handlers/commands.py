@@ -105,6 +105,13 @@ async def cmd_pause(message: Message, command: CommandObject, repo, nodes):
     if row is None or not row["gid"]:
         await message.reply("用法: /pause <任务id>")
         return
+    if dict(row).get("backend") == "video":
+        if row["user_id"] != message.from_user.id and not settings.is_admin(message.from_user.id):
+            await message.reply("⛔ 只能操作自己的视频任务")
+            return
+        await repo.video_command(row["gid"], "pause")
+        await message.reply("视频操作已排队")
+        return
     try:
         await _client_for(nodes, row).pause(row["gid"])
     except NodeUnavailable:
@@ -120,6 +127,13 @@ async def cmd_resume(message: Message, command: CommandObject, repo, nodes):
     if row is None or not row["gid"]:
         await message.reply("用法: /resume <任务id>")
         return
+    if dict(row).get("backend") == "video":
+        if row["user_id"] != message.from_user.id and not settings.is_admin(message.from_user.id):
+            await message.reply("⛔ 只能操作自己的视频任务")
+            return
+        await repo.video_command(row["gid"], "resume")
+        await message.reply("视频操作已排队")
+        return
     try:
         await _client_for(nodes, row).resume(row["gid"])
     except NodeUnavailable:
@@ -134,6 +148,13 @@ async def cmd_cancel(message: Message, command: CommandObject, repo, nodes):
     row = await _resolve_task(command, repo)
     if row is None or not row["gid"]:
         await message.reply("用法: /cancel <任务id>")
+        return
+    if dict(row).get("backend") == "video":
+        if row["user_id"] != message.from_user.id and not settings.is_admin(message.from_user.id):
+            await message.reply("⛔ 只能操作自己的视频任务")
+            return
+        await repo.video_command(row["gid"], "cancel")
+        await message.reply("视频操作已排队")
         return
     try:
         await _client_for(nodes, row).remove(row["gid"])

@@ -1,6 +1,9 @@
 """Image deployment startup checks; never print credentials or remote bodies."""
 import asyncio
+import importlib.util
 import os
+import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -25,6 +28,15 @@ async def check() -> None:
             raise RuntimeError(f"目录不可写：{directory}，请检查 UID/GID 1000 的挂载权限") from None
     if not os.access(".env", os.W_OK):
         raise RuntimeError(".env 不可写，请检查挂载文件及 UID/GID 1000 的权限")
+
+    if settings.video_enabled:
+        missing = [name for name in ("yt_dlp", "you_get", "cryptography", "qrcode") if importlib.util.find_spec(name) is None]
+        missing += [name for name in ("ffmpeg", "ffprobe") if not shutil.which(name)]
+        if not Path(sys.executable).with_name("deno").is_file() and not shutil.which("deno") and not shutil.which("node"):
+            missing.append("Deno / Node.js")
+        if missing:
+            raise RuntimeError("视频组件缺失：" + ", ".join(missing) + "；源码部署安装 requirements-video.txt，或使用视频镜像")
+        print("视频组件检查通过；扫码服务需单独启动 video-login profile", flush=True)
 
     from bot.core.aria2_client import Aria2Client
     client = Aria2Client(settings.aria2_rpc, settings.aria2_secret)

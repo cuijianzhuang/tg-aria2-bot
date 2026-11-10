@@ -22,6 +22,10 @@ jobs:
         include:
           - image: bot
             dockerfile: Dockerfile
+            target: bot
+          - image: login
+            dockerfile: Dockerfile
+            target: login
           - image: ariang
             dockerfile: Dockerfile.ariang
     steps:
@@ -49,6 +53,7 @@ jobs:
         with:
           context: .
           file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

@@ -31,6 +31,13 @@ trap 'rm -f "$lock_file"' EXIT
 printf 'BOT_IMAGE=%s\nARIANG_IMAGE=%s\n' "$bot_digest" "$ariang_digest" > "$lock_file"
 compose() { docker compose --env-file .env --env-file "$lock_file" -f docker-compose.images.yml "$@"; }
 compose config --quiet
+if compose config --services | grep -qx video-login; then
+  login_image="$repository/login:$version"
+  docker pull "$login_image" || die "扫码镜像尚未发布或不可读取：$login_image"
+  login_digest="$(docker image inspect "$login_image" --format '{{index .RepoDigests 0}}')"
+  [[ "$login_digest" == *@sha256:* ]] || die "无法解析扫码镜像摘要"
+  printf 'VIDEO_LOGIN_IMAGE=%s\n' "$login_digest" >> "$lock_file"
+fi
 compose pull
 
 mkdir -p data downloads aria2-config

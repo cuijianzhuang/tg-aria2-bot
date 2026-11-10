@@ -68,6 +68,15 @@ class Settings(BaseSettings):
     rss_max_feeds_per_user: int = 5
     # 机器人 10 分钟内被启动 3 次以上，说明在反复崩溃重启，通知管理员
     restart_alert_enabled: bool = True
+    video_enabled: bool = False
+    video_concurrency: int = 2
+    video_probe_timeout: int = 45
+    video_probe_concurrency: int = 2
+    video_public_url: str = ""
+    video_login_enabled: bool = False
+    video_cookie_file_bilibili: str = ""
+    video_cookie_file_douyin: str = ""
+    video_cookie_file_xhs: str = ""
     proxy_url: str | None = None
 
     db_path: str = "/app/data/tasks.db"

@@ -13,6 +13,13 @@
 添加下载协议或修改磁力解析时，修改 sources 并分别验证 Telegram、RSS 入口。
 下载源 URL 与 RSS 订阅地址是不同边界：后者仍只允许 HTTP(S)，并保留内网地址检查。
 
+## 视频模块
+
+`bot/video/` 隔离解析器进程、凭据和扫码 worker；`bot/db/video.py` 集中视频 SQL，
+作为 TaskRepo 的领域 mixin，复用相同数据库。Telegram 和 Web 调用服务/仓库公共接口，
+不相互调用 handler。凭据、媒体签名链接、解析器原始输出不得记录到日志。
+视频测试安装 `requirements-video.txt`，真实浏览器验证另安装 `requirements-login.txt`。
+
 ## 修改范围与格式
 
 Python 最低兼容 3.11，缩进 4 个空格；新公共函数提供类型注解和职责说明。

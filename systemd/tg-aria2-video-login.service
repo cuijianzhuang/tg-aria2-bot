@@ -1,0 +1,16 @@
+[Unit]
+Description=Video platform QR login worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={{WORKDIR}}
+EnvironmentFile={{WORKDIR}}/.env
+ExecStart={{WORKDIR}}/.venv/bin/python -m bot.video.login_worker
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

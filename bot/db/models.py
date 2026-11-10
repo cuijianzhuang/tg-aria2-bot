@@ -123,6 +123,7 @@ CREATE TABLE IF NOT EXISTS user_prefs (
 # already-deployed one needs these run explicitly. Each is safe to re-run; repo.py
 # swallows the "duplicate column" error SQLite raises on a repeat.
 MIGRATIONS = [
+    "ALTER TABLE tasks ADD COLUMN backend TEXT NOT NULL DEFAULT 'aria2'",
     "ALTER TABLE tasks ADD COLUMN gofile_link TEXT",
     "ALTER TABLE tasks ADD COLUMN payload TEXT",
     # hot query paths: WHERE status = ? (lists, counts, poll loop) and

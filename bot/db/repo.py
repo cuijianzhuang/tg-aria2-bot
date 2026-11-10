@@ -7,9 +7,10 @@ import aiosqlite
 
 from bot.core.pending_tasks import TTL_SECONDS, PendingTask
 from bot.db.models import MIGRATIONS, SCHEMA
+from bot.db.video import VIDEO_SCHEMA, VideoRepoMixin
 
 
-class TaskRepo:
+class TaskRepo(VideoRepoMixin):
     def __init__(self, db_path: str):
         self._db_path = db_path
         self._conn: aiosqlite.Connection | None = None
@@ -24,6 +25,7 @@ class TaskRepo:
         await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.executescript(SCHEMA)
+        await self._conn.executescript(VIDEO_SCHEMA)
         for migration in MIGRATIONS:
             try:
                 await self._conn.execute(migration)

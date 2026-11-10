@@ -262,7 +262,7 @@ class TaskManager:
         rows = await self._repo.get_unfinished(node=node.name)
         for row in rows:
             gid = row["gid"]
-            if not gid:
+            if not gid or dict(row).get("backend") == "video":
                 continue
             download = downloads.get(gid)
             if download is None:
@@ -525,6 +525,10 @@ class TaskManager:
         await self._repo.retry_task(row["id"], new_gid)
         self._forget_progress(gid)
 
+    async def complete_local_video(self, row, download):
+        """Apply the same completion pipelines to a verified local video file."""
+        await self._handle_complete(row, download, node_is_local=True)
+
     async def _handle_complete(self, row, download, *, node_is_local: bool):
         gid = row["gid"]
         self._forget_progress(gid)
@@ -676,6 +680,10 @@ class TaskManager:
         self._held[gid] = now + MENU_HOLD_SECONDS
         self._watched[gid] = now + settings.progress_watch_seconds
 
+    def is_task_menu_open(self, gid: str) -> bool:
+        """Let other task backends respect the same interaction hold window."""
+        return self._is_held(gid)
+
     def _is_watched(self, gid: str, now: float) -> bool:
         return self._watched.get(gid, 0.0) > now
 
@@ -794,5 +802,5 @@ class TaskManager:
                 continue
             for row in rows:
                 gid = row["gid"]
-                if gid and gid not in remote:
+                if gid and dict(row).get("backend") != "video" and gid not in remote:
                     await self._mark_lost(row, gid, is_local=node.is_local)
