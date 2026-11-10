@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1
-FROM python:3.14-slim@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f
+FROM denoland/deno:bin@sha256:b507583d3c68ba69f3ed2ce5969ae5b8b70f43421c781279c7aea06435263543 AS deno
+FROM mwader/static-ffmpeg@sha256:f698cee4f6d63a0ee5a80df40b093aae96a80c06e27836736b2347208bd13dc2 AS ffmpeg
+FROM python:3.14-slim@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f AS runtime
 
 WORKDIR /app
 
@@ -29,3 +31,25 @@ RUN groupadd -g 1000 app && useradd -u 1000 -g app -m -d /home/app app \
 USER app
 
 CMD ["python", "-m", "bot.main"]
+
+# Optional QR browser worker; the ordinary image does not contain Chromium.
+FROM runtime AS login
+USER root
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -f /run/secrets/proxy_ca ]; then export PIP_CERT=/run/secrets/proxy_ca NODE_EXTRA_CA_CERTS=/run/secrets/proxy_ca; fi; \
+    apt-get update && apt-get install -y --no-install-recommends libatomic1 && \
+    pip install --no-cache-dir playwright==1.65.0 && \
+    python -m playwright install --with-deps chromium --only-shell && chmod -R a+rX /opt/playwright && rm -rf /var/lib/apt/lists/*
+USER app
+CMD ["python", "-m", "bot.video.login_worker"]
+
+# Keep source Docker deployments building the regular bot image by default.
+FROM runtime AS bot
+USER root
+# Copy the large static tools once, after Python installation. The QR worker
+# inherits the smaller runtime and does not need download/merge binaries.
+RUN --mount=from=deno,source=/deno,target=/tmp/deno \
+    --mount=from=ffmpeg,source=/,target=/tmp/fftools \
+    cp /tmp/deno /tmp/fftools/ffmpeg /tmp/fftools/ffprobe /usr/local/bin/
+USER app

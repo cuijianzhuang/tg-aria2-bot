@@ -99,6 +99,21 @@ services:
     networks: [internal]
     profiles: ["web"]
 
+  video-login:
+    environment:
+      DB_PATH: /app/data/tasks.db
+    build:
+      context: .
+      target: login
+    restart: unless-stopped
+    command: ["python", "-m", "bot.video.login_worker"]
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    logging: *default-logging
+    networks: [internal]
+    profiles: ["video-login"]
+
 networks:
   internal:
 

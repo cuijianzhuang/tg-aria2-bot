@@ -4,5 +4,7 @@
 !bot
 !requirements.txt
 !requirements.lock
+!requirements-video.txt
+!requirements-login.txt
 !ariang-nginx.conf
 bot/**/__pycache__

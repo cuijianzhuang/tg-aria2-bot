@@ -15,6 +15,7 @@ from bot.db.repo import TaskRepo
 from bot.handlers import access, admin, callbacks, commands, files, links, media, ops, settings_menu
 from bot.handlers import rss as rss_handler
 from bot.handlers import upgrade as upgrade_handler
+from bot.handlers import video as video_handler
 from bot.middlewares.auth import AuthMiddleware
 
 BOT_COMMANDS = [
@@ -24,6 +25,8 @@ BOT_COMMANDS = [
     BotCommand(command="stats", description="📊 下载统计"),
     BotCommand(command="rss", description="📡 RSS 订阅自动下载"),
     BotCommand(command="quota", description="📏 我的额度和今日用量"),
+    BotCommand(command="video", description="🎬 解析视频网页"),
+    BotCommand(command="videoaccounts", description="🔑 视频平台账号"),
     BotCommand(command="settings", description="⚙️ 设置与管理"),
 ]
 
@@ -55,6 +58,10 @@ async def main():
     except Exception:
         log.warning("could not apply max_concurrent=%s to aria2 (is it up yet?)", settings.max_concurrent)
     task_manager = TaskManager(bot, nodes, repo)
+    video_worker = None
+    if settings.video_enabled:
+        from bot.video.worker import VideoWorker
+        video_worker = VideoWorker(bot, repo, task_manager)
 
     dp = Dispatcher()
     dp.message.middleware(AuthMiddleware())
@@ -68,6 +75,7 @@ async def main():
     dp.include_router(rss_handler.router)
     dp.include_router(files.router)
     dp.include_router(callbacks.router)
+    dp.include_router(video_handler.router)
     dp.include_router(links.router)
     dp.include_router(media.router)
 
@@ -78,6 +86,7 @@ async def main():
     dp["repo"] = repo
     # 设置菜单里"立即清理一次"需要直接调用 task_manager.run_cleanup_once()
     dp["task_manager"] = task_manager
+    dp["video_worker"] = video_worker
 
     await bot.set_my_commands(BOT_COMMANDS)
     await task_manager.reconcile_on_startup()
@@ -92,6 +101,11 @@ async def main():
         asyncio.create_task(expiry.expiry_loop(bot, repo, nodes)),
         asyncio.create_task(rss.rss_loop(bot, repo, nodes, task_manager)),
     ]
+    if video_worker:
+        background.append(asyncio.create_task(video_worker.run()))
+    if settings.video_login_enabled:
+        from bot.video.login_notify import notify_loop
+        background.append(asyncio.create_task(notify_loop(bot, repo)))
     if health.record_start():
         background.append(asyncio.create_task(health.alert_restart_loop(bot)))
 
@@ -100,6 +114,7 @@ async def main():
     finally:
         for task in background:
             task.cancel()
+        await asyncio.gather(*background, return_exceptions=True)
         task_manager.stop()
         await nodes.close()
         await repo.close()

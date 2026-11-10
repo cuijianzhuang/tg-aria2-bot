@@ -559,6 +559,11 @@ async def _task_action(query: CallbackQuery, repo, nodes, task_manager, action: 
 
     _attend(task_manager, gid, submenu=action in _SUBMENU_ACTIONS)
 
+    if dict(row).get("backend") == "video":
+        from bot.handlers.video_tasks import handle_video_task
+        await handle_video_task(query, repo, task_manager, row, action, back)
+        return
+
     # 所有 RPC 操作走任务自己的归属节点；节点被删/停用时 aria2 为 None，
     # 查看类操作降级为纯 DB 展示，操作类直接提示
     try:
@@ -817,6 +822,10 @@ async def bulk_action(query: CallbackQuery, repo, nodes, task_manager=None):
         if not _can_manage(query, row["user_id"]):
             continue  # bulk ops only touch your own tasks (admins touch all)
         try:
+            if dict(row).get("backend") == "video" and action in ("pause", "resume"):
+                await repo.video_command(gid, action)
+                changed += 1
+                continue
             aria2 = _client_for_row(nodes, row)  # 每行按自己的归属节点路由
             if action == "pause":
                 await aria2.pause(gid)

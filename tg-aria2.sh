@@ -14,6 +14,8 @@
 #       --web-port PORT        Web 后台端口（默认 8080，被占用自动顺延）
 #       --no-web               不装 Web 后台和 AriaNg
 #       --with-rclone          顺带在宿主机装 rclone（网盘上传）
+#       --with-video           启用视频下载（FFmpeg、双解析器、Deno）
+#       --with-video-login     同时启用二维码与独立 Chromium 服务
 #       --botapi-from-source   bare 模式：源码编译 telegram-bot-api（不用 docker）
 #   web-install             只安装 / 修复 Web 管理后台（+ AriaNg）
 #   update [选项]           升级到最新版本：备份 → 拉代码 → 应用 → 健康检查 → 失败自动回滚
@@ -193,7 +195,7 @@ compose() { docker compose "$@"; }
 
 # 逻辑服务名统一用 docker compose 的服务名；bare 模式映射到 systemd 单元或
 # （混合模式下的）telegram-bot-api 独立容器
-ALL_SERVICES=(bot web aria2 telegram-bot-api ariang)
+ALL_SERVICES=(bot web aria2 telegram-bot-api ariang video-login)
 
 unit_exists() { [[ -f "/etc/systemd/system/$1.service" || -f "/lib/systemd/system/$1.service" || -f "/etc/init.d/$1" ]]; }
 
@@ -202,6 +204,7 @@ bare_target() {
   case "$1" in
     bot) unit_exists tg-aria2-bot && echo systemd:tg-aria2-bot ;;
     web) unit_exists tg-aria2-web && echo systemd:tg-aria2-web ;;
+    video-login) unit_exists tg-aria2-video-login && echo systemd:tg-aria2-video-login ;;
     ariang) unit_exists tg-ariang && echo systemd:tg-ariang ;;
     aria2)
       local u
@@ -360,7 +363,7 @@ show_status() {
 
 I_MODE=""; I_TOKEN=""; I_API_ID=""; I_API_HASH=""; I_ALLOWED=""
 I_DOWNLOAD_DIR="./downloads"; I_ADMIN_PASSWORD=""; I_WEB_PORT=""
-I_NO_WEB=0; I_RCLONE=0; I_FROM_SOURCE=0
+I_NO_WEB=0; I_RCLONE=0; I_FROM_SOURCE=0; I_VIDEO=0; I_VIDEO_LOGIN=0
 I_PASSWORD_GENERATED=0
 CURRENT_STEP=""
 
@@ -408,6 +411,8 @@ parse_install_args() {
       --web-port) I_WEB_PORT="$2"; shift 2 ;;
       --no-web) I_NO_WEB=1; shift ;;
       --with-rclone) I_RCLONE=1; shift ;;
+      --with-video) I_VIDEO=1; shift ;;
+      --with-video-login) I_VIDEO=1; I_VIDEO_LOGIN=1; shift ;;
       --botapi-from-source|--build-botapi-from-source) I_FROM_SOURCE=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "未知参数: $1（$0 --help 查看用法）" ;;
@@ -484,6 +489,8 @@ install_prepare_env() {
   env_set ARIA2_SECRET "$secret"
   env_set ALLOWED_USER_IDS "$I_ALLOWED"
   env_set ADMIN_PASSWORD "$I_ADMIN_PASSWORD"
+  [[ "$I_VIDEO" -eq 0 ]] || env_set VIDEO_ENABLED true
+  [[ "$I_VIDEO_LOGIN" -eq 0 ]] || env_set VIDEO_LOGIN_ENABLED true
   [[ -n "$I_WEB_PORT" ]] && env_set WEB_PORT "$I_WEB_PORT"
 
   if [[ "$I_MODE" == "docker" ]]; then
@@ -494,6 +501,11 @@ install_prepare_env() {
     # 下面两个只给 docker compose 读（变量插值 / 默认启用的 profile）
     env_set HOST_DOWNLOAD_DIR "$I_DOWNLOAD_DIR"
     if [[ "$I_NO_WEB" -eq 1 ]]; then env_set COMPOSE_PROFILES ""; else env_set COMPOSE_PROFILES "web"; fi
+    if [[ "$(env_get VIDEO_LOGIN_ENABLED)" == "true" ]]; then
+      local video_profiles
+      video_profiles="$(env_get COMPOSE_PROFILES)"
+      env_set COMPOSE_PROFILES "${video_profiles:+${video_profiles},}video-login"
+    fi
   else
     # telegram-bot-api 端口：BOT_API_PORT 环境变量 > .env 已有的 > 8081；
     # 被占用时 bare_step_botapi 会再自动换
@@ -723,12 +735,49 @@ ensure_venv() {
   fi
 }
 
+install_video_runtime() {
+  [[ -x "$REPO_DIR/.venv/bin/deno" ]] && return 0
+  local arch archive checksum runtime_dir
+  case "$(uname -m)" in
+    x86_64) arch=x86_64; checksum=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609 ;;
+    aarch64|arm64) arch=aarch64; checksum=d49596c20b9788cf8f5d8ddf644103d4bde56ed239753f0bdb92ba9361d51905 ;;
+    *) die "视频运行时仅提供 Linux amd64/arm64；可改用兼容的容器环境" ;;
+  esac
+  pkg_install curl unzip ca-certificates || die "无法安装视频运行时下载工具"
+  archive="deno-${arch}-unknown-linux-gnu.zip"
+  runtime_dir="$(mktemp -d)"
+  if ! curl -fsSL --retry 2 "https://github.com/denoland/deno/releases/download/v2.9.8/$archive" -o "$runtime_dir/$archive"; then
+    rm -rf "$runtime_dir"
+    die "Deno 下载失败，请检查 GitHub 连通性后重试"
+  fi
+  if ! (cd "$runtime_dir" && printf '%s  %s\n' "$checksum" "$archive" | sha256sum -c - >/dev/null); then
+    rm -rf "$runtime_dir"
+    die "Deno 校验失败，未安装"
+  fi
+  unzip -q "$runtime_dir/$archive" -d "$runtime_dir"
+  install -m 755 "$runtime_dir/deno" "$REPO_DIR/.venv/bin/deno"
+  rm -rf "$runtime_dir"
+}
+
 bare_step_bot() {
   step "安装机器人（Python 虚拟环境 + systemd 服务）"
   ensure_venv
   "$REPO_DIR/.venv/bin/pip" install -q --disable-pip-version-check --upgrade pip
   "$REPO_DIR/.venv/bin/pip" install -q --disable-pip-version-check -r requirements.txt
-  "$REPO_DIR/.venv/bin/python" -c 'import bot.main' \
+  if [[ "$(env_get VIDEO_ENABLED)" == "true" ]]; then
+    pkg_install ffmpeg || die "无法安装 ffmpeg，请先在服务器安装后重试"
+    "$REPO_DIR/.venv/bin/pip" install -q -r requirements-video.txt
+    install_video_runtime
+  fi
+  if [[ "$(env_get VIDEO_LOGIN_ENABLED)" == "true" ]]; then
+    pkg_install libatomic1 || pkg_install libatomic || die "无法安装 Playwright Node 所需的 libatomic"
+    "$REPO_DIR/.venv/bin/pip" install -q -r requirements-login.txt
+    "$REPO_DIR/.venv/bin/python" -m playwright install --with-deps chromium --only-shell
+    render_unit systemd/tg-aria2-video-login.service > /etc/systemd/system/tg-aria2-video-login.service
+    systemctl daemon-reload
+    systemctl enable --now tg-aria2-video-login >/dev/null 2>&1
+  fi
+  "$REPO_DIR/.venv/bin/python" -c 'import bot.main'  \
     || die "机器人代码导入失败（见上方报错），通常是 .env 配置有误或依赖没装全"
   render_unit systemd/tg-aria2-bot.service > /etc/systemd/system/tg-aria2-bot.service
   systemctl daemon-reload
@@ -850,6 +899,8 @@ cmd_web_install() {
     if [[ -z "$(env_get ADMIN_PASSWORD)" ]]; then
       I_ADMIN_PASSWORD="$(rand_hex 12)"; I_PASSWORD_GENERATED=1
       env_set ADMIN_PASSWORD "$I_ADMIN_PASSWORD"
+  [[ "$I_VIDEO" -eq 0 ]] || env_set VIDEO_ENABLED true
+  [[ "$I_VIDEO_LOGIN" -eq 0 ]] || env_set VIDEO_LOGIN_ENABLED true
     fi
     step "启动 Web 后台容器"
     compose up -d --build web ariang
@@ -1068,7 +1119,7 @@ apply_docker() {
 
 bare_units() {
   local u
-  for u in tg-aria2-bot tg-aria2-web; do
+  for u in tg-aria2-bot tg-aria2-web tg-aria2-video-login; do
     [[ -f "/etc/systemd/system/${u}.service" ]] && echo "$u"
   done
   return 0
@@ -1081,6 +1132,14 @@ apply_bare() {
     .venv/bin/pip install -q --disable-pip-version-check -r requirements.txt || return 1
   else
     log "requirements.txt 无变化，跳过依赖安装"
+  fi
+  if [[ "$(env_get VIDEO_ENABLED)" == "true" ]]; then
+    .venv/bin/pip install -q -r requirements-video.txt || return 1
+    install_video_runtime || return 1
+    if [[ "$(env_get VIDEO_LOGIN_ENABLED)" == "true" ]]; then
+      .venv/bin/pip install -q -r requirements-login.txt || return 1
+      .venv/bin/python -m playwright install --with-deps chromium --only-shell || return 1
+    fi
   fi
   # 重启前先校验新代码能 import，过不了直接回滚，服务一秒都不中断
   log "校验新代码（编译 + 导入）"

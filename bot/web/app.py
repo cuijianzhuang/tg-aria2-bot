@@ -20,6 +20,7 @@ from bot.web.auth import (
     rotate_secret,
     verify_session_token,
 )
+from bot.web.video import register as register_video
 
 ENV_PATH = ".env"
 
@@ -183,17 +184,30 @@ async def list_tasks(limit: int = 20, offset: int = 0, status: str | None = None
     total = await state["repo"].count_tasks(status)
     items = [dict(row) for row in rows]
 
-    active_gids = [t["gid"] for t in items if t["status"] == "ACTIVE" and t["gid"]]
+    active_gids = [t["gid"] for t in items if t["status"] == "ACTIVE" and t["gid"] and t.get("backend") != "video"]
     if active_gids:
-        progress = await state["aria2"].get_progress_map()
+        try:
+            progress = await state["aria2"].get_progress_map()
+        except Exception:
+            progress = {}
         for t in items:
             t["progress"] = progress.get(t["gid"])
 
+    for item in items:
+        if item.get("backend") == "video":
+            job = await state["repo"].video_job(item["id"])
+            if job:
+                item["progress"] = {"percent": round(min(100, job["completed"] / job["total"] * 100), 1) if job["total"] else 0,
+                    "speed": job["phase"], "completed": job["completed"], "total": job["total"], "indeterminate": not bool(job["total"])}
     return {"items": items, "total": total}
 
 
 @app.post("/api/tasks/{task_id}/pause", dependencies=[Depends(require_login)])
 async def pause_task(task_id: int):
+    row = await state["repo"].get_by_id(task_id)
+    if row is not None and dict(row).get("backend") == "video":
+        await state["repo"].video_command(row["gid"], "pause")
+        return {"ok": True}
     gid = await _gid_for_task(task_id)
     await state["aria2"].pause(gid)
     return {"ok": True}
@@ -201,6 +215,10 @@ async def pause_task(task_id: int):
 
 @app.post("/api/tasks/{task_id}/resume", dependencies=[Depends(require_login)])
 async def resume_task(task_id: int):
+    row = await state["repo"].get_by_id(task_id)
+    if row is not None and dict(row).get("backend") == "video":
+        await state["repo"].video_command(row["gid"], "resume")
+        return {"ok": True}
     gid = await _gid_for_task(task_id)
     await state["aria2"].resume(gid)
     return {"ok": True}
@@ -208,6 +226,10 @@ async def resume_task(task_id: int):
 
 @app.post("/api/tasks/{task_id}/cancel", dependencies=[Depends(require_login)])
 async def cancel_task(task_id: int):
+    row = await state["repo"].get_by_id(task_id)
+    if row is not None and dict(row).get("backend") == "video":
+        await state["repo"].video_command(row["gid"], "cancel")
+        return {"ok": True}
     gid = await _gid_for_task(task_id)
     await state["aria2"].remove(gid)
     await state["repo"].update_status(gid, "CANCELLED")
@@ -371,5 +393,8 @@ async def restart_service(body: RestartRequest):
 async def me():
     return {"ok": True}
 
+
+
+register_video(app, state, require_login)
 
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
