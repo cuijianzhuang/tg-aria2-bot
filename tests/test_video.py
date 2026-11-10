@@ -60,6 +60,20 @@ class TestVideoAdapters(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             download_args("you-get", url, "/tmp/video", "--bad")
 
+    def test_real_yt_dlp_template_handles_unknown_progress_fields(self):
+        from yt_dlp import YoutubeDL
+
+        args = download_args("yt-dlp", "https://example.com/video", "/tmp/out")
+        template = args[args.index("--progress-template") + 1]
+        native = {"downloaded_bytes": 1024, "total_bytes": None, "filename": "media.f137.mp4", "status": "downloading"}
+        with YoutubeDL({"quiet": True}) as downloader:
+            rendered = downloader.evaluate_outtmpl(template, {"progress": native})
+        result = progress_event(rendered)
+        self.assertEqual(result["downloaded"], 1024)
+        self.assertIsNone(result["total"])
+        self.assertEqual(result["filename"], "media.f137.mp4")
+        self.assertNotIn(":NA", rendered)
+
     def test_progress_and_unknown_output(self):
         self.assertEqual(progress_event(PROGRESS_MARKER + '{"downloaded":23}')["downloaded"], 23)
         for line in ("normal output", PROGRESS_MARKER + "{bad}", PROGRESS_MARKER + '{"downloaded":null}'):

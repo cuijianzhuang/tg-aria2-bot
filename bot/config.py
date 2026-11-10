@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     video_enabled: bool = False
     video_concurrency: int = 2
     video_probe_timeout: int = 45
+    video_stall_timeout: int = 180
     video_probe_concurrency: int = 2
     video_public_url: str = ""
     video_login_enabled: bool = False

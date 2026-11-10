@@ -13,6 +13,7 @@ from bot.core.aria2_client import Download, File
 from bot.core.expiry import safe_target
 from bot.video.accounts import CredentialVault, account_cookies
 from bot.video.backends import download_args, progress_event
+from bot.video.errors import download_error_hint
 from bot.video.process import capture, signal_group, spawn, terminate
 from bot.video.services import get_resolver
 
@@ -197,7 +198,7 @@ class VideoWorker:
                 if latest is None or latest["status"] in ("PAUSED", "CANCELLED"):
                     return
                 await self.repo.update_file_name(gid, info.title)
-                await self.repo.video_update(row["id"], phase="下载中", total=info.size or 0)
+                await self.repo.video_update(row["id"], phase="等待视频源连接", total=info.size or 0)
                 process = await spawn(
                     download_args(
                         row["parser"], row["payload"], directory, row["quality"], cookie_file, settings.proxy_url
@@ -209,6 +210,10 @@ class VideoWorker:
                 accounted = row["completed"]
                 buffer = ""
                 merging = False
+                last_progress = time.monotonic()
+                last_completed = accounted
+                error_hint = None
+                stream_totals = {}
                 while True:
                     try:
                         chunk = await asyncio.wait_for(process.stdout.read(8192), 1)
@@ -223,6 +228,7 @@ class VideoWorker:
                         lines = buffer.split("\n")
                         buffer = lines.pop()
                         for line in lines:
+                            error_hint = download_error_hint(line) or error_hint
                             if "[Merger]" in line or "Merging" in line or "Merging video" in line:
                                 merging = True
                                 await self.repo.video_update(row["id"], phase="合并中")
@@ -232,6 +238,14 @@ class VideoWorker:
                             if event:
                                 key = str(event.get("filename", "stream"))
                                 streams[key] = max(streams.get(key, 0), int(event["downloaded"]))
+                                total = event.get("total") or event.get("estimate")
+                                if isinstance(total, (int, float)) and 0 < total < 2**63:
+                                    stream_totals[key] = int(total)
+                                    await self.repo.video_update(
+                                        row["id"], total=max(info.size or 0, sum(stream_totals.values()))
+                                    )
+                                if event["downloaded"] > 0 and not merging:
+                                    await self.repo.video_update(row["id"], phase="下载中")
                     if row["parser"] == "you-get" and not merging:
                         measured = sum(
                             p.stat().st_size for p in directory.rglob("*") if p.is_file() and not p.is_symlink()
@@ -247,6 +261,19 @@ class VideoWorker:
                     if latest is None or latest["status"] == "CANCELLED":
                         await terminate(process)
                         return
+                    now = time.monotonic()
+                    if latest["status"] == "PAUSED" or completed > last_completed:
+                        last_progress = now
+                    last_completed = completed
+                    if (
+                        not merging
+                        and latest["status"] == "ACTIVE"
+                        and now - last_progress >= max(1, settings.video_stall_timeout)
+                    ):
+                        await terminate(process)
+                        raise ValueError(
+                            error_hint or "视频源连续无下载进度，已停止任务；请检查服务器网络后重试或切换解析器"
+                        )
                     if limits.max_task_bytes and completed > limits.max_task_bytes:
                         await terminate(process)
                         from bot.core.compress import remove_path
@@ -259,12 +286,13 @@ class VideoWorker:
                         await self.repo.update_status(gid, "PAUSED")
                         await self.repo.video_update(row["id"], phase="每日额度已用完；次日可继续")
                     await self.report(latest)
+                error_hint = download_error_hint(buffer) or error_hint
                 await process.wait()
                 latest = await self.repo.get_by_gid(gid)
                 if not latest or latest["status"] == "CANCELLED" or self.stopping:
                     return
                 if process.returncode:
-                    raise ValueError("下载或合并失败；可重试或重新扫码登录")
+                    raise ValueError(error_hint or "下载或合并失败；可重试或重新扫码登录")
                 if output:
                     candidate = Path(output)
                 else:

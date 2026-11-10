@@ -5,6 +5,8 @@ import contextlib
 import os
 import signal
 
+from bot.video.errors import download_error_hint
+
 
 async def spawn(args):
     return await asyncio.create_subprocess_exec(
@@ -44,7 +46,10 @@ async def capture(args, timeout=45, maximum=4 * 1024 * 1024):
         await process.wait()
         if process.returncode:
             # Output can contain signed URLs, account cookies and tokens.
-            raise ValueError("解析失败：站点不支持、需登录或服务暂不可用")
+            raise ValueError(
+                download_error_hint(result.decode("utf-8", errors="replace"))
+                or "解析失败：站点不支持、需登录或服务暂不可用"
+            )
         return result.decode("utf-8", errors="replace")
 
     try:
