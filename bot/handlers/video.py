@@ -9,10 +9,11 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from bot.config import settings
 from bot.core import quota, storage
+from bot.video.account_views import overview, platform_view, shared_summary
 from bot.video.accounts import CredentialVault, account_cookies, is_video_url, platform_for, validate_url
 from bot.video.backends import PARSERS
 from bot.video.services import get_resolver
-from bot.video.ui import MODES, accounts_keyboard, preview_card, preview_keyboard, video_card, video_task_keyboard
+from bot.video.ui import MODES, preview_card, preview_keyboard, video_card, video_task_keyboard
 
 router = Router(name="video")
 
@@ -130,11 +131,12 @@ async def video_preview_action(query: CallbackQuery, repo, task_manager):
 
 
 @router.message(Command("videoaccounts"))
-async def account_command(message: Message):
+async def account_command(message: Message, repo):
     if message.chat.type != "private":
         await message.reply("请在与机器人的私聊中管理平台账号")
         return
-    await message.reply("🔑 视频平台账号：个人账号默认优先；共享账号需主动选择。", reply_markup=accounts_keyboard())
+    text, keyboard = await overview(repo, message.from_user.id, settings.is_admin(message.from_user.id))
+    await message.reply(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("vacc:"))
@@ -144,14 +146,15 @@ async def account_action(query: CallbackQuery, repo):
         return
     parts = query.data.split(":")
     if parts[1] == "menu":
-        await query.message.answer("🔑 视频平台账号", reply_markup=accounts_keyboard())
+        text, keyboard = await overview(repo, query.from_user.id, settings.is_admin(query.from_user.id))
+        await query.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
         await query.answer()
         return
     if len(parts) != 3 or parts[2] not in ("bilibili", "douyin", "xhs"):
         return
     action, platform = parts[1:]
     admin = settings.is_admin(query.from_user.id)
-    if action in ("shared", "share", "unshare", "remove-shared") and not admin:
+    if action in ("shared", "share", "unshare", "remove-shared", "remove-shared-confirmed") and not admin:
         await query.answer("仅管理员可管理共享账号", show_alert=True)
         return
     if action in ("personal", "shared"):
@@ -179,34 +182,43 @@ async def account_action(query: CallbackQuery, repo):
                 ),
             )
     elif action in ("remove", "remove-shared"):
-        await repo.video_remove_account(platform, 0 if action == "remove-shared" else query.from_user.id)
-        await query.message.answer("已移除本机登录状态；正在执行的任务结束后清理临时凭据。")
+        shared = action == "remove-shared"
+        confirm = "remove-shared-confirmed" if shared else "remove-confirmed"
+        await query.message.answer(
+            "⚠️ 确认移除本机保存的" + ("共享" if shared else "个人") + "登录状态？正在执行的任务仍使用已有临时快照。",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="🗑 确认移除", callback_data=f"vacc:{confirm}:{platform}"),
+                        InlineKeyboardButton(text="返回", callback_data=f"vacc:platform:{platform}"),
+                    ]
+                ]
+            ),
+        )
+    elif action in ("remove-confirmed", "remove-shared-confirmed"):
+        await repo.video_remove_account(platform, 0 if action == "remove-shared-confirmed" else query.from_user.id)
+        text, keyboard = await platform_view(repo, query.from_user.id, platform, admin)
+        await query.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
     elif action in ("share", "unshare"):
         await repo.video_share(platform, action == "share")
+        text, keyboard = await platform_view(repo, query.from_user.id, platform, admin)
+        await query.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    elif action.startswith("use-"):
+        mode = action.removeprefix("use-")
+        if mode not in MODES:
+            return
+        if mode == "personal" and not await repo.video_account(platform, query.from_user.id):
+            await query.answer("请先登录个人账号", show_alert=True)
+            return
+        if mode == "shared" and not (await shared_summary(repo, platform))["shared"]:
+            await query.answer("共享账号尚未开放", show_alert=True)
+            return
+        await repo.video_preference(query.from_user.id, platform, mode)
+        text, keyboard = await platform_view(repo, query.from_user.id, platform, admin)
+        await query.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
     elif action == "platform":
-        from html import escape
-
-        personal = await repo.video_account(platform, query.from_user.id)
-        shared = await repo.video_account(platform, 0)
-        text = f"🔑 {platform}\n个人：{escape(personal['identity']) if personal else '未登录'}\n共享：{'已开放' if shared and shared['enabled'] else '未开放'}"
-        buttons = [
-            [
-                InlineKeyboardButton(text="📱 个人扫码登录", callback_data=f"vacc:personal:{platform}"),
-                InlineKeyboardButton(text="🗑 移除个人登录", callback_data=f"vacc:remove:{platform}"),
-            ]
-        ]
-        if admin:
-            buttons += [
-                [
-                    InlineKeyboardButton(text="👥 共享账号扫码", callback_data=f"vacc:shared:{platform}"),
-                    InlineKeyboardButton(text="🗑 移除共享", callback_data=f"vacc:remove-shared:{platform}"),
-                ],
-                [
-                    InlineKeyboardButton(text="✅ 开放共享", callback_data=f"vacc:share:{platform}"),
-                    InlineKeyboardButton(text="⛔ 关闭共享", callback_data=f"vacc:unshare:{platform}"),
-                ],
-            ]
-        await query.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+        text, keyboard = await platform_view(repo, query.from_user.id, platform, admin)
+        await query.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
     await query.answer()
 
 

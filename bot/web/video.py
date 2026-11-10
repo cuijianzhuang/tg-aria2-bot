@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from bot.config import settings
+from bot.video.account_views import shared_summary
 from bot.video.ui import STATES
 
 COOKIE = "video_login_session"
@@ -122,19 +123,7 @@ def register(app, state, require_login):
 
     @app.get("/api/video/accounts", dependencies=[Depends(require_login)])
     async def accounts():
-        result = []
-        for platform in ("bilibili", "douyin", "xhs"):
-            row = await state["repo"].video_account(platform, 0)
-            result.append(
-                {
-                    "platform": platform,
-                    "identity": row["identity"] if row else None,
-                    "shared": bool(row["enabled"])
-                    if row
-                    else await state["repo"].video_preference(0, platform) == "shared",
-                }
-            )
-        return result
+        return [await shared_summary(state["repo"], platform) for platform in ("bilibili", "douyin", "xhs")]
 
     @app.post("/api/video/accounts/login", dependencies=admin_dependencies)
     async def admin_login(body: PlatformRequest):
@@ -153,5 +142,7 @@ def register(app, state, require_login):
 
     @app.post("/api/video/accounts/remove", dependencies=admin_dependencies)
     async def remove(body: PlatformRequest):
+        if not await state["repo"].video_account(body.platform, 0):
+            raise HTTPException(409, "没有可移除的扫码账号；配置文件来源可关闭共享或修改服务器配置")
         await state["repo"].video_remove_account(body.platform, 0)
         return {"ok": True}
