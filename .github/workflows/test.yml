@@ -31,15 +31,39 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: pip install -r requirements.txt -r requirements-video.txt
-      - uses: astral-sh/ruff-action@v3
+      - name: Ruff lint
+        uses: astral-sh/ruff-action@v3
         with:
           args: "check"
-      - uses: astral-sh/ruff-action@v3
+      - name: Ruff annotations (public modules)
+        uses: astral-sh/ruff-action@v3
         with:
-          args: "check --select ANN bot/core/sources.py bot/core/download_service.py bot/video/backends.py"
-      - uses: astral-sh/ruff-action@v3
+          args: "check --select ANN"
+          src: >-
+            bot/core/sources.py
+            bot/core/download_service.py
+            bot/video/backends.py
+      - name: Ruff formatting (adopted modules)
+        uses: astral-sh/ruff-action@v3
         with:
-          args: "format --check bot/core/sources.py bot/core/download_service.py tests/test_sources.py tests/test_download_service.py tests/test_architecture.py bot/video bot/db/video.py bot/handlers/video.py bot/handlers/video_tasks.py bot/web/video.py tests/test_video.py tests/test_video_web.py tests/test_video_worker.py tests/test_video_accounts.py bot/handlers/menu.py tests/test_menu_navigation.py"
+          args: "format --check"
+          src: >-
+            bot/core/sources.py
+            bot/core/download_service.py
+            tests/test_sources.py
+            tests/test_download_service.py
+            tests/test_architecture.py
+            bot/video
+            bot/db/video.py
+            bot/handlers/video.py
+            bot/handlers/video_tasks.py
+            bot/web/video.py
+            tests/test_video.py
+            tests/test_video_web.py
+            tests/test_video_worker.py
+            tests/test_video_accounts.py
+            bot/handlers/menu.py
+            tests/test_menu_navigation.py
       - run: python -m compileall -q bot
       - run: python -c 'import bot.main, bot.web.app'
       - run: python -m unittest discover tests -v
