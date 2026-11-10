@@ -102,6 +102,50 @@ class TestVideoWorker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.repo.get_by_gid(self.row["gid"]))["status"], "FAILED")
         self.worker.task_manager.complete_local_video.assert_not_awaited()
 
+    async def test_stalled_source_terminates_with_safe_error(self):
+        row = dict((await self.repo.video_jobs())[0])
+
+        async def stalled(args):
+            return await real_spawn(
+                [
+                    sys.executable,
+                    "-u",
+                    "-c",
+                    'import time;print("ERROR: HTTP Error 403: Forbidden https://cdn.example/?token=private-secret");time.sleep(30)',
+                ]
+            )
+
+        with patch.object(settings, "video_stall_timeout", 1), patch("bot.video.worker.spawn", stalled):
+            await self.worker._execute(row)
+        latest = await self.repo.get_by_gid(row["gid"])
+        self.assertEqual(latest["status"], "FAILED")
+        self.assertIn("HTTP 403", latest["error"])
+        self.assertNotIn("private-secret", latest["error"])
+        self.assertNotIn(row["gid"], self.worker.running)
+        self.assertFalse(list(self.worker.vault.root.glob("cookies-*.txt")))
+
+    async def test_paused_task_does_not_trigger_stall_timeout(self):
+        import asyncio
+
+        row = dict((await self.repo.video_jobs())[0])
+        spawned = asyncio.Event()
+
+        async def stalled(args):
+            process = await real_spawn([sys.executable, "-u", "-c", "import time;time.sleep(30)"])
+            spawned.set()
+            return process
+
+        with patch.object(settings, "video_stall_timeout", 1), patch("bot.video.worker.spawn", stalled):
+            task = asyncio.create_task(self.worker._execute(row))
+            try:
+                await asyncio.wait_for(spawned.wait(), 5)
+                await self.repo.update_status(row["gid"], "PAUSED")
+                await asyncio.sleep(1.3)
+                self.assertFalse(task.done())
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
     async def test_restart_recovery_leaves_existing_task_paused(self):
         import asyncio
 

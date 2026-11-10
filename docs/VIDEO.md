@@ -12,6 +12,8 @@ yt-dlp 的分离音视频由 FFmpeg 合并为 MKV（不重新编码），you-get
 仅支持单视频；解析结果标记为播放列表或直播时会拒绝，不提供直播录制能力。不同站点的实际能力取决于解析器版本，
 扫码成功不等于当前解析器一定支持该内容，账号也不会改变内容本身的访问权限。
 
+下载阶段默认连续 180 秒没有字节增长会终止并显示原因，暂停和合并不计入此超时。
+
 每个视频拥有独立目录 `DOWNLOAD_DIR/video/video_<id>/`。下载、合并均支持暂停和继续；
 暂停通过 Linux 进程组实现，保留执行槽位（默认最多两个），不是释放并发槽位。
 取消会终止整个进程组；取消并删文件需二次确认。重启后未完成任务转为暂停，继续时
@@ -30,6 +32,7 @@ VIDEO_LOGIN_ENABLED=true
 VIDEO_CONCURRENCY=2
 VIDEO_PROBE_CONCURRENCY=2
 VIDEO_PROBE_TIMEOUT=45
+VIDEO_STALL_TIMEOUT=180
 VIDEO_PUBLIC_URL=https://你的后台域名
 COMPOSE_PROFILES=web,video-login
 ```

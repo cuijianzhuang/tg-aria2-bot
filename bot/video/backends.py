@@ -142,13 +142,21 @@ def download_args(
     args = common_args(parser, cookies, proxy)
     if parser == "yt-dlp":
         selector = format_selector(quality)
-        template = (
-            PROGRESS_MARKER
-            + '{"downloaded":%(progress.downloaded_bytes)j,"total":%(progress.total_bytes)j,"estimate":%(progress.total_bytes_estimate)j,"filename":%(info.filename)j,"status":%(progress.status)j}'
-        )
+        # Serialize the entire native progress dict. Interpolating missing
+        # fields separately emits yt-dlp's NA sentinel, which is not JSON.
+        template = PROGRESS_MARKER + "%(progress)j"
         return args + [
             "--no-playlist",
             "--no-warnings",
+            "--no-colors",
+            "--socket-timeout",
+            "20",
+            "--retries",
+            "3",
+            "--fragment-retries",
+            "3",
+            "--retry-sleep",
+            "2",
             "--newline",
             "--progress",
             "--continue",
@@ -174,11 +182,25 @@ def download_args(
 
 
 def progress_event(line: str) -> dict | None:
-    if PROGRESS_MARKER in line:
-        try:
-            data = json.loads(line.split(PROGRESS_MARKER, 1)[1])
-            if isinstance(data, dict) and isinstance(data.get("downloaded"), (int, float)):
-                return data
-        except ValueError:
-            pass
-    return None
+    if PROGRESS_MARKER not in line:
+        return None
+    try:
+        data = json.loads(line.split(PROGRESS_MARKER, 1)[1])
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    downloaded = data.get("downloaded_bytes", data.get("downloaded"))
+    if not isinstance(downloaded, (int, float)) or isinstance(downloaded, bool) or downloaded < 0:
+        return None
+    import math
+
+    if not math.isfinite(downloaded):
+        return None
+    return {
+        "downloaded": int(downloaded),
+        "total": data.get("total_bytes", data.get("total")),
+        "estimate": data.get("total_bytes_estimate", data.get("estimate")),
+        "filename": data.get("filename", "stream"),
+        "status": data.get("status"),
+    }
