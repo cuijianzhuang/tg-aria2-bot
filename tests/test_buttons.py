@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, User
 
@@ -418,7 +419,8 @@ class TestQuotaAtTheDoor(CallbackTestBase):
         self.assertIsNotNone(await self.repo.get_pending(token))       # 卡片还在，可以稍后再点
         self.assertEqual(self.nodes.get("default").add_uri_calls, [])  # 没有真的去 aria2 添加
 
-    async def test_start_refused_when_file_is_too_big(self):
+    @patch("bot.handlers.callbacks.storage.has_enough_space", return_value=True)
+    async def test_start_refused_when_file_is_too_big(self, _space):
         settings.user_max_task_size_gb = 1
         token = await self._pending(size=3 * self.GIB)
         q = await self._start(token)

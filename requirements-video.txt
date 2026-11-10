@@ -1,0 +1,4 @@
+yt-dlp[default]==2026.10.26
+you-get==0.4.1743
+cryptography==50.0.2
+qrcode[pil]==8.2

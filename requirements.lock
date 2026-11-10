@@ -1,4 +1,4 @@
-# Docker runtime dependencies; update deliberately and rebuild/test the image.
+# Complete bot/video runtime dependencies. Update deliberately and rebuild/test images.
 aiofiles==25.1.0
 aiogram==3.31.0
 aiohappyeyeballs==2.7.1
@@ -9,22 +9,38 @@ annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.16.0
 attrs==26.1.0
+brotli==1.2.1
 certifi==2026.10.23
+cffi==2.1.1
+charset-normalizer==3.5.2
 click==8.5.1
+cryptography==50.0.2
+dukpy==0.6.0
 fastapi==0.162.0
 frozenlist==1.8.0
 h11==0.16.0
 idna==3.20
 magic-filter==1.0.12
 multidict==7.2.1
+mutagen==1.48.1
 opentelemetry-api==1.45.2
+pillow==13.0.0
 propcache==0.5.4
+pycparser==3.12
+pycryptodomex==3.24.2
 pydantic==2.13.5
 pydantic-settings==2.16.2
 pydantic_core==2.46.5
 python-dotenv==1.2.4
+qrcode==8.2
+requests==2.34.2
 starlette==1.10.0
 typing-inspection==0.4.5
 typing_extensions==4.16.0
+urllib3==2.8.0
 uvicorn==0.54.0
+websockets==17.4
 yarl==1.25.1
+you-get==0.4.1743
+yt-dlp==2026.10.26
+yt-dlp-ejs==0.8.0
