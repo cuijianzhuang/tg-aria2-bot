@@ -6,7 +6,7 @@ from bot.config import settings
 from bot.core.compress import remove_path
 from bot.core.expiry import safe_target
 from bot.core.keyboards import task_cancel_confirm_keyboard, task_delete_confirm_keyboard
-from bot.video.ui import video_card, video_task_keyboard
+from bot.video.ui import video_card, video_task_keyboard, with_list_back
 
 
 async def handle_video_task(query, repo, task_manager, row, action, back):
@@ -15,6 +15,8 @@ async def handle_video_task(query, repo, task_manager, row, action, back):
     if not job:
         await query.answer("视频任务信息不存在", show_alert=True)
         return
+    await repo.set_reply_message(row["id"], query.message.message_id)
+    await repo.video_update(row["id"], back=back)
     if action in ("pause", "resume", "retry", "cancel_only", "delete_files"):
         if not settings.video_enabled:
             await query.answer("视频执行器未启用", show_alert=True)
@@ -33,21 +35,28 @@ async def handle_video_task(query, repo, task_manager, row, action, back):
         await query.answer("操作已排队")
         return
     if action == "cancel":
-        await query.message.edit_text("⚠️ 是否取消视频任务？", reply_markup=task_cancel_confirm_keyboard(gid))
+        await query.message.edit_text(
+            "⚠️ 是否取消视频任务？", reply_markup=with_list_back(task_cancel_confirm_keyboard(gid), back)
+        )
     elif action == "confirm_delete_files":
         await query.message.edit_text(
-            "⚠️ 确认永久删除已下载的视频及分片？", reply_markup=task_cancel_confirm_keyboard(gid, destructive=True)
+            "⚠️ 确认永久删除已下载的视频及分片？",
+            reply_markup=with_list_back(task_cancel_confirm_keyboard(gid, destructive=True), back),
         )
     elif action == "delete":
         if row["status"] in ("PENDING", "ACTIVE", "PAUSED"):
             await query.answer("请先取消任务再删除记录", show_alert=True)
             return
         await query.message.edit_text(
-            "🗑 删除视频记录？", reply_markup=task_delete_confirm_keyboard(gid, can_delete_files=bool(job["work_dir"]))
+            "🗑 删除视频记录？",
+            reply_markup=with_list_back(
+                task_delete_confirm_keyboard(gid, can_delete_files=bool(job["work_dir"])), back
+            ),
         )
     elif action == "confirm_purge":
         await query.message.edit_text(
-            "⚠️ 确认删除视频文件及分片？", reply_markup=task_delete_confirm_keyboard(gid, destructive=True)
+            "⚠️ 确认删除视频文件及分片？",
+            reply_markup=with_list_back(task_delete_confirm_keyboard(gid, destructive=True), back),
         )
     elif action in ("delete_record", "purge"):
         if row["status"] in ("PENDING", "ACTIVE", "PAUSED"):

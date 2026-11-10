@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS video_jobs (
  task_id INTEGER PRIMARY KEY, parser TEXT NOT NULL, quality TEXT NOT NULL,
  account_mode TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'queued',
  completed INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0,
- command TEXT, work_dir TEXT, output TEXT, progress_data TEXT NOT NULL DEFAULT '{}'
+ command TEXT, work_dir TEXT, output TEXT, progress_data TEXT NOT NULL DEFAULT '{}', back TEXT
 );
 CREATE TRIGGER IF NOT EXISTS video_job_cleanup AFTER DELETE ON tasks BEGIN
  DELETE FROM video_jobs WHERE task_id=OLD.id;
@@ -121,7 +121,7 @@ class VideoRepoMixin:
         return await cur.fetchall()
 
     async def video_update(self, task_id, **fields):
-        allowed = {"phase", "completed", "total", "command", "work_dir", "output", "parser", "progress_data"}
+        allowed = {"phase", "completed", "total", "command", "work_dir", "output", "parser", "progress_data", "back"}
         if not fields or not fields.keys() <= allowed:
             raise ValueError("invalid video job fields")
         await self._conn.execute(

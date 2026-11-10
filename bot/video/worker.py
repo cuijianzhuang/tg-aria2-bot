@@ -153,7 +153,7 @@ class VideoWorker:
                 chat_id=row["chat_id"],
                 message_id=row["reply_message_id"],
                 text=video_card(row, job),
-                reply_markup=video_task_keyboard(row["gid"], row["status"]),
+                reply_markup=video_task_keyboard(row["gid"], row["status"], job["back"]),
                 parse_mode="HTML",
             )
         except Exception:

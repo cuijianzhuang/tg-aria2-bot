@@ -51,13 +51,13 @@ def preview_keyboard(preview):
             Button(text="▶️ 确认下载", callback_data=f"vp:start:{token}"),
             Button(text="❌ 取消", callback_data=f"vp:cancel:{token}"),
         ],
-        [Button(text="🔑 平台账号", callback_data="vacc:menu")],
+        [Button(text="🔑 平台账号", callback_data=f"vacc:menu:{token}")],
     ]
     return Markup(inline_keyboard=rows)
 
 
-def video_task_keyboard(gid, status, back=None):
-    keyboard = task_keyboard(gid, status, multi_file=False)
+def video_task_keyboard(gid, status, back=None, link=None):
+    keyboard = task_keyboard(gid, status, multi_file=False, link=link)
     if keyboard:
         for row in keyboard.inline_keyboard:
             row[:] = [
@@ -99,3 +99,9 @@ def login_keyboard(login_id):
             ]
         ]
     )
+
+
+def with_list_back(markup, back):
+    if not back:
+        return markup
+    return Markup(inline_keyboard=[*markup.inline_keyboard, [Button(text=BACK_TO_LIST_TEXT, callback_data=back)]])

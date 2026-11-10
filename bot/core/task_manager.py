@@ -527,7 +527,8 @@ class TaskManager:
 
     async def complete_local_video(self, row, download):
         """Apply the same completion pipelines to a verified local video file."""
-        await self._handle_complete(row, download, node_is_local=True)
+        current = await self._repo.get_by_gid(row["gid"])
+        await self._handle_complete(current or row, download, node_is_local=True)
 
     async def _handle_complete(self, row, download, *, node_is_local: bool):
         gid = row["gid"]
@@ -742,6 +743,10 @@ class TaskManager:
         link: str | None = None,
     ):
         markup = task_keyboard(gid, status, local=local, link=link) if gid and status else None
+        if gid and status and dict(row).get("backend") == "video":
+            from bot.video.ui import video_task_keyboard
+            job = await self._repo.video_job(row["id"])
+            markup = video_task_keyboard(gid, status, job["back"] if job else None, link=link)
         if row["reply_message_id"]:
             try:
                 await self._bot.edit_message_text(
