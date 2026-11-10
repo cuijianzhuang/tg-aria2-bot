@@ -344,6 +344,8 @@ async def _add_source(nodes, node_name: str, kind: str, payload: str, file_name:
         return await client.add_uri(payload, download_dir=subdir)
     if kind == "magnet":
         return await client.add_magnet(payload, download_dir=node.download_dir)
+    if kind == "metalink":
+        return await client.add_metalink(payload, download_dir=node.download_dir)
     if kind == "torrent":
         # add_torrent 读 bot 本地的种子副本、以 base64 走 RPC 传给目标
         # aria2 —— 不要求目标节点能访问这个文件路径，天然跨节点
@@ -619,7 +621,7 @@ async def _task_action(query: CallbackQuery, repo, nodes, task_manager, action: 
 
     if action == "retry":
         payload = row["payload"]
-        if not payload or (row["source_type"] == "torrent" and not os.path.exists(payload)):
+        if not payload or (row["source_type"] in ("torrent", "metalink") and not os.path.exists(payload)):
             await query.answer("缺少原始下载来源，无法重试。请重新发送链接或文件。", show_alert=True)
             return
         refusal = await _quota_refusal(repo, task_manager, row["user_id"], row["file_size"])

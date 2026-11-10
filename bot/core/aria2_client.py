@@ -213,6 +213,18 @@ class Aria2Client:
         options = {"dir": download_dir} if download_dir else {}
         return await self._rpc.call("addTorrent", content, [], options)
 
+    async def add_metalink(self, metalink_path: str, *, download_dir: str | None = None) -> str:
+        # Upload handlers split manifests into one file per pending task.
+        content = await asyncio.to_thread(Path(metalink_path).read_bytes)
+        options = {"dir": download_dir} if download_dir else {}
+        gids = await self._rpc.call("addMetalink", base64.b64encode(content).decode("ascii"), options)
+        if len(gids) != 1:
+            # Never leave untracked downloads behind on an unexpected response.
+            for gid in gids:
+                await self.remove(gid)
+            raise RuntimeError("Metalink must contain exactly one download")
+        return gids[0]
+
     async def get_status(self, gid: str) -> Download:
         struct = await self._rpc.call("tellStatus", gid)
         return Download.from_struct(struct)

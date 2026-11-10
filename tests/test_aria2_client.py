@@ -162,6 +162,19 @@ class TestAddMethods(Aria2ClientRpcTestCase):
         self.assertEqual(gid, "gid2")
         mock_call.assert_awaited_once_with("addUri", ["magnet:?xt=urn:btih:abc"], {"dir": "/d"})
 
+    async def test_add_metalink_uploads_descriptor(self):
+        import base64
+        client, call = self._client_with_mock_rpc()
+        call.return_value = ["gid-metalink"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "download.meta4"
+            path.write_bytes(b"<metalink/>")
+            self.assertEqual(await client.add_metalink(str(path), download_dir="/remote"), "gid-metalink")
+        method, content, options = call.await_args.args
+        self.assertEqual(method, "addMetalink")
+        self.assertEqual(base64.b64decode(content), b"<metalink/>")
+        self.assertEqual(options, {"dir": "/remote"})
+
     async def test_add_torrent_sends_base64_content(self):
         client, mock_call = self._client_with_mock_rpc()
         mock_call.return_value = "gid3"

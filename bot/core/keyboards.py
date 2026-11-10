@@ -269,8 +269,8 @@ def task_cancel_confirm_keyboard(gid: str, *, destructive: bool = False) -> Inli
         ]
     else:
         rows = [
-            [InlineKeyboardButton(text="仅取消任务", callback_data=f"task:cancel_only:{gid}")],
-            [InlineKeyboardButton(text="取消并删除文件", callback_data=f"task:confirm_delete_files:{gid}")],
+            [InlineKeyboardButton(text="⏹ 仅取消任务", callback_data=f"task:cancel_only:{gid}")],
+            [InlineKeyboardButton(text="🗑 取消并删除文件", callback_data=f"task:confirm_delete_files:{gid}")],
             [InlineKeyboardButton(text="⬅️ 返回任务", callback_data=f"task:detail:{gid}")],
         ]
     return InlineKeyboardMarkup(inline_keyboard=rows)

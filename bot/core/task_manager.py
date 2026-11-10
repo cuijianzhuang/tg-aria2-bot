@@ -492,7 +492,7 @@ class TaskManager:
     async def _sync_real_name(self, row, gid: str, download):
         """种子/磁力任务入库时的名字是 .torrent 文件名或磁力链接；拿到元数据后
         把真正的内容名回写，任务列表、搜索、完成通知就都显示好看的名字了。"""
-        if row["source_type"] not in ("torrent", "magnet"):
+        if row["source_type"] not in ("torrent", "magnet", "metalink"):
             return
         real = download.name
         if not real or real.startswith("[METADATA]") or real == row["file_name"]:
@@ -511,6 +511,17 @@ class TaskManager:
         gid = row["gid"]
         new_gid = download.followed_by[0]
         log.info("gid %s finished metadata download, following to %s", gid, new_gid)
+        # A remote Metalink can spawn several independent downloads.
+        # Register every child before moving the parent so retries of this
+        # transition can skip children that were already persisted.
+        for child_gid in download.followed_by[1:]:
+            if await self._repo.get_by_gid(child_gid) is None:
+                await self._repo.create_task(
+                    gid=child_gid, user_id=row["user_id"], chat_id=row["chat_id"],
+                    reply_message_id=None, source_type=row["source_type"],
+                    source_ref=row["source_ref"], file_name=None, file_size=None,
+                    payload=row["payload"], node=row["node"],
+                )
         await self._repo.retry_task(row["id"], new_gid)
         self._forget_progress(gid)
 

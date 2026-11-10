@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from bot.handlers.links import _extract_links, _is_multi_link_message, _url_display_name
+from bot.handlers.links import _extract_links, _is_multi_link_message, _is_single_magnet_message, _url_display_name
 
 
 class TestExtractLinks(unittest.TestCase):
@@ -25,6 +25,35 @@ class TestExtractLinks(unittest.TestCase):
         text = "  https://example.com/a.zip  \n\thttps://example.com/b.zip\t"
         links = _extract_links(text)
         self.assertEqual([link[1] for link in links], ["https://example.com/a.zip", "https://example.com/b.zip"])
+
+    def test_magnet_parameter_order_and_encoded_xt(self):
+        for uri in (
+            "magnet:?dn=movie&xt=urn:btih:abc123&tr=https%3A%2F%2Ftracker.example",
+            "magnet:?xt=urn%3Abtih%3Aabc123&dn=movie",
+        ):
+            with self.subTest(uri=uri):
+                self.assertEqual(_extract_links(uri), [("magnet", uri)])
+
+    def test_magnet_in_shared_text_is_routed_as_single(self):
+        text = '  下载链接：（MAGNET:?dn=movie&xt=urn:btih:abc123）\n说明文字'
+        self.assertEqual(_extract_links(text), [("magnet", "magnet:?dn=movie&xt=urn:btih:abc123")])
+        self.assertTrue(_is_single_magnet_message(SimpleNamespace(text=text)))
+
+    def test_multiple_magnets_on_same_line_use_batch(self):
+        text = "magnet:?xt=urn:btih:abc magnet:?dn=b&xt=urn:btih:def"
+        self.assertEqual(len(_extract_links(text)), 2)
+        self.assertTrue(_is_multi_link_message(SimpleNamespace(text=text)))
+        self.assertFalse(_is_single_magnet_message(SimpleNamespace(text=text)))
+
+    def test_invalid_magnets_are_ignored(self):
+        for text in ("magnet:?dn=movie", "magnet:?xt=urn:btih:", "magnet:?xt=other:abc"):
+            self.assertEqual(_extract_links(text), [])
+
+    def test_aria2_protocols_and_arbitrary_extensions(self):
+        for uri in ("ftp://example.com/file.iso", "sftp://user@example.com/path/file.bin",
+                    "https://example.com/no-extension", "HTTPS://example.com/file.custom"):
+            with self.subTest(uri=uri):
+                self.assertEqual(_extract_links(uri), [("url", uri)])
 
     def test_no_links_returns_empty(self):
         self.assertEqual(_extract_links("just chatting, no links here"), [])

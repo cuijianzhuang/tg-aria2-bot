@@ -1,5 +1,6 @@
 # secrets — never commit
 .env
+.images.env*
 
 # python
 __pycache__/

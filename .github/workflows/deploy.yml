@@ -16,6 +16,7 @@ jobs:
     uses: ./.github/workflows/test.yml
 
   deploy:
+    if: ${{ vars.DEPLOY_MODE != 'images' }}
     runs-on: ubuntu-latest
     needs: test
     steps:

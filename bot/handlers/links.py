@@ -1,7 +1,9 @@
+import asyncio
 import os
 import re
 import shutil
-from urllib.parse import unquote, urlparse
+from pathlib import Path
+from urllib.parse import parse_qsl, unquote, urlparse
 from uuid import uuid4
 
 from aiogram import F, Router
@@ -11,12 +13,27 @@ from bot.config import settings
 from bot.core import storage
 from bot.core.cards import render_batch_pending, render_pending_card
 from bot.core.keyboards import batch_pending_keyboard, pending_task_keyboard, redownload_keyboard
+from bot.core.metalink import MAX_METALINK_BYTES, split_metalink
 from bot.core.telegram_files import to_local_path
 
 router = Router(name="links")
 
-URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
-MAGNET_RE = re.compile(r"^magnet:\?xt=urn:btih:\S+$", re.IGNORECASE)
+URL_RE = re.compile(r"^(?:https?|ftp|sftp)://\S+$", re.IGNORECASE)
+# Match the complete URI, including optional parameters in any order.
+MAGNET_RE = re.compile(r"\bmagnet:\?[^\s<>\"'，。；）】]+", re.IGNORECASE)
+
+
+def _extract_magnets(text: str) -> list[str]:
+    magnets = []
+    for match in MAGNET_RE.finditer(text):
+        uri = match.group().rstrip(")]")
+        params = parse_qsl(uri.split("?", 1)[1], keep_blank_values=True)
+        if any(key.lower() == "xt" and value.lower().startswith("urn:btih:")
+               and value[len("urn:btih:"):] for key, value in params):
+            # aria2 expects the standard lowercase scheme; preserve query data.
+            magnets.append("magnet:" + uri.split(":", 1)[1])
+    return magnets
+
 # 裸 BT infohash（种子站常见的复制粘贴格式，没有 magnet: 前缀）：40 位十六进制。
 # 只认这一种格式——BEP3 也允许 32 位 base32，但那跟普通随机字符串太像，
 # 误判风险不值得，用户真要用 base32 hash 自己拼成完整 magnet 链接即可。
@@ -88,7 +105,7 @@ async def _create_magnet_pending(message: Message, repo, magnet: str, *, node: s
     return token
 
 
-@router.message(F.text.regexp(URL_RE.pattern))
+@router.message(F.text.strip().regexp(URL_RE))
 async def handle_url(message: Message, repo, nodes):
     url = message.text.strip()
     existing = await repo.get_completed_by_source("url", storage.url_hash(url))
@@ -132,9 +149,14 @@ async def _handle_single_magnet(message: Message, repo, nodes, magnet: str):
     )
 
 
-@router.message(F.text.regexp(MAGNET_RE.pattern))
+def _is_single_magnet_message(message: Message) -> bool:
+    links = _extract_links(message.text or "")
+    return len(links) == 1 and bool(_extract_magnets(message.text or ""))
+
+
+@router.message(F.text, _is_single_magnet_message)
 async def handle_magnet(message: Message, repo, nodes):
-    await _handle_single_magnet(message, repo, nodes, message.text.strip())
+    await _handle_single_magnet(message, repo, nodes, _extract_links(message.text)[0][1])
 
 
 @router.message(F.text.regexp(INFOHASH_RE.pattern))
@@ -151,8 +173,8 @@ def _extract_links(text: str) -> list[tuple[str, str]]:
         line = raw_line.strip()
         if not line:
             continue
-        if MAGNET_RE.match(line):
-            links.append(("magnet", line))
+        if magnets := _extract_magnets(line):
+            links.extend(("magnet", uri) for uri in magnets)
         elif INFOHASH_RE.match(line):
             links.append(("magnet", f"magnet:?xt=urn:btih:{line}"))
         elif URL_RE.match(line):
@@ -161,9 +183,7 @@ def _extract_links(text: str) -> list[tuple[str, str]]:
 
 
 def _is_multi_link_message(message: Message) -> bool:
-    """只有真正识别出 >=2 条链接才算批量消息 —— 恰好 1 条的情况已经被上面两个
-    精确匹配的单行 handler 接管（包括末尾带换行符的边界情况），这里不用重复处理，
-    避免误吞普通聊天消息。"""
+    """识别出至少两条链接才进入批量流程，单条由对应 handler 处理。"""
     if not message.text:
         return False
     return len(_extract_links(message.text)) >= 2
@@ -202,7 +222,64 @@ async def handle_batch_links(message: Message, repo, nodes):
     )
 
 
-@router.message(F.document.file_name.endswith(".torrent"))
+@router.message(F.document.file_name.lower().endswith((".metalink", ".meta4")))
+async def handle_metalink(message: Message, repo, nodes):
+    if (message.document.file_size or 0) > MAX_METALINK_BYTES:
+        await message.reply("⛔ Metalink 清单不能超过 2 MiB。")
+        return
+    tg_file = await message.bot.get_file(message.document.file_id)
+    local = to_local_path(tg_file.file_path)
+    if local is not None:
+        def read_manifest():
+            with open(local, "rb") as stream:
+                return stream.read(MAX_METALINK_BYTES + 1)
+        content = await asyncio.to_thread(read_manifest)
+    else:
+        stream = await message.bot.download_file(tg_file.file_path)
+        content = stream.getvalue()
+    try:
+        entries = split_metalink(content)
+    except ValueError as exc:
+        await message.reply(f"⛔ {exc}")
+        return
+
+    node = await _user_node(message, repo, nodes)
+    batch_id = uuid4().hex[:12] if len(entries) > 1 else None
+    store = os.path.join(os.path.dirname(settings.db_path), "metalinks")
+    os.makedirs(store, exist_ok=True)
+    names, tokens = [], []
+    duplicates = 0
+    for index, (name, data) in enumerate(entries):
+        ref = f"{message.document.file_unique_id}:{index}"
+        if await repo.get_completed_by_source("metalink", ref):
+            duplicates += 1
+            continue
+        path = os.path.join(store, storage.url_hash(ref) + ".meta4")
+        await asyncio.to_thread(Path(path).write_bytes, data)
+        token = await repo.create_pending(
+            kind="metalink", user_id=message.from_user.id, chat_id=message.chat.id,
+            source_ref=ref, file_name=name, file_size=None, payload=path,
+            batch_id=batch_id, node=node,
+        )
+        tokens.append(token)
+        names.append(name)
+    if not names:
+        await message.reply("这些文件都已经下载过了，没有新增任务。")
+    elif batch_id:
+        await message.reply(
+            render_batch_pending(names, duplicates, 0),
+            reply_markup=batch_pending_keyboard(batch_id), parse_mode="HTML",
+        )
+    else:
+        await message.reply(
+            render_pending_card("metalink", names[0], node_label=nodes.label(node),
+                                download_dir=nodes.get_node(node).download_dir),
+            reply_markup=pending_task_keyboard(tokens[0], show_node_switch=nodes.is_multi()),
+            parse_mode="HTML",
+        )
+
+
+@router.message(F.document.file_name.lower().endswith(".torrent"))
 async def handle_torrent(message: Message, repo, nodes):
     tg_file = await message.bot.get_file(message.document.file_id)
 

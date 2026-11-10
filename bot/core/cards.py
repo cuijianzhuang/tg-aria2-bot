@@ -96,7 +96,9 @@ def render_home(counts: dict[str, int] | None = None, stats=None) -> str:
         pass
     lines += [
         "",
-        "💡 发送链接、磁力或种子文件即可开始下载",
+        "🔗 HTTP(S) · FTP · SFTP（任意文件类型）",
+        "🧲 磁力 / BT 哈希　🌱 .torrent　📑 .metalink / .meta4",
+        "📤 也可直接发送或转发 Telegram 文件",
         f"<i>更新于 {datetime.now().strftime('%H:%M:%S')}</i>",
     ]
     return "\n".join(lines)
