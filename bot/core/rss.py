@@ -5,8 +5,7 @@
   历史的源会一下子灌几百个任务。之后出现的新条目才下载。
 - 条目是否下载只看标题：keyword 里的每个词都要出现，exclude 里任一词出现就跳过
   （不区分大小写）。
-- 下载源优先级：enclosure → link → magnetURI 之类的扩展标签；只认 magnet: 和
-  http(s)。额度、磁盘空间的检查跟手动添加一样；被额度/空间拒绝的条目不记账，下一轮
+- 下载源优先级：enclosure → link → magnetURI 之类的扩展标签；支持磁力、HTTP(S)、FTP 和 SFTP；订阅源地址仍仅接受 HTTP(S)。额度、磁盘空间的检查跟手动添加一样；被额度/空间拒绝的条目不记账，下一轮
   再试。
 - XML 来自外部，拒绝带 DOCTYPE/ENTITY 的内容（防实体膨胀），响应体限 2MB。
 """
@@ -23,13 +22,14 @@ import aiohttp
 
 from bot.config import settings
 from bot.core import quota, storage
+from bot.core.download_service import add_source
+from bot.core.sources import parse_link
 
 log = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 2 * 1024 * 1024
 FETCH_TIMEOUT_SECONDS = 20
 MAX_NEW_PER_POLL = 20     # 一个源一轮最多新增这么多任务，其余留到下一轮
-MAGNET_RE = re.compile(r"^magnet:\?xt=urn:btih:\S+$", re.IGNORECASE)
 HTTP_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
 
 
@@ -75,7 +75,8 @@ def _child_text(el, name: str) -> str:
 
 def _usable(url: str | None) -> str | None:
     url = (url or "").strip()
-    return url if url and (MAGNET_RE.match(url) or HTTP_RE.match(url)) else None
+    source = parse_link(url)
+    return source[1] if source else None
 
 
 def _pick_source(entry) -> str | None:
@@ -159,7 +160,6 @@ async def poll_feed(feed, *, bot, repo, nodes, task_manager=None) -> int:
     """轮询一个订阅，返回新增任务数。出错只记到订阅上（last_error），不抛。"""
     from bot.core.cards import render_task_card
     from bot.core.keyboards import task_keyboard
-    from bot.handlers.callbacks import _add_source
 
     try:
         title, items = parse_feed(await fetch(feed["url"]))
@@ -187,8 +187,12 @@ async def poll_feed(feed, *, bot, repo, nodes, task_manager=None) -> int:
         if not matches(it.title, feed["keyword"], feed["exclude"]) or not it.source:
             done.append(it.guid)
             continue
-        kind = "magnet" if MAGNET_RE.match(it.source) else "url"
-        ref = storage.url_hash(it.source)
+        source = parse_link(it.source)
+        if source is None:
+            done.append(it.guid)
+            continue
+        kind, payload = source
+        ref = storage.url_hash(payload)
         if await repo.get_completed_by_source(kind, ref):
             done.append(it.guid)
             continue
@@ -199,14 +203,14 @@ async def poll_feed(feed, *, bot, repo, nodes, task_manager=None) -> int:
         if refusal or (node.is_local and not _has_space(node.download_dir)):
             break        # 额度/空间不够：这一条和后面的都留到下一轮
         try:
-            gid = await _add_source(nodes, node.name, kind, it.source, None if kind == "magnet" else it.title)
+            gid = await add_source(nodes, node.name, kind, payload, None if kind == "magnet" else it.title)
         except Exception:
             log.warning("rss: could not add %r from feed %s", it.title, feed["id"], exc_info=True)
             continue     # 添加失败不记账，下一轮重试
         task_id = await repo.create_task(
             gid=gid, user_id=feed["user_id"], chat_id=feed["chat_id"], reply_message_id=None,
             source_type=kind, source_ref=ref, file_name=it.title if kind == "magnet" else None,
-            file_size=None, payload=it.source, node=node.name,
+            file_size=None, payload=payload, node=node.name,
         )
         done.append(it.guid)
         added += 1

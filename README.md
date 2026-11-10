@@ -1,8 +1,17 @@
 # tg-aria2-bot
 
-Telegram 下载机器人：给机器人发送 **HTTP(S) 链接 / 磁力链接 / 裸 BT infohash / .torrent 文件 / 转发媒体消息**，
+希望避免服务器 Python/依赖环境差异，可使用[固定镜像部署](docs/IMAGE_DEPLOYMENT.md)：
+服务器只拉取 amd64/arm64 镜像，提供依赖锁定、目录权限初始化和启动自检；原有源码部署继续保留。
+
+Telegram 下载机器人：给机器人发送 **HTTP(S) / FTP / SFTP 链接 / 磁力链接 / 裸 BT infohash / .torrent / .metalink / .meta4 文件 / 转发媒体消息**，
 由服务器上的 aria2（[P3TERX 完美配置](https://github.com/P3TERX/aria2.conf)）执行下载，
 机器人以卡片形式实时回报进度，并可选压缩上传 GoFile 网盘。附带 Web 管理后台 + AriaNg 面板。
+
+支持任意文件扩展名和无扩展名的下载地址，实际协议能力取决于 aria2 的编译配置（SFTP 需要 SSH 支持）。
+磁力链接支持参数任意顺序、大小写、编码参数，以及带说明文字的粘贴内容。
+Metalink v3/v4 上传后按文件生成独立确认任务（每份清单最多 20 个文件、2 MiB），支持重试和多节点；
+远程种子 / Metalink 地址通过 aria2 的 `follow-torrent` / `follow-metalink` 自动展开，需在目标节点启用这两个选项。
+Telegram 命令菜单和任务操作使用图标，更新后重启机器人即可刷新命令菜单。
 
 ## 功能特性
 

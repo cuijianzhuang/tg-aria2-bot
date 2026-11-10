@@ -43,6 +43,18 @@ class TestParse(unittest.TestCase):
         self.assertEqual(items[0].source, "https://x.test/e1.torrent")
         self.assertTrue(items[1].source.startswith("magnet:"))
 
+    def test_download_sources_share_message_parser_rules(self):
+        from html import escape
+
+        from bot.core.sources import parse_link
+
+        for source in ("MAGNET:?dn=movie&xt=urn%3Abtih%3Aabc", "ftp://example.com/a.iso",
+                       "sftp://example.com/b.bin"):
+            with self.subTest(source=source):
+                data = f"<rss><channel><item><title>Download</title><guid>id</guid><link>{escape(source)}</link></item></channel></rss>"
+                _, items = rss.parse_feed(data.encode())
+                self.assertEqual(items[0].source, parse_link(source)[1])
+
     def test_entity_bombs_are_refused(self):
         bomb = b'<?xml version="1.0"?><!DOCTYPE l [<!ENTITY a "aaaa"><!ENTITY b "&a;&a;&a;">]><rss><channel><title>&b;</title></channel></rss>'
         with self.assertRaises(FeedError):
@@ -54,7 +66,7 @@ class TestParse(unittest.TestCase):
 
     def test_dangerous_schemes_are_not_sources(self):
         data = b"<rss><channel><item><title>x</title><guid>g</guid><link>file:///etc/passwd</link>" \
-               b"<enclosure url='ftp://a/b'/></item></channel></rss>"
+               b"<enclosure url='javascript:alert(1)'/></item></channel></rss>"
         _, items = rss.parse_feed(data)
         self.assertIsNone(items[0].source)
 
@@ -128,7 +140,7 @@ class PollBase(unittest.IsolatedAsyncioTestCase):
         async def fake_add(nodes, node_name, kind, payload, file_name):
             self.added.append((kind, payload, file_name))
             return f"gid{len(self.added)}"
-        for p in (patch.object(rss, "fetch", fake_fetch), patch("bot.handlers.callbacks._add_source", fake_add)):
+        for p in (patch.object(rss, "fetch", fake_fetch), patch("bot.core.rss.add_source", fake_add)):
             p.start()
             self.addCleanup(p.stop)
 
@@ -233,7 +245,7 @@ class TestPoll(PollBase):
         fid = await self._feed(keyword="show a 01 1080p")
         await self._baseline_empty_then(fid, RSS)
         good = self.added
-        with patch("bot.handlers.callbacks._add_source", AsyncMock(side_effect=RuntimeError("aria2 down"))):
+        with patch("bot.core.rss.add_source", AsyncMock(side_effect=RuntimeError("aria2 down"))):
             self.assertEqual(await self._poll(fid), 0)
         self.assertEqual(good, [])
         self.assertEqual(await self._poll(fid), 1)    # 失败的条目没记账，恢复后补上

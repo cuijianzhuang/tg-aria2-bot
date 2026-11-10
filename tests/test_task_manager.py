@@ -547,6 +547,19 @@ class TestMagnetMetadataFollow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated["status"], "PENDING")
         self.assertIsNone(await self.repo.get_by_gid("meta-gid"))
 
+    async def test_all_metalink_children_are_tracked(self):
+        row = dict(await self.repo.get_by_gid("meta-gid"))
+        await self.tm._handle_download_state(
+            row, self._metadata_download(["child-1", "child-2", "child-3"]), node_is_local=True,
+        )
+        for gid in ("child-1", "child-2", "child-3"):
+            child = await self.repo.get_by_gid(gid)
+            self.assertIsNotNone(child)
+            self.assertEqual(child["user_id"], 1)
+            self.assertEqual(child["status"], "PENDING")
+        self.assertEqual((await self.repo.get_by_gid("child-1"))["id"], self.task_id)
+        self.assertIsNone((await self.repo.get_by_gid("child-2"))["reply_message_id"])
+
     async def test_metadata_completion_does_not_trigger_notify_or_gofile(self):
         row = dict(await self.repo.get_by_gid("meta-gid"))
         await self.tm._handle_download_state(row, self._metadata_download(["real-gid"]), node_is_local=True)

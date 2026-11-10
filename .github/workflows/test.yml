@@ -34,6 +34,12 @@ jobs:
       - uses: astral-sh/ruff-action@v3
         with:
           args: "check"
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: "check --select ANN bot/core/sources.py bot/core/download_service.py"
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: "format --check bot/core/sources.py bot/core/download_service.py tests/test_sources.py tests/test_download_service.py tests/test_architecture.py"
       - run: python -m compileall -q bot
       - run: python -c 'import bot.main, bot.web.app'
       - run: python -m unittest discover tests -v
@@ -42,4 +48,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: shellcheck -x -S warning tg-aria2.sh install.sh update.sh deploy.sh
+      - run: shellcheck -x -S warning tg-aria2.sh install.sh update.sh deploy.sh scripts/deploy-images.sh

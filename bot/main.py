@@ -18,13 +18,13 @@ from bot.handlers import upgrade as upgrade_handler
 from bot.middlewares.auth import AuthMiddleware
 
 BOT_COMMANDS = [
-    BotCommand(command="start", description="主菜单（状态总览）"),
-    BotCommand(command="list", description="任务列表"),
-    BotCommand(command="find", description="按文件名搜索任务"),
-    BotCommand(command="stats", description="下载统计"),
-    BotCommand(command="rss", description="RSS 订阅自动下载"),
-    BotCommand(command="quota", description="我的额度和今日用量"),
-    BotCommand(command="settings", description="设置与管理"),
+    BotCommand(command="start", description="🏠 主菜单（状态总览）"),
+    BotCommand(command="list", description="📋 任务列表"),
+    BotCommand(command="find", description="🔎 按文件名搜索任务"),
+    BotCommand(command="stats", description="📊 下载统计"),
+    BotCommand(command="rss", description="📡 RSS 订阅自动下载"),
+    BotCommand(command="quota", description="📏 我的额度和今日用量"),
+    BotCommand(command="settings", description="⚙️ 设置与管理"),
 ]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")

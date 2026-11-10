@@ -1,12 +1,16 @@
+# syntax=docker/dockerfile:1
 # Serves AriaNg (https://github.com/mayswind/AriaNg, MIT License) as a static
 # site via nginx. AriaNg talks directly to aria2's JSON-RPC from the browser —
 # no backend of its own, you just fill in host/port/secret once in its settings
 # page (it remembers via localStorage).
-FROM nginx:alpine
+FROM nginx:alpine@sha256:713fc2ebfd92e8217db451477182ee91944b123d2b1ee9fd5a8c6e91ca6c3a11
 
-RUN apk add --no-cache curl unzip && \
-    TAG=$(curl -fsSL https://api.github.com/repos/mayswind/AriaNg/releases/latest | grep -m1 '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/') && \
-    curl -fsSL -o /tmp/ariang.zip "https://github.com/mayswind/AriaNg/releases/download/${TAG}/AriaNg-${TAG}-AllInOne.zip" && \
+ARG ARIANG_VERSION=1.3.15
+
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -f /run/secrets/proxy_ca ]; then export SSL_CERT_FILE=/run/secrets/proxy_ca CURL_CA_BUNDLE=/run/secrets/proxy_ca; fi; \
+    apk add --no-cache curl unzip && \
+    curl -fsSL -o /tmp/ariang.zip "https://github.com/mayswind/AriaNg/releases/download/${ARIANG_VERSION}/AriaNg-${ARIANG_VERSION}-AllInOne.zip" && \
     rm -rf /usr/share/nginx/html/* && \
     unzip -q /tmp/ariang.zip -d /usr/share/nginx/html && \
     rm /tmp/ariang.zip && \
