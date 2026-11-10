@@ -78,6 +78,8 @@ def main_inline_keyboard(
         bottom.append(InlineKeyboardButton(text="⚙️ 设置", callback_data="nav:settings"))
     bottom.append(InlineKeyboardButton(text="🔄 刷新", callback_data="nav:start"))
     rows.append(bottom)
+    if settings.video_enabled or settings.video_login_enabled:
+        rows.append([InlineKeyboardButton(text="🔑 平台账号", callback_data="vacc:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

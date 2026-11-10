@@ -29,14 +29,21 @@ class TestSavedVideoAccounts(unittest.IsolatedAsyncioTestCase):
         return SimpleNamespace(
             data=f"vacc:{action}:bilibili",
             from_user=SimpleNamespace(id=user),
-            message=SimpleNamespace(chat=SimpleNamespace(type="private"), answer=AsyncMock()),
+            message=SimpleNamespace(
+                chat=SimpleNamespace(type="private", id=11),
+                message_id=99,
+                text="menu",
+                reply_markup=None,
+                answer=AsyncMock(),
+                edit_text=AsyncMock(),
+            ),
             answer=AsyncMock(),
         )
 
     async def test_overview_lists_only_own_personal_accounts(self):
         text, keyboard = await overview(self.repo, 11, False)
         self.assertIn("&lt;personal-11&gt;", text)
-        self.assertIn("UTC", text)
+        self.assertIn("北京时间", text)
         self.assertNotIn("other-personal", text)
         self.assertNotIn("personal-secret", text)
         self.assertNotIn("shared-id", text)  # Closed shared identity stays private.

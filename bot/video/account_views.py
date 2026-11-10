@@ -1,7 +1,8 @@
 """Credential-free account metadata and private Telegram account views."""
 
-from datetime import UTC, datetime
+from datetime import datetime
 from html import escape
+from zoneinfo import ZoneInfo
 
 from aiogram.types import InlineKeyboardButton as Button
 from aiogram.types import InlineKeyboardMarkup as Markup
@@ -19,7 +20,11 @@ def metadata(row):
 
 
 def display_time(updated):
-    return datetime.fromtimestamp(updated, UTC).strftime("%Y-%m-%d %H:%M UTC") if updated else "未知"
+    return (
+        datetime.fromtimestamp(updated, ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M（北京时间）")
+        if updated
+        else "未知"
+    )
 
 
 async def shared_summary(repo, platform):
@@ -38,7 +43,7 @@ async def shared_summary(repo, platform):
     }
 
 
-async def overview(repo, user_id, admin):
+async def overview(repo, user_id, admin, back_token=None):
     lines = ["🔑 <b>已保存的平台账号</b>", "登录态是否有效会在解析/下载时校验。", ""]
     rows = []
     for platform, label in PLATFORM_LABELS.items():
@@ -60,10 +65,11 @@ async def overview(repo, user_id, admin):
         count = int(personal is not None) + int(shared["saved"])
         rows.append([Button(text=f"🔑 {label} · 已保存 {count}", callback_data=f"vacc:platform:{platform}")])
     rows.append([Button(text="🔄 刷新账号列表", callback_data="vacc:menu")])
+    rows.extend(navigation(admin, back_token))
     return "\n".join(lines), Markup(inline_keyboard=rows)
 
 
-async def platform_view(repo, user_id, platform, admin):
+async def platform_view(repo, user_id, platform, admin, back_token=None):
     personal = metadata(await repo.video_account(platform, user_id))
     shared = await shared_summary(repo, platform)
     mode = await repo.video_preference(user_id, platform)
@@ -124,4 +130,17 @@ async def platform_view(repo, user_id, platform, admin):
         ]
     )
     rows.append([Button(text="⬅️ 全部已保存账号", callback_data="vacc:menu")])
+    rows.extend(navigation(admin, back_token))
     return "\n".join(lines), Markup(inline_keyboard=rows)
+
+
+def navigation(admin, back_token=None):
+    if back_token:
+        return [
+            [Button(text="⬅️ 返回视频下载确认", callback_data=f"vp:back:{back_token}")],
+            [Button(text="🏠 主菜单", callback_data="nav:start")],
+        ]
+    buttons = [Button(text="🏠 主菜单", callback_data="nav:start")]
+    if admin:
+        buttons.append(Button(text="⚙️ 设置", callback_data="nav:settings"))
+    return [buttons]
