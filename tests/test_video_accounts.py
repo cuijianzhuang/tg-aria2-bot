@@ -91,3 +91,31 @@ class TestSavedVideoAccounts(unittest.IsolatedAsyncioTestCase):
         await account_action(query, self.repo)
         query.message.answer.assert_not_awaited()
         self.assertTrue(query.answer.await_args.kwargs["show_alert"])
+
+    async def test_youtube_cookie_controls_do_not_offer_qr_login(self):
+        with patch.object(settings, "video_cookie_file_youtube", "/private/cookies.txt"):
+            text, keyboard = await platform_view(self.repo, 11, "youtube", True)
+        callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+        self.assertIn("Cookie 文件", text)
+        self.assertNotIn("/private/", text)
+        self.assertIn("vacc:share:youtube", callbacks)
+        self.assertNotIn("vacc:personal:youtube", callbacks)
+        self.assertNotIn("vacc:shared:youtube", callbacks)
+        self.assertNotIn("vacc:use-personal:youtube", callbacks)
+
+    async def test_youtube_forged_scan_does_not_queue_login(self):
+        query = self.query("personal")
+        query.data = "vacc:personal:youtube"
+        await account_action(query, self.repo)
+        self.assertTrue(query.answer.await_args.kwargs["show_alert"])
+        self.assertEqual(await self.repo.video_login_rows(), [])
+
+    async def test_personal_import_starts_without_qr_service(self):
+        query = self.query("import")
+        query.data = "vacc:import:youtube"
+        query.message.answer.return_value = SimpleNamespace(message_id=501)
+        with patch.object(settings, "video_enabled", True), patch.object(settings, "video_login_enabled", False):
+            await account_action(query, self.repo)
+        row = await self.repo.video_cookie_import(11, 501)
+        self.assertEqual(row["user_id"], 11)
+        self.assertEqual(row["platform"], "youtube")

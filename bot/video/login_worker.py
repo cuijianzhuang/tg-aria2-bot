@@ -10,7 +10,7 @@ import aiohttp
 
 from bot.config import settings
 from bot.db.repo import TaskRepo
-from bot.video.accounts import PLATFORMS, CredentialVault
+from bot.video.accounts import PLATFORMS, QR_PLATFORMS, CredentialVault
 from bot.video.qr_browser import QRLoginError, failure_reason, open_login, verification_required, visible_locator
 
 log = logging.getLogger(__name__)
@@ -209,7 +209,7 @@ class LoginWorker:
 
     async def execute(self, row):
         try:
-            if row["platform"] not in PLATFORMS or (
+            if row["platform"] not in QR_PLATFORMS or (
                 row["owner_id"] == 0 and not settings.is_admin(row["requester_id"])
             ):
                 raise ValueError("invalid login request")

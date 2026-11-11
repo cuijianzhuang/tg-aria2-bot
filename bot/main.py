@@ -12,7 +12,7 @@ from bot.core import expiry, gofile, health, rss, schedule, upgrade
 from bot.core.node_pool import NodePool
 from bot.core.task_manager import TaskManager
 from bot.db.repo import TaskRepo
-from bot.handlers import access, admin, callbacks, commands, files, links, media, ops, settings_menu
+from bot.handlers import access, admin, callbacks, commands, files, links, media, ops, settings_menu, video_cookies
 from bot.handlers import rss as rss_handler
 from bot.handlers import upgrade as upgrade_handler
 from bot.handlers import video as video_handler
@@ -27,6 +27,7 @@ BOT_COMMANDS = [
     BotCommand(command="quota", description="📏 我的额度和今日用量"),
     BotCommand(command="video", description="🎬 解析视频网页"),
     BotCommand(command="videoaccounts", description="🔑 视频平台账号"),
+    BotCommand(command="cancelcookie", description="❌ 取消个人 Cookie 导入"),
     BotCommand(command="settings", description="⚙️ 设置与管理"),
 ]
 
@@ -75,6 +76,7 @@ async def main():
     dp.include_router(rss_handler.router)
     dp.include_router(files.router)
     dp.include_router(callbacks.router)
+    dp.include_router(video_cookies.router)
     dp.include_router(video_handler.router)
     dp.include_router(links.router)
     dp.include_router(media.router)

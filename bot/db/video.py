@@ -4,7 +4,20 @@ import hashlib
 import json
 import secrets
 import time
+from functools import wraps
 from uuid import uuid4
+
+
+def _credential_write(method):
+    """Serialize credential mutations sharing this connection across callbacks."""
+
+    @wraps(method)
+    async def write(repo, *args, **kwargs):
+        async with repo._video_account_lock:
+            return await method(repo, *args, **kwargs)
+
+    return write
+
 
 VIDEO_SCHEMA = """
 CREATE TABLE IF NOT EXISTS video_jobs (
@@ -29,6 +42,12 @@ CREATE TABLE IF NOT EXISTS video_accounts (
 CREATE TABLE IF NOT EXISTS video_preferences (
  user_id INTEGER NOT NULL, platform TEXT NOT NULL, mode TEXT NOT NULL,
  PRIMARY KEY(user_id,platform)
+);
+CREATE TABLE IF NOT EXISTS video_cookie_imports (
+ chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
+ user_id INTEGER NOT NULL, platform TEXT NOT NULL,
+ expires REAL NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+ PRIMARY KEY(chat_id,message_id)
 );
 CREATE TABLE IF NOT EXISTS video_logins (
  id TEXT PRIMARY KEY, platform TEXT NOT NULL, owner_id INTEGER NOT NULL,
@@ -145,6 +164,7 @@ class VideoRepoMixin:
         )
         return await cur.fetchone()
 
+    @_credential_write
     async def video_put_account(self, platform, owner_id, identity, cookies):
         await self._conn.execute(
             """INSERT INTO video_accounts VALUES (?,?,?,?,0,?) ON CONFLICT(platform,owner_id)
@@ -153,13 +173,68 @@ class VideoRepoMixin:
         )
         await self._conn.commit()
 
+    @_credential_write
     async def video_remove_account(self, platform, owner_id):
         await self._conn.execute("DELETE FROM video_accounts WHERE platform=? AND owner_id=?", (platform, owner_id))
         await self._conn.execute(
             "UPDATE video_logins SET state='cancelled' WHERE platform=? AND owner_id=? AND state IN ('queued','preparing','waiting','scanned')",
             (platform, owner_id),
         )
+        await self._conn.execute(
+            "UPDATE video_cookie_imports SET state='cancelled' WHERE platform=? AND user_id=? AND state='pending'",
+            (platform, owner_id),
+        )
         await self._conn.commit()
+
+    @_credential_write
+    async def video_cookie_import_start(self, user_id, platform, chat_id, message_id):
+        await self._conn.execute(
+            "UPDATE video_cookie_imports SET state='cancelled' WHERE user_id=? AND state='pending'", (user_id,)
+        )
+        await self._conn.execute(
+            "INSERT INTO video_cookie_imports (chat_id,message_id,user_id,platform,expires) VALUES (?,?,?,?,?)",
+            (chat_id, message_id, user_id, platform, time.time() + 300),
+        )
+        await self._conn.commit()
+
+    @_credential_write
+    async def video_cookie_import_cancel(self, user_id):
+        await self._conn.execute(
+            "UPDATE video_cookie_imports SET state='cancelled' WHERE user_id=? AND state='pending'", (user_id,)
+        )
+        await self._conn.commit()
+
+    async def video_cookie_import(self, chat_id, message_id):
+        cur = await self._conn.execute(
+            "SELECT * FROM video_cookie_imports WHERE chat_id=? AND message_id=?", (chat_id, message_id)
+        )
+        return await cur.fetchone()
+
+    @_credential_write
+    async def video_cookie_import_complete(self, user_id, chat_id, message_id, encrypted):
+        cur = await self._conn.execute(
+            "UPDATE video_cookie_imports SET state='used' WHERE user_id=? AND chat_id=? AND message_id=? "
+            "AND state='pending' AND expires>? RETURNING platform",
+            (user_id, chat_id, message_id, time.time()),
+        )
+        row = await cur.fetchone()
+        if row:
+            platform = row["platform"]
+            await self._conn.execute(
+                "UPDATE video_logins SET state='cancelled' WHERE platform=? AND owner_id=? "
+                "AND state IN ('queued','preparing','waiting','scanned')",
+                (platform, user_id),
+            )
+            await self._conn.execute(
+                """INSERT INTO video_accounts VALUES (?,?,?,?,0,?) ON CONFLICT(platform,owner_id)
+                   DO UPDATE SET identity=excluded.identity,cookies=excluded.cookies,enabled=0,updated=excluded.updated""",
+                (platform, user_id, "Cookie 导入（账号身份未验证）", encrypted, time.time()),
+            )
+            await self._conn.execute(
+                "INSERT OR REPLACE INTO video_preferences VALUES (?,?,'personal')", (user_id, platform)
+            )
+        await self._conn.commit()
+        return bool(row)
 
     async def video_share(self, platform, enabled):
         await self._conn.execute(
@@ -184,8 +259,13 @@ class VideoRepoMixin:
         row = await cur.fetchone()
         return row["mode"] if row else "personal"
 
+    @_credential_write
     async def video_new_login(self, platform, owner_id, requester_id, chat_id=None):
         now = time.time()
+        await self._conn.execute(
+            "UPDATE video_cookie_imports SET state='cancelled' WHERE user_id=? AND platform=? AND state='pending'",
+            (owner_id, platform),
+        )
         await self._conn.execute(
             "UPDATE video_logins SET state='cancelled' WHERE platform=? AND owner_id=? AND state IN ('queued','preparing','waiting','scanned')",
             (platform, owner_id),
@@ -281,6 +361,7 @@ class VideoRepoMixin:
         await self._conn.execute("DELETE FROM video_logins WHERE expires<?", (now - 86400,))
         await self._conn.commit()
 
+    @_credential_write
     async def video_complete_login(self, login_id, identity, encrypted):
         # Single writer transaction: cancellation/removal on another process
         # either wins before this update, or runs after the account is stored.

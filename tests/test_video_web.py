@@ -130,3 +130,42 @@ class TestVideoWeb(unittest.IsolatedAsyncioTestCase):
         status, data, _ = await request(self.app, "/api/video/accounts", headers={"X-Test-Admin": "yes"})
         self.assertEqual(status, 200)
         self.assertNotIn("encrypted-secret", json.dumps(data))
+
+    async def test_cookie_sharing_does_not_require_qr_worker(self):
+        with (
+            patch.object(settings, "video_login_enabled", False),
+            patch.object(settings, "video_cookie_file_youtube", "/private/cookies.txt"),
+        ):
+            status, data, _ = await request(self.app, "/api/video/accounts", headers={"X-Test-Admin": "yes"})
+            self.assertEqual(status, 200)
+            youtube = next(row for row in data if row["platform"] == "youtube")
+            self.assertEqual(youtube["source"], "file")
+            self.assertFalse(youtube["qr_supported"])
+            self.assertNotIn("/private/", json.dumps(data))
+            status, _, _ = await request(
+                self.app,
+                "/api/video/accounts/sharing",
+                "POST",
+                {"platform": "youtube", "enabled": True},
+                headers={"X-Test-Admin": "yes"},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(await self.repo.video_preference(0, "youtube"), "shared")
+            self.assertEqual(
+                (
+                    await request(
+                        self.app, "/api/video/accounts/sharing", "POST", {"platform": "youtube", "enabled": False}
+                    )
+                )[0],
+                401,
+            )
+
+    async def test_youtube_qr_request_is_rejected(self):
+        status, _, _ = await request(
+            self.app,
+            "/api/video/accounts/login",
+            "POST",
+            {"platform": "youtube"},
+            headers={"X-Test-Admin": "yes"},
+        )
+        self.assertEqual(status, 422)

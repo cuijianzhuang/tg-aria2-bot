@@ -10,8 +10,17 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from bot.config import settings
 from bot.core import quota, storage
 from bot.handlers.menu import edit_menu, preview_back_token, single_menu_action
+from bot.handlers.video_cookies import start_import
 from bot.video.account_views import overview, platform_view, shared_summary
-from bot.video.accounts import CredentialVault, account_cookies, is_video_url, platform_for, validate_url
+from bot.video.accounts import (
+    PLATFORMS,
+    QR_PLATFORMS,
+    CredentialVault,
+    account_cookies,
+    is_video_url,
+    platform_for,
+    validate_url,
+)
 from bot.video.backends import PARSERS
 from bot.video.services import get_resolver
 from bot.video.ui import MODES, preview_card, preview_keyboard, video_card, video_task_keyboard
@@ -169,16 +178,24 @@ async def account_action(query: CallbackQuery, repo):
         await query.answer()
         await edit_menu(query, text, keyboard)
         return
-    if len(parts) != 3 or parts[2] not in ("bilibili", "douyin", "xhs"):
+    if len(parts) != 3 or parts[2] not in PLATFORMS:
         return
     action, platform = parts[1:]
     admin = settings.is_admin(query.from_user.id)
     if action in ("shared", "share", "unshare", "remove-shared", "remove-shared-confirmed") and not admin:
         await query.answer("仅管理员可管理共享账号", show_alert=True)
         return
+    if action == "import" and not settings.video_enabled:
+        await query.answer("请管理员先安装视频组件并启用 VIDEO_ENABLED", show_alert=True)
+        return
     if action not in ("personal", "shared"):
         await query.answer()
-    if action in ("personal", "shared"):
+    if action == "import":
+        await start_import(query, repo, platform)
+    elif action in ("personal", "shared"):
+        if platform not in QR_PLATFORMS:
+            await query.answer("该平台使用 Cookie 文件配置，不支持扫码登录", show_alert=True)
+            return
         if not settings.video_login_enabled:
             await query.answer("扫码服务未启用，请管理员启动 video-login 服务", show_alert=True)
             return

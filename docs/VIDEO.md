@@ -76,7 +76,8 @@ Chromium 的官方依赖安装适用于 Playwright 支持的 Debian/Ubuntu 环�
 
 ## 私聊与 Web 扫码
 
-`/videoaccounts` 或设置里的“视频平台账号”支持 B站、抖音、小红书。
+`/videoaccounts` 或设置里的“视频平台账号”展示 B站、抖音、小红书和 YouTube。
+B站、抖音、小红书可扫码或导入个人 Cookie 文件；YouTube 支持个人导入和管理员共享文件，不提供扫码登录。
 私聊列表展示自己的个人账号、共享账号、最近登录时间与默认身份；可切换默认身份、重新扫码，
 移除前需要二次确认。Web 后台展示共享账号详情与共享开关，不列出其他用户的个人凭据。
 个人账号绑定 Telegram 用户。个人账号缺失时先展示未登录预览；选择个人账号但失效时
@@ -98,10 +99,50 @@ B站采用平台二维码接口并验证登录后的用户身份；抖音、小�
 VIDEO_COOKIE_FILE_BILIBILI=/app/data/video-cookies/bilibili.txt
 VIDEO_COOKIE_FILE_DOUYIN=/app/data/video-cookies/douyin.txt
 VIDEO_COOKIE_FILE_XHS=/app/data/video-cookies/xhs.txt
+VIDEO_COOKIE_FILE_YOUTUBE=/app/data/video-cookies/youtube.txt
 ```
 
-文件为 Netscape 格式，管理员需先开放共享，再由用户显式选择共享模式；关闭共享同样会禁用配置文件凭据。扫码账号存在但未开放时，
-不会通过文件绕过共享开关。扫码和 Cookie 都不在 Telegram 群聊传递。
+文件为 Netscape 格式，管理员需先开放共享，再由用户显式选择共享模式；关闭共享同样会禁用配置文件凭据。
+同平台同时存在共享扫码账号和文件配置时，优先读取显式配置的文件；文件无效时明确报错，不退回旧扫码账号。
+个人账号保持独立，不会自动使用共享文件。扫码和 Cookie 都不在 Telegram 群聊传递。
+
+### 个人 Cookie 导入
+
+四个平台均可在机器人私聊中导入，无需启动扫码 worker：
+
+1. 发送 `/videoaccounts` → 选择平台 → **导入个人 Cookie**。
+2. 五分钟内**回复机器人发出的导入提示消息**，以附件发送 Netscape 格式的 `cookies.txt`，最大 1 MiB。
+3. 导入成功后默认选择个人账号；直接发送视频链接或 `/video URL` 即可。
+
+每个用户、每个平台保存一份个人凭据。重新导入会替换该平台原有个人登录状态，
+不改变共享账号或其他用户。格式错误、缺少当前平台 Cookie 或上传失败时保留原凭据，可回复同一提示重试。
+取消导入使用 `/cancelcookie`；新导入提示会替代旧提示。请求重启后仍有效，但有效期不会延长。
+正在上传时取消或移除个人登录，上传完成也不会重新保存账号。
+账号页可查看最近更新时间、选择个人/共享/未登录身份、重新导入，或确认后移除个人登录。
+
+导入只提取所选平台域名下的未过期 Cookie，支持 `#HttpOnly_`、UTF-8 BOM 和有效期为 `0` 的会话 Cookie。
+数据库加密保存，附件在 bot 内存中解析，不进入普通下载任务或明文临时文件。
+机器人会尝试删除私聊中的原附件；Telegram 与自建 Bot API 可能保留附件缓存，不能保证平台副本被彻底删除。
+导入成功表示格式检查和保存完成，不表示已经验证平台账号身份、Cookie 当前有效或内容可下载。
+
+### 配置 Cookie 文件（四个平台通用）
+
+1. 从已登录的浏览器导出 Netscape `cookies.txt`（最大 1 MiB），放入项目的 `data/video-cookies/`，文件权限设为 `600`。
+2. 在 `.env` 中填写对应的 `VIDEO_COOKIE_FILE_*`。上述 `/app/data/…` 是 Docker 容器路径，对应宿主机项目的 `data/…`；
+   systemd 部署填写服务器上的实际绝对路径，例如 `/opt/tg-aria2-bot/data/video-cookies/youtube.txt`。
+3. 重启 bot；部署了 Web 后台时也重启 Web。systemd 使用 `sudo systemctl restart tg-aria2-bot`，
+   Web 使用 `sudo systemctl restart tg-aria2-web`。Docker 使用 `docker compose up -d --force-recreate bot web`（按已启用服务选择）。
+4. 管理员打开 `/videoaccounts` → 对应平台 → **开放共享**；下载用户选择 **使用共享**，再发送视频链接或 `/video URL`。
+
+需要账号才能解析的视频，请先在平台账号页选好“使用共享”；首次解析失败时无法进入下载确认卡切换身份。
+仅使用 Cookie 文件不需要启动扫码 worker。共享开关同样可在 Web 后台管理。
+Cookie 文件每次解析、下载时重新读取，替换文件内容无需重启；修改 `.env` 路径需要重启对应进程。
+过期 Cookie、格式错误、不可读文件或缺少当前平台 Cookie 会明确报错。仅保留所选平台域名下的未过期 Cookie，
+不会向菜单、Web 响应和错误提示输出文件内容或路径。
+
+YouTube 默认使用 yt-dlp，支持 `youtube.com/watch`、Shorts 和 `youtu.be` 单视频链接。
+已安装的视频组件包含 Deno 与 FFmpeg；服务器需能访问 YouTube，必要时配置 `PROXY_URL`。
+Cookie 不保证解除服务器 IP 限制、地区限制或账号自身没有的内容权限。
 
 ## 数据与维护
 

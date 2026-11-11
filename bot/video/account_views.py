@@ -8,9 +8,10 @@ from aiogram.types import InlineKeyboardButton as Button
 from aiogram.types import InlineKeyboardMarkup as Markup
 
 from bot.config import settings
+from bot.video.accounts import QR_PLATFORMS
 from bot.video.ui import MODES
 
-PLATFORM_LABELS = {"bilibili": "B站", "douyin": "抖音", "xhs": "小红书"}
+PLATFORM_LABELS = {"bilibili": "B站", "douyin": "抖音", "xhs": "小红书", "youtube": "YouTube"}
 
 
 def metadata(row):
@@ -35,11 +36,12 @@ async def shared_summary(repo, platform):
     return {
         "platform": platform,
         "label": PLATFORM_LABELS[platform],
-        "identity": row["identity"] if row else None,
-        "updated": row["updated"] if row else None,
+        "identity": row["identity"] if row and not configured else None,
+        "updated": row["updated"] if row and not configured else None,
         "shared": enabled and saved,
         "saved": saved,
-        "source": "scan" if row else "file" if configured else None,
+        "source": "file" if configured else "scan" if row else None,
+        "qr_supported": platform in QR_PLATFORMS,
     }
 
 
@@ -50,6 +52,8 @@ async def overview(repo, user_id, admin, back_token=None):
         personal = metadata(await repo.video_account(platform, user_id))
         shared = await shared_summary(repo, platform)
         mode = await repo.video_preference(user_id, platform)
+        if mode == "personal" and not personal:
+            mode = "anonymous"
         lines += [f"<b>{label}</b> · 默认：{MODES[mode]}"]
         lines.append("👤 个人：" + (escape(personal["identity"]) if personal else "未登录"))
         if personal:
@@ -73,9 +77,11 @@ async def platform_view(repo, user_id, platform, admin, back_token=None):
     personal = metadata(await repo.video_account(platform, user_id))
     shared = await shared_summary(repo, platform)
     mode = await repo.video_preference(user_id, platform)
+    if mode == "personal" and not personal:
+        mode = "anonymous"
     lines = [f"🔑 <b>{PLATFORM_LABELS[platform]}账号管理</b>", f"默认使用：{MODES[mode]}", "", "👤 <b>个人账号</b>"]
     lines += (
-        [escape(personal["identity"]), "最近登录：" + display_time(personal["updated"])] if personal else ["未登录"]
+        [escape(personal["identity"]), "最近更新：" + display_time(personal["updated"])] if personal else ["未登录"]
     )
     lines += ["", "👥 <b>共享账号</b>"]
     if shared["saved"]:
@@ -87,25 +93,33 @@ async def platform_view(repo, user_id, platform, admin, back_token=None):
             lines.append("来源：管理员配置的 Cookie 文件")
     else:
         lines.append("未登录")
-    lines += ["", "已保存不代表当前仍有效；解析失败时可重新扫码。"]
-    rows = [
-        [
-            Button(
-                text="📱 重新登录个人账号" if personal else "📱 个人扫码登录", callback_data=f"vacc:personal:{platform}"
-            )
+    lines += ["", "已保存不代表当前仍有效；解析失败时可更新 Cookie 文件或重新扫码。"]
+    rows = [[Button(text="📄 导入个人 Cookie", callback_data=f"vacc:import:{platform}")]]
+    if platform not in QR_PLATFORMS:
+        lines.append("此平台支持个人 Cookie 导入和管理员共享文件，不提供扫码登录。")
+        if admin:
+            lines.append("配置项：VIDEO_COOKIE_FILE_" + platform.upper())
+    else:
+        rows += [
+            [
+                Button(
+                    text="📱 重新登录个人账号" if personal else "📱 个人扫码登录",
+                    callback_data=f"vacc:personal:{platform}",
+                )
+            ]
         ]
-    ]
     if personal:
         rows.append([Button(text="🗑 移除个人登录", callback_data=f"vacc:remove:{platform}")])
     if admin:
-        rows.append(
-            [
-                Button(
-                    text="👥 重新登录共享账号" if shared["saved"] else "👥 共享账号扫码",
-                    callback_data=f"vacc:shared:{platform}",
-                )
-            ]
-        )
+        if platform in QR_PLATFORMS:
+            rows.append(
+                [
+                    Button(
+                        text="👥 重新登录共享账号" if shared["saved"] else "👥 共享账号扫码",
+                        callback_data=f"vacc:shared:{platform}",
+                    )
+                ]
+            )
         if shared["saved"]:
             rows.append(
                 [
