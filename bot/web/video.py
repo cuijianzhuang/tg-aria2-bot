@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from bot.config import settings
 from bot.video.account_views import shared_summary
+from bot.video.qr_browser import REASONS
 from bot.video.ui import STATES
 
 COOKIE = "video_login_session"
@@ -37,7 +38,9 @@ def public_status(row):
     state = "expired" if expired else row["state"]
     return {
         "state": state,
-        "message": STATES.get(state, "处理中"),
+        "message": REASONS.get(dict(row).get("failure_reason"), STATES.get(state, "处理中"))
+        if state == "failed"
+        else STATES.get(state, "处理中"),
         "platform": row["platform"],
         "qr_ready": bool(row["qr_path"]) and state in ("waiting", "scanned"),
         "identity": row["identity"] if state == "success" else None,

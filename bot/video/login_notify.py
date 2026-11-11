@@ -7,13 +7,14 @@ from pathlib import Path
 from aiogram.types import FSInputFile
 
 from bot.config import settings
+from bot.video.qr_browser import REASONS
 from bot.video.ui import STATES, login_keyboard
 
 
 async def notify_loop(bot, repo):
     while True:
         for row in await repo.video_login_rows():
-            if row["expires"] < time.time() and row["state"] in ("queued", "waiting", "scanned"):
+            if row["expires"] < time.time() and row["state"] in ("queued", "preparing", "waiting", "scanned"):
                 await repo.video_login_update(row["id"], state="expired")
                 row = await repo.video_login(row["id"])
             if not row["chat_id"] or row["notified_state"] == row["state"]:
@@ -23,6 +24,8 @@ async def notify_loop(bot, repo):
             qr_file = Path(settings.db_path).parent / "video-private" / "qr" / (row["id"] + ".png")
             try:
                 text = f"🔑 {row['platform']} · {'共享账号' if row['owner_id'] == 0 else '个人账号'}\n{STATES.get(row['state'], '处理中')}"
+                if row["state"] == "failed" and dict(row).get("failure_reason") in REASONS:
+                    text += "\n⚠️ " + REASONS[row["failure_reason"]]
                 if row["qr_path"] and qr_file.is_file() and row["state"] == "waiting":
                     message = await bot.send_photo(
                         row["chat_id"],

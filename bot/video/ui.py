@@ -12,6 +12,7 @@ from bot.core.quota import fmt_bytes
 MODES = {"personal": "个人账号", "shared": "共享账号", "anonymous": "未登录"}
 STATES = {
     "queued": "准备登录",
+    "preparing": "正在准备登录页面",
     "waiting": "等待扫码",
     "scanned": "已扫码，请在手机确认",
     "success": "登录成功",
