@@ -8,6 +8,7 @@ from aiogram.types import InlineKeyboardMarkup as Markup
 
 from bot.core.keyboards import BACK_TO_LIST_TEXT, task_keyboard
 from bot.core.quota import fmt_bytes
+from bot.video.accounts import QR_PLATFORMS, platform_for
 
 MODES = {"personal": "个人账号", "shared": "共享账号", "anonymous": "未登录"}
 STATES = {
@@ -37,6 +38,7 @@ def preview_card(preview):
 def preview_keyboard(preview):
     token = preview["token"]
     info = json.loads(preview["info"])
+    platform = platform_for(preview["url"])
     buttons = [
         Button(
             text=("✅ " if q == preview["quality"] else "") + ("最佳" if q == "best" else q),
@@ -47,7 +49,11 @@ def preview_keyboard(preview):
     rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
     rows += [
         [Button(text=p, callback_data=f"vp:p:{token}:{p}") for p in ("yt-dlp", "you-get")],
-        [Button(text=label, callback_data=f"vp:a:{token}:{mode}") for mode, label in MODES.items()],
+        [
+            Button(text=label, callback_data=f"vp:a:{token}:{mode}")
+            for mode, label in MODES.items()
+            if mode == "anonymous" or platform and (mode != "personal" or platform in QR_PLATFORMS)
+        ],
         [
             Button(text="▶️ 确认下载", callback_data=f"vp:start:{token}"),
             Button(text="❌ 取消", callback_data=f"vp:cancel:{token}"),

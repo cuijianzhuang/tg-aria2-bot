@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     video_cookie_file_bilibili: str = ""
     video_cookie_file_douyin: str = ""
     video_cookie_file_xhs: str = ""
+    video_cookie_file_youtube: str = ""
     proxy_url: str | None = None
 
     db_path: str = "/app/data/tasks.db"

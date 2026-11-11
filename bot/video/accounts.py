@@ -5,6 +5,7 @@ import http.cookiejar
 import json
 import os
 import tempfile
+import warnings
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -12,7 +13,9 @@ PLATFORMS = {
     "bilibili": ("bilibili.com", "b23.tv"),
     "douyin": ("douyin.com", "iesdouyin.com"),
     "xhs": ("xiaohongshu.com", "xhslink.com"),
+    "youtube": ("youtube.com", "youtu.be", "youtube-nocookie.com"),
 }
+QR_PLATFORMS = frozenset({"bilibili", "douyin", "xhs"})
 VIDEO_DOMAINS = (
     "youtube.com",
     "youtu.be",
@@ -112,6 +115,26 @@ class CredentialVault:
             Path(path).unlink(missing_ok=True)
 
 
+def load_cookie_file(path, platform):
+    jar = http.cookiejar.MozillaCookieJar(path)
+    try:
+        # The stdlib may warn about malformed lines before raising LoadError.
+        # Keep those diagnostics from exposing file contents in service logs.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="http.cookiejar bug!", category=UserWarning)
+            jar.load(ignore_discard=True, ignore_expires=False)
+    except (OSError, ValueError):
+        raise ValueError("Cookie 文件无法读取或格式无效，请管理员检查 Netscape 格式文件") from None
+    cookies = [
+        dict(name=c.name, value=c.value, domain=c.domain, path=c.path, secure=c.secure, expires=c.expires or -1)
+        for c in jar
+        if any(matches_host(c.domain.lstrip(".").lower(), d) for d in PLATFORMS[platform])
+    ]
+    if not cookies:
+        raise ValueError("Cookie 文件没有当前平台的有效 Cookie，请管理员更新文件")
+    return cookies
+
+
 async def account_cookies(repo, vault, user_id, url, mode):
     platform = platform_for(url)
     if mode == "anonymous" or not platform:
@@ -119,25 +142,18 @@ async def account_cookies(repo, vault, user_id, url, mode):
     if mode not in ("personal", "shared"):
         raise ValueError("无效的账号选择")
     row = await repo.video_account(platform, user_id if mode == "personal" else 0)
-    if row:
-        if mode == "shared" and not row["enabled"]:
+    if mode == "shared":
+        from bot.config import settings
+
+        enabled = bool(row["enabled"]) if row else await repo.video_preference(0, platform) == "shared"
+        if not enabled:
             raise ValueError("该平台的共享账号尚未开放")
+        configured = getattr(settings, "video_cookie_file_" + platform, "")
+        if configured:
+            return load_cookie_file(configured, platform)
+    if row:
         try:
             return vault.decrypt(row["cookies"])
         except Exception:
             raise ValueError("账号凭据无法解密，请恢复原密钥或重新扫码登录") from None
-    if mode == "shared":
-        from bot.config import settings
-
-        configured = getattr(settings, "video_cookie_file_" + platform, "")
-        if configured:
-            if await repo.video_preference(0, platform) != "shared":
-                raise ValueError("配置文件共享账号尚未开放，请管理员先开放共享")
-            jar = http.cookiejar.MozillaCookieJar(configured)
-            jar.load(ignore_discard=True, ignore_expires=False)
-            return [
-                dict(name=c.name, value=c.value, domain=c.domain, path=c.path, secure=c.secure, expires=c.expires or -1)
-                for c in jar
-                if any(matches_host(c.domain.lstrip("."), d) for d in PLATFORMS[platform])
-            ]
     raise ValueError("未登录；请扫码登录，或明确切换为共享/未登录模式")

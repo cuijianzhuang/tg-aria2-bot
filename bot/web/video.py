@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from bot.config import settings
-from bot.video.account_views import shared_summary
+from bot.video.account_views import PLATFORM_LABELS, shared_summary
 from bot.video.qr_browser import REASONS
 from bot.video.ui import STATES
 
@@ -21,6 +21,10 @@ class Exchange(BaseModel):
 
 
 class PlatformRequest(BaseModel):
+    platform: Literal["bilibili", "douyin", "xhs", "youtube"]
+
+
+class QRPlatformRequest(BaseModel):
     platform: Literal["bilibili", "douyin", "xhs"]
 
 
@@ -122,14 +126,14 @@ def register(app, state, require_login):
         await repo.video_rebind_session(request.cookies.get(COOKIE, ""), login_id)
         return {"ok": True}
 
-    admin_dependencies = [Depends(require_login), Depends(no_cross_origin), Depends(login_enabled)]
+    admin_dependencies = [Depends(require_login), Depends(no_cross_origin)]
 
     @app.get("/api/video/accounts", dependencies=[Depends(require_login)])
     async def accounts():
-        return [await shared_summary(state["repo"], platform) for platform in ("bilibili", "douyin", "xhs")]
+        return [await shared_summary(state["repo"], platform) for platform in PLATFORM_LABELS]
 
-    @app.post("/api/video/accounts/login", dependencies=admin_dependencies)
-    async def admin_login(body: PlatformRequest):
+    @app.post("/api/video/accounts/login", dependencies=[*admin_dependencies, Depends(login_enabled)])
+    async def admin_login(body: QRPlatformRequest):
         ids = settings.admin_ids or settings.allowed_ids
         if not ids:
             raise HTTPException(409, "请先配置管理员 Telegram ID")

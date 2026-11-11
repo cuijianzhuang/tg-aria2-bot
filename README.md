@@ -128,6 +128,9 @@ sudo bash tg-aria2.sh install --mode docker --with-video-login
 
 yt-dlp 解析失败时可由 you-get 兜底；下载开始后不自动切换。首版面向单视频，不提供播放列表批量下载或直播录制。暂停任务保留执行槽位。
 
+YouTube、B站、抖音和小红书均支持 Netscape Cookie 文件配置。管理员开放共享后，用户可在平台账号页选择“使用共享”，
+再发送需要登录的视频链接。YouTube 不提供扫码登录。[查看 Cookie 配置步骤](docs/VIDEO.md#配置-cookie-文件四个平台通用)。
+
 ### 🔑 管理登录账号
 
 私聊发送 `/videoaccounts`，或点击菜单中的“平台账号”：
