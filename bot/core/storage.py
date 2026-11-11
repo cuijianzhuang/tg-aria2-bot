@@ -40,8 +40,20 @@ MIN_FREE_BYTES = 1 * 1024**3
 
 
 def has_enough_space(download_dir: str, required_bytes: int, safety_factor: float = 1.2) -> bool:
+    # The directory can disappear after startup, or a preset can point to a
+    # new location. Prepare it before statvfs rather than aborting the callback.
+    os.makedirs(download_dir, exist_ok=True)
     usage = shutil.disk_usage(download_dir)
     return usage.free > max(required_bytes * safety_factor, MIN_FREE_BYTES)
+
+
+def download_space_error(download_dir: str, required_bytes: int) -> str | None:
+    try:
+        if has_enough_space(download_dir, required_bytes):
+            return None
+    except OSError:
+        return "下载目录不可用，请管理员检查路径和读写权限后重试"
+    return "服务器磁盘空间不足，请清理后重试"
 
 
 def _human_size(n: int) -> str:

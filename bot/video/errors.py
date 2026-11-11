@@ -16,3 +16,13 @@ def download_error_hint(output: str) -> str | None:
     if any(phrase in text for phrase in ("sign in", "login required", "cookies are no longer valid", "not logged in")):
         return "平台要求有效登录，请重新扫码后重试"
     return None
+
+
+def execution_error(exc, stage):
+    if isinstance(exc, ValueError):
+        return str(exc)
+    if isinstance(exc, FileNotFoundError) and stage == "校验":
+        return "未找到 ffprobe，请管理员重新安装视频组件"
+    if isinstance(exc, PermissionError):
+        return "视频文件或组件权限不足，请管理员检查运行用户的读写和执行权限"
+    return f"视频{stage}阶段执行失败，请管理员查看服务日志"

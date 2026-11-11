@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     finished_at       TIMESTAMP
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_dedup_source
+CREATE INDEX IF NOT EXISTS idx_dedup_source
     ON tasks(source_type, source_ref)
     WHERE status = 'COMPLETED';
 

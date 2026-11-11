@@ -761,7 +761,11 @@ class TaskManager:
         # only a brand-new message actually notifies, so that's what the
         # 完成通知 toggle gates
         if settings.notify_on_complete:
-            await self._bot.send_message(chat_id=row["chat_id"], text=text, reply_markup=markup)
+            try:
+                await self._bot.send_message(chat_id=row["chat_id"], text=text, reply_markup=markup, parse_mode=parse_mode)
+            except Exception as exc:
+                # Notification delivery must not reverse a committed download.
+                log.warning("task %s notification delivery failed (%s)", gid, type(exc).__name__)
 
     async def _cleanup_loop(self):
         # 每天检查一次是否需要清理，比 5 秒轮询低频得多，避免无意义的空跑
