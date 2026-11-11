@@ -169,6 +169,22 @@ sudo tg-aria2 backup       # 备份配置和数据库
 ## 常见问题
 
 <details>
+<summary><strong>点击“开始下载”没有反应，日志提示下载目录不存在？</strong></summary>
+
+旧版本在磁盘检查时直接访问下载目录；目录在运行期间被移除后，会抛出 `FileNotFoundError`，中断按钮处理。
+可先按 `.env` 的 `DOWNLOAD_DIR` 创建对应目录，再重试原确认卡，无需重装。例如 systemd 默认路径：
+
+```bash
+sudo mkdir -p /opt/tg-aria2-bot/downloads
+```
+
+新版在本机下载前自动补建缺失目录，并区分“目录不可用”和“磁盘空间不足”；失败时保留确认卡供重试。
+远程 aria2 节点的目录仍由远端管理。若目录反复消失，还需核查服务器上的删除操作、清理脚本或挂载变化；
+单条 `FileNotFoundError` 日志无法确定删除来源。
+
+</details>
+
+<details>
 <summary><strong>提示“视频功能 / 扫码服务未启用”怎么办？</strong></summary>
 
 普通更新不会自动安装可选组件。一键部署在项目目录重新运行 `install --with-video-login`，会沿用现有配置并安装所需组件。手动部署需设置 `VIDEO_ENABLED=true`、`VIDEO_LOGIN_ENABLED=true`，安装依赖并启动扫码 worker；修改配置后重启相关服务。

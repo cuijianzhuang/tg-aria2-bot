@@ -95,8 +95,9 @@ async def video_preview_action(query: CallbackQuery, repo, task_manager):
         refusal = await quota.admission_error(
             repo, query.from_user.id, info.get("size"), pending_usage=task_manager.pending_usage(query.from_user.id)
         )
-        if refusal or not storage.has_enough_space(settings.download_dir, info.get("size") or 0):
-            await query.message.answer("⛔ " + (refusal or "磁盘空间不足"))
+        refusal = refusal or storage.download_space_error(settings.download_dir, info.get("size") or 0)
+        if refusal:
+            await query.message.answer("⛔ " + refusal)
             return
         row = await repo.video_create_task(token, query.from_user.id, query.message.message_id)
         if row:

@@ -52,8 +52,9 @@ async def handle_media(message: Message, repo):
         )
         return
 
-    if not storage.has_enough_space(settings.download_dir, file_size or 0):
-        await message.reply("⛔ 服务器磁盘空间不足，已拒绝该任务。")
+    space_error = storage.download_space_error(settings.download_dir, file_size or 0)
+    if space_error:
+        await message.reply("⛔ " + space_error)
         return
 
     tg_file = await message.bot.get_file(file_id)

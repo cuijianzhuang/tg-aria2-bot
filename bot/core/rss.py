@@ -150,10 +150,7 @@ async def fetch(url: str) -> bytes:
 
 
 def _has_space(path: str) -> bool:
-    try:
-        return storage.has_enough_space(path, 0)
-    except OSError:
-        return True      # 下载目录还不存在：交给 aria2 去建，别因为这个卡住订阅
+    return storage.download_space_error(path, 0) is None
 
 
 async def poll_feed(feed, *, bot, repo, nodes, task_manager=None) -> int:
