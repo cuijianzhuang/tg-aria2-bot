@@ -109,3 +109,13 @@ class TestSavedVideoAccounts(unittest.IsolatedAsyncioTestCase):
         await account_action(query, self.repo)
         self.assertTrue(query.answer.await_args.kwargs["show_alert"])
         self.assertEqual(await self.repo.video_login_rows(), [])
+
+    async def test_personal_import_starts_without_qr_service(self):
+        query = self.query("import")
+        query.data = "vacc:import:youtube"
+        query.message.answer.return_value = SimpleNamespace(message_id=501)
+        with patch.object(settings, "video_enabled", True), patch.object(settings, "video_login_enabled", False):
+            await account_action(query, self.repo)
+        row = await self.repo.video_cookie_import(11, 501)
+        self.assertEqual(row["user_id"], 11)
+        self.assertEqual(row["platform"], "youtube")

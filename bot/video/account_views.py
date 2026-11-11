@@ -81,7 +81,7 @@ async def platform_view(repo, user_id, platform, admin, back_token=None):
         mode = "anonymous"
     lines = [f"🔑 <b>{PLATFORM_LABELS[platform]}账号管理</b>", f"默认使用：{MODES[mode]}", "", "👤 <b>个人账号</b>"]
     lines += (
-        [escape(personal["identity"]), "最近登录：" + display_time(personal["updated"])] if personal else ["未登录"]
+        [escape(personal["identity"]), "最近更新：" + display_time(personal["updated"])] if personal else ["未登录"]
     )
     lines += ["", "👥 <b>共享账号</b>"]
     if shared["saved"]:
@@ -94,13 +94,13 @@ async def platform_view(repo, user_id, platform, admin, back_token=None):
     else:
         lines.append("未登录")
     lines += ["", "已保存不代表当前仍有效；解析失败时可更新 Cookie 文件或重新扫码。"]
-    rows = []
+    rows = [[Button(text="📄 导入个人 Cookie", callback_data=f"vacc:import:{platform}")]]
     if platform not in QR_PLATFORMS:
-        lines.append("此平台使用管理员配置的 Cookie 文件，不提供扫码登录。")
+        lines.append("此平台支持个人 Cookie 导入和管理员共享文件，不提供扫码登录。")
         if admin:
             lines.append("配置项：VIDEO_COOKIE_FILE_" + platform.upper())
     else:
-        rows = [
+        rows += [
             [
                 Button(
                     text="📱 重新登录个人账号" if personal else "📱 个人扫码登录",

@@ -64,6 +64,8 @@ jobs:
             tests/test_video_accounts.py
             tests/test_qr_recovery.py
             tests/test_cookie_files.py
+            tests/test_cookie_imports.py
+            bot/handlers/video_cookies.py
             bot/handlers/menu.py
             tests/test_menu_navigation.py
       - run: python -m compileall -q bot

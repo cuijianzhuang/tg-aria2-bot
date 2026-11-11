@@ -2,6 +2,7 @@
 
 import contextlib
 import http.cookiejar
+import io
 import json
 import os
 import tempfile
@@ -16,6 +17,7 @@ PLATFORMS = {
     "youtube": ("youtube.com", "youtu.be", "youtube-nocookie.com"),
 }
 QR_PLATFORMS = frozenset({"bilibili", "douyin", "xhs"})
+MAX_COOKIE_BYTES = 1024 * 1024
 VIDEO_DOMAINS = (
     "youtube.com",
     "youtu.be",
@@ -116,22 +118,45 @@ class CredentialVault:
 
 
 def load_cookie_file(path, platform):
-    jar = http.cookiejar.MozillaCookieJar(path)
     try:
-        # The stdlib may warn about malformed lines before raising LoadError.
-        # Keep those diagnostics from exposing file contents in service logs.
+        with open(path, "rb") as stream:
+            data = stream.read(MAX_COOKIE_BYTES + 1)
+    except OSError:
+        raise ValueError("Cookie 文件无法读取，请管理员检查文件路径和权限") from None
+    return parse_cookie_upload(data, platform)
+
+
+def parse_cookie_upload(data, platform):
+    if len(data) > MAX_COOKIE_BYTES:
+        raise ValueError("Cookie 文件不能超过 1 MiB")
+    jar = http.cookiejar.MozillaCookieJar()
+    try:
+        lines = data.decode("utf-8-sig").splitlines()
+        for index, line in enumerate(lines):
+            # Browser exports commonly represent session cookies with expiry 0.
+            if not line.startswith(("#", "$")) or line.startswith("#HttpOnly_"):
+                fields = line.split("\t")
+                if len(fields) == 7 and fields[4] == "0":
+                    fields[4] = ""
+                    lines[index] = "\t".join(fields)
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="http.cookiejar bug!", category=UserWarning)
-            jar.load(ignore_discard=True, ignore_expires=False)
+            # Reuse the stdlib Netscape parser with a stream to avoid writing
+            # uploaded credentials to a plaintext temporary file.
+            jar._really_load(io.StringIO("\n".join(lines)), "<cookie file>", True, False)
     except (OSError, ValueError):
-        raise ValueError("Cookie 文件无法读取或格式无效，请管理员检查 Netscape 格式文件") from None
+        raise ValueError("Cookie 文件格式无效，请使用 Netscape 格式的 cookies.txt") from None
+    return platform_cookies(jar, platform)
+
+
+def platform_cookies(jar, platform):
     cookies = [
         dict(name=c.name, value=c.value, domain=c.domain, path=c.path, secure=c.secure, expires=c.expires or -1)
         for c in jar
         if any(matches_host(c.domain.lstrip(".").lower(), d) for d in PLATFORMS[platform])
     ]
     if not cookies:
-        raise ValueError("Cookie 文件没有当前平台的有效 Cookie，请管理员更新文件")
+        raise ValueError("Cookie 文件没有当前平台的有效 Cookie，请更新文件")
     return cookies
 
 

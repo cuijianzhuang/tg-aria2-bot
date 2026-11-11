@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 from datetime import UTC, datetime
 from time import time
@@ -14,6 +15,7 @@ class TaskRepo(VideoRepoMixin):
     def __init__(self, db_path: str):
         self._db_path = db_path
         self._conn: aiosqlite.Connection | None = None
+        self._video_account_lock = asyncio.Lock()
 
     async def connect(self):
         self._conn = await aiosqlite.connect(self._db_path)

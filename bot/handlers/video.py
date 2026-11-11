@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from bot.config import settings
 from bot.core import quota, storage
 from bot.handlers.menu import edit_menu, preview_back_token, single_menu_action
+from bot.handlers.video_cookies import start_import
 from bot.video.account_views import overview, platform_view, shared_summary
 from bot.video.accounts import (
     PLATFORMS,
@@ -183,9 +184,14 @@ async def account_action(query: CallbackQuery, repo):
     if action in ("shared", "share", "unshare", "remove-shared", "remove-shared-confirmed") and not admin:
         await query.answer("仅管理员可管理共享账号", show_alert=True)
         return
+    if action == "import" and not settings.video_enabled:
+        await query.answer("请管理员先安装视频组件并启用 VIDEO_ENABLED", show_alert=True)
+        return
     if action not in ("personal", "shared"):
         await query.answer()
-    if action in ("personal", "shared"):
+    if action == "import":
+        await start_import(query, repo, platform)
+    elif action in ("personal", "shared"):
         if platform not in QR_PLATFORMS:
             await query.answer("该平台使用 Cookie 文件配置，不支持扫码登录", show_alert=True)
             return

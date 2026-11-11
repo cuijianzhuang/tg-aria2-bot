@@ -68,7 +68,7 @@ Chromium 的官方依赖安装适用于 Playwright 支持的 Debian/Ubuntu 环�
 ## 私聊与 Web 扫码
 
 `/videoaccounts` 或设置里的“视频平台账号”展示 B站、抖音、小红书和 YouTube。
-B站、抖音、小红书可扫码或配置 Cookie 文件；YouTube 使用 Cookie 文件，不提供扫码登录。
+B站、抖音、小红书可扫码或导入个人 Cookie 文件；YouTube 支持个人导入和管理员共享文件，不提供扫码登录。
 私聊列表展示自己的个人账号、共享账号、最近登录时间与默认身份；可切换默认身份、重新扫码，
 移除前需要二次确认。Web 后台展示共享账号详情与共享开关，不列出其他用户的个人凭据。
 个人账号绑定 Telegram 用户。个人账号缺失时先展示未登录预览；选择个人账号但失效时
@@ -97,9 +97,28 @@ VIDEO_COOKIE_FILE_YOUTUBE=/app/data/video-cookies/youtube.txt
 同平台同时存在共享扫码账号和文件配置时，优先读取显式配置的文件；文件无效时明确报错，不退回旧扫码账号。
 个人账号保持独立，不会自动使用共享文件。扫码和 Cookie 都不在 Telegram 群聊传递。
 
+### 个人 Cookie 导入
+
+四个平台均可在机器人私聊中导入，无需启动扫码 worker：
+
+1. 发送 `/videoaccounts` → 选择平台 → **导入个人 Cookie**。
+2. 五分钟内**回复机器人发出的导入提示消息**，以附件发送 Netscape 格式的 `cookies.txt`，最大 1 MiB。
+3. 导入成功后默认选择个人账号；直接发送视频链接或 `/video URL` 即可。
+
+每个用户、每个平台保存一份个人凭据。重新导入会替换该平台原有个人登录状态，
+不改变共享账号或其他用户。格式错误、缺少当前平台 Cookie 或上传失败时保留原凭据，可回复同一提示重试。
+取消导入使用 `/cancelcookie`；新导入提示会替代旧提示。请求重启后仍有效，但有效期不会延长。
+正在上传时取消或移除个人登录，上传完成也不会重新保存账号。
+账号页可查看最近更新时间、选择个人/共享/未登录身份、重新导入，或确认后移除个人登录。
+
+导入只提取所选平台域名下的未过期 Cookie，支持 `#HttpOnly_`、UTF-8 BOM 和有效期为 `0` 的会话 Cookie。
+数据库加密保存，附件在 bot 内存中解析，不进入普通下载任务或明文临时文件。
+机器人会尝试删除私聊中的原附件；Telegram 与自建 Bot API 可能保留附件缓存，不能保证平台副本被彻底删除。
+导入成功表示格式检查和保存完成，不表示已经验证平台账号身份、Cookie 当前有效或内容可下载。
+
 ### 配置 Cookie 文件（四个平台通用）
 
-1. 从已登录的浏览器导出 Netscape `cookies.txt`，放入项目的 `data/video-cookies/`，文件权限设为 `600`。
+1. 从已登录的浏览器导出 Netscape `cookies.txt`（最大 1 MiB），放入项目的 `data/video-cookies/`，文件权限设为 `600`。
 2. 在 `.env` 中填写对应的 `VIDEO_COOKIE_FILE_*`。上述 `/app/data/…` 是 Docker 容器路径，对应宿主机项目的 `data/…`；
    systemd 部署填写服务器上的实际绝对路径，例如 `/opt/tg-aria2-bot/data/video-cookies/youtube.txt`。
 3. 重启 bot；部署了 Web 后台时也重启 Web。systemd 使用 `sudo systemctl restart tg-aria2-bot`，
