@@ -1,7 +1,6 @@
 """Optional QR worker. Uses a durable queue, exposes no browser/debug ports."""
 
 import asyncio
-import contextlib
 import logging
 import time
 from pathlib import Path
@@ -12,20 +11,33 @@ import aiohttp
 from bot.config import settings
 from bot.db.repo import TaskRepo
 from bot.video.accounts import PLATFORMS, CredentialVault
+from bot.video.qr_browser import CAPTCHA_SELECTORS, QRLoginError, failure_reason, open_login, visible_locator
 
 log = logging.getLogger(__name__)
 TERMINAL = {"success", "expired", "cancelled", "failed", "verification_required"}
 BROWSER_SITES = {
     "douyin": {
         "url": "https://www.douyin.com/",
-        "login": ['button:has-text("登录")', 'div:has-text("登录")'],
-        "qr": ['[class*="qrcode"] img', '[class*="qrcode"] canvas', '[class*="QRCode"] img'],
+        "login": ['[data-e2e="top-login-button"]', 'button:text-is("登录")', 'text="登录"'],
+        "qr": [
+            'img[class*="qrcode" i]',
+            'img[class*="qr-code" i]',
+            '[class*="qrcode" i] img',
+            '[class*="qrcode" i] canvas',
+            '[class*="QRCode"] img',
+        ],
         "profile": ['a[href*="/user/self"]', 'a[href*="/user/"]:has-text("我")'],
     },
     "xhs": {
         "url": "https://www.xiaohongshu.com/explore",
-        "login": ['button:has-text("登录")'],
-        "qr": [".login-container .qrcode-img", '.login-container img[class*="qrcode"]', '[class*="qrcode"] canvas'],
+        "login": [".login-btn", 'button:text-is("登录")', 'text="登录"'],
+        "qr": [
+            'img[class*="qrcode" i]',
+            'img[class*="qr-code" i]',
+            ".login-container .qrcode-img",
+            '.login-container img[class*="qrcode"]',
+            '[class*="qrcode" i] canvas',
+        ],
         "profile": ['a[href^="/user/profile/"]:has-text("我")', '.user.side-bar-component a[href*="/user/profile/"]'],
     },
 }
@@ -36,6 +48,7 @@ class LoginWorker:
         self.repo = repo
         self.vault = vault or CredentialVault(Path(settings.db_path).parent)
         self.tasks = {}
+        self.stages = {}
 
     def qr_path(self, login_id):
         directory = self.vault.root / "qr"
@@ -119,47 +132,51 @@ class LoginWorker:
                     return
 
     async def browser_login(self, row):
+        self.stages[row["id"]] = "import"
         from playwright.async_api import async_playwright
 
         site = BROWSER_SITES[row["platform"]]
         async with async_playwright() as playwright:
+            self.stages[row["id"]] = "launch"
             browser = await playwright.chromium.launch(
                 headless=True, **({"proxy": {"server": settings.proxy_url}} if settings.proxy_url else {})
             )
             try:
                 context = await browser.new_context(viewport={"width": 1280, "height": 900}, locale="zh-CN")
                 page = await context.new_page()
-                await page.goto(site["url"], wait_until="domcontentloaded", timeout=45000)
-                # Selectors are kept per platform; no third-party crawler code is
-                # vendored and no CAPTCHA solver or fingerprint spoofing is used.
-                for selector in site["login"]:
-                    locator = page.locator(selector).first
-                    if await locator.is_visible():
-                        with contextlib.suppress(Exception):
-                            await locator.click(timeout=2000)
-                        break
+                self.stages[row["id"]] = "navigation"
+                response = await page.goto(site["url"], wait_until="domcontentloaded", timeout=45000)
+                if response and response.status >= 400:
+                    raise QRLoginError(
+                        "platform_blocked" if response.status in (403, 412, 429) else "platform_unavailable"
+                    )
+                self.stages[row["id"]] = "discovery"
                 qr = None
-                deadline = time.monotonic() + 30
+                deadline = time.monotonic() + 45
                 while time.monotonic() < deadline and await self.active(row["id"]):
-                    for selector in site["qr"]:
-                        candidate = page.locator(selector).first
-                        if await candidate.is_visible():
-                            qr = candidate
-                            break
+                    if await visible_locator(page, CAPTCHA_SELECTORS):
+                        await self.repo.video_login_update(row["id"], state="verification_required")
+                        return
+                    qr = await visible_locator(page, site["qr"], minimum_size=60)
                     if qr:
                         break
+                    await open_login(page, site["login"])
+                    await open_login(page, ['text="扫码登录"', 'text="二维码登录"'])
                     await asyncio.sleep(1)
+                if not await self.active(row["id"]):
+                    return
                 if qr is None:
-                    raise ValueError("QR unavailable")
+                    raise QRLoginError("qr_missing")
+                self.stages[row["id"]] = "capture"
                 path = self.qr_path(row["id"])
                 await qr.screenshot(path=str(path))
                 path.chmod(0o600)
                 await self.repo.video_login_update(row["id"], state="waiting", qr_path=str(path))
+                self.stages[row["id"]] = "waiting"
                 while await self.active(row["id"]):
-                    for selector in ('[class*="captcha"]', "text=请完成验证", "text=拖动滑块"):
-                        if await page.locator(selector).first.is_visible():
-                            await self.repo.video_login_update(row["id"], state="verification_required")
-                            return
+                    if await visible_locator(page, CAPTCHA_SELECTORS):
+                        await self.repo.video_login_update(row["id"], state="verification_required")
+                        return
                     for selector in site["profile"]:
                         profile = page.locator(selector).first
                         if await profile.is_visible():
@@ -192,7 +209,7 @@ class LoginWorker:
                 row["owner_id"] == 0 and not settings.is_admin(row["requester_id"])
             ):
                 raise ValueError("invalid login request")
-            await self.repo.video_login_update(row["id"], state="waiting")
+            await self.repo.video_login_update(row["id"], state="preparing", failure_reason=None)
             await asyncio.wait_for(
                 self.bilibili(row) if row["platform"] == "bilibili" else self.browser_login(row),
                 max(1, row["expires"] - time.time()),
@@ -201,14 +218,20 @@ class LoginWorker:
             if current and current["state"] not in TERMINAL:
                 await self.repo.video_login_update(row["id"], state="expired")
         except TimeoutError:
-            await self.repo.video_login_update(row["id"], state="expired")
+            current = await self.repo.video_login(row["id"])
+            if current and current["state"] not in TERMINAL:
+                await self.repo.video_login_update(row["id"], state="expired")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             # Browser/network errors can embed credential URLs; do not log them.
-            await self.repo.video_login_update(row["id"], state="failed")
-            log.warning("QR session failed for platform %s (%s)", row["platform"], type(exc).__name__)
+            reason = failure_reason(exc, self.stages.get(row["id"]))
+            current = await self.repo.video_login(row["id"])
+            if current and current["state"] not in TERMINAL:
+                await self.repo.video_login_update(row["id"], state="failed", failure_reason=reason)
+            log.warning("QR session failed for platform %s: %s (%s)", row["platform"], reason, type(exc).__name__)
         finally:
+            self.stages.pop(row["id"], None)
             self.qr_path(row["id"]).unlink(missing_ok=True)
             await self.repo.video_login_update(row["id"], qr_path=None)
 
@@ -218,7 +241,7 @@ class LoginWorker:
         # This service runs as a single instance. Sessions left by a previous
         # worker cannot be resumed safely; expose refresh rather than fake success.
         for row in await self.repo.video_login_rows():
-            if row["state"] in ("waiting", "scanned"):
+            if row["state"] in ("preparing", "waiting", "scanned"):
                 await self.repo.video_login_update(row["id"], state="expired", qr_path=None)
         try:
             while True:

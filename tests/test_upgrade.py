@@ -389,13 +389,29 @@ class TestFinishPendingUpgrade(UpgradeTestBase):
         self.assertEqual(len(bot.sent), 1)
         self.assertEqual(bot.sent[0]["chat_id"], 42)
 
-    async def test_stale_job_is_discarded_silently(self):
+    async def test_stale_job_reports_timeout_instead_of_leaving_old_message(self):
         self._env()
         self._job(started_at=time.time() - upgrade.STALE_JOB_SECONDS - 1)
         bot = FakeBot()
-        self.assertFalse(await upgrade.finish_pending_upgrade(bot, poll_seconds=0))
-        self.assertEqual((bot.edits, bot.sent), ([], []))
+        self.assertTrue(await upgrade.finish_pending_upgrade(bot, poll_seconds=0))
+        self.assertIn("升级超时", bot.edits[0]["text"])
         self.assertIsNone(upgrade.read_job())
+
+    async def test_failed_delivery_keeps_job_for_recovery(self):
+        self._env()
+        self._job()
+        bot = FakeBot(edit_fails=True)
+        bot.send_message = AsyncMock(side_effect=RuntimeError("offline"))
+        self.assertFalse(await upgrade.finish_pending_upgrade(bot, poll_seconds=0))
+        self.assertIsNotNone(upgrade.read_job())
+        self.assertEqual(bot.send_message.await_count, 3)
+
+    async def test_running_upgrade_timeout_does_not_claim_success_from_sha_alone(self):
+        self._env(running_for=10**9)
+        self._job()
+        bot = FakeBot()
+        await upgrade.finish_pending_upgrade(bot, poll_seconds=0, max_wait=-1)
+        self.assertIn("升级超时", bot.edits[0]["text"])
 
     async def test_only_one_watcher_reports(self):
         self._env()

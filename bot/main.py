@@ -95,7 +95,7 @@ async def main():
     # 在机器人里升级：升级重启后的新进程在这里接着把结果汇报给发起升级的管理员；
     # 另有一个定期检查新版本的后台任务（只通知，不会自动升级）
     background = [
-        asyncio.create_task(upgrade.finish_pending_upgrade(bot)),
+        asyncio.create_task(upgrade.upgrade_result_loop(bot)),
         asyncio.create_task(upgrade.update_check_loop(bot)),
         asyncio.create_task(schedule.schedule_loop(aria2)),
         asyncio.create_task(expiry.expiry_loop(bot, repo, nodes)),

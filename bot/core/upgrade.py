@@ -38,7 +38,7 @@ UNIT = "tg-aria2-upgrade"
 
 # 等升级任务跑完的上限（pip 装依赖 + 20 秒健康检查 + 可能的回滚再重启）
 MAX_WAIT_SECONDS = 15 * 60
-# 任务文件超过这么久还在，说明是遗留物（机器人崩过、没人汇报），直接清掉
+# 遗留任务超过这个时间后汇报超时，避免原消息一直停在“正在升级”。
 STALE_JOB_SECONDS = 60 * 60
 LOG_MAX_BYTES = 1024 * 1024
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -357,7 +357,7 @@ _watching = False
 async def finish_pending_upgrade(bot, *, poll_seconds: float = 3.0, max_wait: float = MAX_WAIT_SECONDS) -> bool:
     """等升级任务跑完，把结果编辑到发起升级的那条消息上。
 
-    机器人启动时调一次（升级重启后的新进程接着汇报），发起升级时也起一个（升级
+    机器人启动后定期调用（升级重启后的新进程接着汇报），发起升级时也起一个（升级
     在重启之前就失败、机器人没被重启的情况）。两边共用任务文件，谁先汇报谁清掉它。
     返回是否汇报了。"""
     global _watching
@@ -366,14 +366,12 @@ async def finish_pending_upgrade(bot, *, poll_seconds: float = 3.0, max_wait: fl
     job = read_job()
     if not job:
         return False
-    if time.time() - float(job.get("started_at", 0)) > STALE_JOB_SECONDS:
-        clear_job()
-        return False
+    stale = time.time() - float(job.get("started_at", 0)) > STALE_JOB_SECONDS
     _watching = True
     try:
         deadline = time.monotonic() + max_wait
-        timed_out = False
-        while await unit_running():
+        timed_out = stale
+        while not stale and await unit_running():
             if time.monotonic() > deadline:
                 timed_out = True
                 break
@@ -385,13 +383,30 @@ async def finish_pending_upgrade(bot, *, poll_seconds: float = 3.0, max_wait: fl
             current_sha, subject = job.get("from_sha", ""), ""
         tail = log_tail()
         outcome = classify(job, current_sha, tail)
-        if timed_out and outcome.kind == "failed":
+        if timed_out:
             outcome = Outcome("timeout", outcome.old, outcome.new, tail, outcome.action)
-        await _report(bot, job, render_outcome(outcome, subject))
-        clear_job()
-        return True
+        for attempt in range(3):
+            if await _report(bot, job, render_outcome(outcome, subject)):
+                clear_job()
+                return True
+            if attempt < 2:
+                await asyncio.sleep(poll_seconds)
+        # Keep delivery information for recovery after a transient Telegram outage.
+        return False
     finally:
         _watching = False
+
+
+async def upgrade_result_loop(bot, *, retry_seconds: float = 30.0):
+    """Retry persisted result delivery after startup/network interruptions."""
+    while True:
+        try:
+            await finish_pending_upgrade(bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.warning("upgrade result delivery will be retried")
+        await asyncio.sleep(retry_seconds)
 
 
 async def _report(bot, job: dict, text: str):
@@ -403,14 +418,16 @@ async def _report(bot, job: dict, text: str):
             await bot.edit_message_text(
                 chat_id=chat_id, message_id=message_id, text=text, parse_mode="HTML", reply_markup=markup,
             )
-            return
+            return True
         except Exception:
             log.info("could not edit the upgrade message, sending a new one")
     if chat_id:
         try:
             await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=markup)
+            return True
         except Exception:
             log.warning("could not report the upgrade result to chat %s", chat_id)
+    return False
 
 
 # ---------------------------------------------------------------- 定期检查新版本

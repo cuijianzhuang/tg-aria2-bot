@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS video_logins (
  id TEXT PRIMARY KEY, platform TEXT NOT NULL, owner_id INTEGER NOT NULL,
  requester_id INTEGER NOT NULL, state TEXT NOT NULL, expires REAL NOT NULL,
  qr_path TEXT, identity TEXT, chat_id INTEGER, message_id INTEGER,
- notified_state TEXT
+ notified_state TEXT, failure_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS video_web_grants (
  token_hash TEXT PRIMARY KEY, login_id TEXT NOT NULL, expires REAL NOT NULL,
@@ -156,7 +156,7 @@ class VideoRepoMixin:
     async def video_remove_account(self, platform, owner_id):
         await self._conn.execute("DELETE FROM video_accounts WHERE platform=? AND owner_id=?", (platform, owner_id))
         await self._conn.execute(
-            "UPDATE video_logins SET state='cancelled' WHERE platform=? AND owner_id=? AND state IN ('queued','waiting','scanned')",
+            "UPDATE video_logins SET state='cancelled' WHERE platform=? AND owner_id=? AND state IN ('queued','preparing','waiting','scanned')",
             (platform, owner_id),
         )
         await self._conn.commit()
@@ -187,7 +187,7 @@ class VideoRepoMixin:
     async def video_new_login(self, platform, owner_id, requester_id, chat_id=None):
         now = time.time()
         await self._conn.execute(
-            "UPDATE video_logins SET state='cancelled' WHERE platform=? AND owner_id=? AND state IN ('queued','waiting','scanned')",
+            "UPDATE video_logins SET state='cancelled' WHERE platform=? AND owner_id=? AND state IN ('queued','preparing','waiting','scanned')",
             (platform, owner_id),
         )
         login_id = secrets.token_hex(12)
@@ -203,7 +203,7 @@ class VideoRepoMixin:
         return await cur.fetchone()
 
     async def video_login_update(self, login_id, **fields):
-        allowed = {"state", "qr_path", "identity", "message_id", "notified_state"}
+        allowed = {"state", "qr_path", "identity", "message_id", "notified_state", "failure_reason"}
         if not fields or not fields.keys() <= allowed:
             raise ValueError("invalid login fields")
         await self._conn.execute(
@@ -272,7 +272,7 @@ class VideoRepoMixin:
         # Single writer transaction: cancellation/removal on another process
         # either wins before this update, or runs after the account is stored.
         cur = await self._conn.execute(
-            "UPDATE video_logins SET state='success',identity=? WHERE id=? AND state IN ('queued','waiting','scanned') AND expires>? RETURNING platform,owner_id",
+            "UPDATE video_logins SET state='success',identity=? WHERE id=? AND state IN ('queued','preparing','waiting','scanned') AND expires>? RETURNING platform,owner_id",
             (identity, login_id, time.time()),
         )
         row = await cur.fetchone()

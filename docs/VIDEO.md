@@ -112,3 +112,12 @@ VIDEO_COOKIE_FILE_XHS=/app/data/video-cookies/xhs.txt
 使用本机合成视频验证真实 yt-dlp/you-get 解析和下载；不以此宣称真实视频站点均可用。
 实际扫码需要账号本人操作；B站、抖音、小红书的完整扫码成功和目标视频下载需要部署后
 逐站验收，尤其需检查当前平台页面与选择器、Cookie有效期及服务器网络可达性。
+
+### 扫码失败时
+
+机器人和 Web 会区分浏览器未安装、缺少系统依赖、启动失败、平台访问限制、网络超时和二维码未找到。
+浏览器缺失或依赖不完整时，systemd 部署可在项目目录重新运行
+`sudo bash tg-aria2.sh install --mode bare --with-video-login`；Docker 部署需重新构建/拉取 login 镜像并重启扫码服务。
+查看错误类型：`sudo journalctl -u tg-aria2-video-login -n 40 --no-pager`。
+日志只记录平台、固定原因代码及异常类型，界面使用固定原因文案，不展示代理凭据、Cookie 或原始浏览器命令。
+平台页面受限或要求额外验证时不能靠重复刷新保证成功，需按提示检查服务器网络或使用已有 Cookie 配置。
