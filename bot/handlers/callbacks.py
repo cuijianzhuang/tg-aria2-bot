@@ -371,8 +371,12 @@ async def handle_pending(query: CallbackQuery, repo, nodes, task_manager=None):
         return
     # 磁盘预检只对本机节点有意义（aria2 RPC 拿不到远端磁盘信息）；
     # 远程节点靠 aria2 自己下载失败兜底
-    if target_node.is_local and not storage.has_enough_space(target_node.download_dir, pending.file_size or 0):
-        await query.answer("⛔ 服务器磁盘空间不足，已拒绝该任务。", show_alert=True)
+    space_error = (
+        storage.download_space_error(target_node.download_dir, pending.file_size or 0)
+        if target_node.is_local else None
+    )
+    if space_error:
+        await query.answer("⛔ " + space_error, show_alert=True)
         return
 
     # 额度检查放在认领之前：被拒时确认卡片原样保留，用户可以先去处理别的任务再回来点
@@ -473,7 +477,13 @@ async def _handle_batch_start(query: CallbackQuery, repo, nodes, task_manager, *
             skipped += 1
             continue
         # 磁盘预检只对本机节点做（远端磁盘摸不到），与单条确认的逻辑一致
-        if node.is_local and not storage.has_enough_space(node.download_dir, claimed.file_size or 0):
+        space_error = (
+            storage.download_space_error(node.download_dir, claimed.file_size or 0)
+            if node.is_local else None
+        )
+        if space_error:
+            await repo.restore_pending(claimed)
+            quota_reason = quota_reason or space_error
             skipped += 1
             continue
         # 额度：前面刚加的任务已经写进库了，所以"同时进行数"会随着循环实时累计
@@ -506,6 +516,10 @@ async def _handle_batch_start(query: CallbackQuery, repo, nodes, task_manager, *
         InlineKeyboardButton(text="📋 任务列表", callback_data="list:ALL:0"),
         InlineKeyboardButton(text="⬅️ 主菜单", callback_data="nav:start"),
     ]])
+    if await repo.get_pending_batch(batch_id):
+        markup.inline_keyboard.insert(0, [
+            InlineKeyboardButton(text="🔄 重试未启动任务", callback_data=f"pending:startall:{batch_id}"),
+        ])
     await _edit(query, text, reply_markup=markup)
 
 

@@ -199,7 +199,11 @@ async def apply_dir(query: CallbackQuery, aria2):
         return
     # 新目录此刻可能还不存在（比如刚在 .env 里配的预设），提前建好，
     # 避免用户切完目录第一次下载才发现目录不存在
-    os.makedirs(chosen, exist_ok=True)
+    try:
+        os.makedirs(chosen, exist_ok=True)
+    except OSError:
+        await query.answer("下载目录不可用，请检查路径和读写权限；原设置保持不变", show_alert=True)
+        return
     settings.download_dir = chosen
     _persist_env("DOWNLOAD_DIR", chosen)
     await query.answer("✅ 已切换（不影响已下载文件的位置）")

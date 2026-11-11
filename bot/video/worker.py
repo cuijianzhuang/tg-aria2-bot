@@ -164,11 +164,12 @@ class VideoWorker:
         directory = Path(settings.download_dir) / "video" / gid
         process = None
         try:
+            space_error = storage.download_space_error(settings.download_dir, row["file_size"] or 0)
+            if space_error:
+                raise ValueError(space_error)
             directory.mkdir(parents=True, exist_ok=True)
             await self.repo.video_update(row["id"], work_dir=str(directory), phase="解析中")
             await self.repo.update_status(gid, "ACTIVE")
-            if not storage.has_enough_space(settings.download_dir, row["file_size"] or 0):
-                raise ValueError("磁盘空间不足")
             cookies = await account_cookies(self.repo, self.vault, row["user_id"], row["payload"], row["account_mode"])
             with self.vault.snapshot(cookies) as cookie_file:
                 info = await self.resolver.probe(
