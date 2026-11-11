@@ -81,7 +81,9 @@ Chromium 的官方依赖安装适用于 Playwright 支持的 Debian/Ubuntu 环�
 
 B站采用平台二维码接口并验证登录后的用户身份；抖音、小红书使用独立 Chromium 上下文，
 验证登录后个人入口。页面变动、机房 IP 限制或额外验证码会导致失败，提供刷新、取消和
-“需额外验证”提示，不自动破解验证。失败时可由管理员配置共享 Cookie 文件：
+“需额外验证”提示，不自动破解验证。检测需看到持续存在的可见验证提示，不以验证码组件的类名判断。
+平台也可能在生成二维码前就要求验证，手机 App 上的验证不一定能解除服务器浏览器的限制。
+失败时可由管理员配置共享 Cookie 文件：
 
 ```dotenv
 VIDEO_COOKIE_FILE_BILIBILI=/app/data/video-cookies/bilibili.txt
@@ -112,6 +114,9 @@ VIDEO_COOKIE_FILE_XHS=/app/data/video-cookies/xhs.txt
 使用本机合成视频验证真实 yt-dlp/you-get 解析和下载；不以此宣称真实视频站点均可用。
 实际扫码需要账号本人操作；B站、抖音、小红书的完整扫码成功和目标视频下载需要部署后
 逐站验收，尤其需检查当前平台页面与选择器、Cookie有效期及服务器网络可达性。
+
+安装扫码浏览器后，可运行 `RUN_VIDEO_BROWSER_TESTS=1 python -m unittest tests.test_qr_recovery -v`
+复现本地 Chromium 回归，覆盖验证码容器误判、短暂/持续验证提示、iframe 和隐藏二维码；不访问真实平台或账号。
 
 ### 扫码失败时
 

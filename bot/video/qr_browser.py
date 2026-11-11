@@ -1,5 +1,7 @@
 """QR discovery and safe failure reasons, independent of browser installation."""
 
+import asyncio
+
 REASONS = {
     "browser_missing": "未安装扫码浏览器，请管理员重新安装扫码组件",
     "browser_dependency": "扫码浏览器缺少系统依赖，请管理员检查扫码服务日志并修复安装",
@@ -11,7 +13,17 @@ REASONS = {
     "qr_capture": "二维码图片生成失败，请刷新重试",
     "unexpected": "扫码过程失败，请管理员查看扫码服务的错误类型",
 }
-CAPTCHA_SELECTORS = ('[class*="captcha"]', "text=请完成验证", "text=拖动滑块")
+# A visible preloaded captcha container is not evidence of a challenge. Require
+# a visible instruction instead of inferring verification from CSS class names.
+VERIFICATION_PROMPTS = (
+    "text=请完成验证",
+    "text=请完成下列验证",
+    "text=请完成以下验证",
+    "text=拖动滑块",
+    "text=拖动下方滑块",
+    "text=请依次点击",
+    "text=请按顺序点击",
+)
 
 
 class QRLoginError(Exception):
@@ -65,3 +77,11 @@ async def open_login(page, selectors):
             await locator.click(timeout=1500)
         except Exception:
             pass  # A disappearing login button is normal during modal loading.
+
+
+async def verification_required(page, *, confirmation_delay=2.0):
+    if not await visible_locator(page, VERIFICATION_PROMPTS):
+        return False
+    # Some platform checks disappear after initialization without interaction.
+    await asyncio.sleep(confirmation_delay)
+    return bool(await visible_locator(page, VERIFICATION_PROMPTS))

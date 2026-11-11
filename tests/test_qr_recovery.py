@@ -1,5 +1,6 @@
 """Safe QR failure classification and cancellation/recovery behavior."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +9,7 @@ from unittest.mock import AsyncMock
 from bot.db.repo import TaskRepo
 from bot.video.accounts import CredentialVault
 from bot.video.login_worker import LoginWorker
-from bot.video.qr_browser import QRLoginError, failure_reason
+from bot.video.qr_browser import QRLoginError, failure_reason, verification_required, visible_locator
 from bot.web.video import public_status
 
 
@@ -65,3 +66,46 @@ class TestQRRecovery(unittest.IsolatedAsyncioTestCase):
         await self.repo.video_login_update(self.login_id, state="preparing")
         await self.repo.video_new_login("xhs", 11, 11)
         self.assertEqual((await self.repo.video_login(self.login_id))["state"], "cancelled")
+
+
+@unittest.skipUnless(os.environ.get("RUN_VIDEO_BROWSER_TESTS") == "1", "opt-in Chromium regression")
+class TestBrowserVerification(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        from playwright.async_api import async_playwright
+
+        self.playwright = await async_playwright().start()
+        self.addAsyncCleanup(self.playwright.stop)
+        self.browser = await self.playwright.chromium.launch(headless=True)
+        self.addAsyncCleanup(self.browser.close)
+        self.page = await self.browser.new_page()
+
+    async def test_visible_captcha_container_is_not_a_verification_prompt(self):
+        await self.page.set_content('<div class="captcha">普通登录组件</div>')
+        self.assertFalse(await verification_required(self.page, confirmation_delay=0))
+
+    async def test_hidden_prompt_does_not_require_verification(self):
+        await self.page.set_content('<div style="display:none">请完成验证</div>')
+        self.assertFalse(await verification_required(self.page, confirmation_delay=0))
+
+    async def test_transient_prompt_is_allowed_to_disappear(self):
+        await self.page.set_content('<div id="challenge">请完成验证</div>')
+        await self.page.evaluate("setTimeout(() => document.querySelector('#challenge').remove(), 100)")
+        self.assertFalse(await verification_required(self.page, confirmation_delay=0.3))
+
+    async def test_persistent_prompt_requires_verification(self):
+        await self.page.set_content("<div>请拖动滑块完成拼图</div>")
+        self.assertTrue(await verification_required(self.page, confirmation_delay=0.02))
+
+    async def test_visible_prompt_inside_iframe_requires_verification(self):
+        await self.page.set_content('<iframe srcdoc="<div>请完成验证</div>"></iframe>')
+        await self.page.frames[1].wait_for_selector("text=请完成验证")
+        self.assertTrue(await verification_required(self.page, confirmation_delay=0.02))
+
+    async def test_hidden_first_qr_does_not_hide_visible_qr(self):
+        await self.page.set_content(
+            '<div class="qrcode" style="display:none"></div>'
+            '<div class="qrcode" id="visible-qr" style="width:180px;height:180px"></div>'
+        )
+        qr = await visible_locator(self.page, [".qrcode"], minimum_size=60)
+        self.assertIsNotNone(qr)
+        self.assertEqual(await qr.get_attribute("id"), "visible-qr")

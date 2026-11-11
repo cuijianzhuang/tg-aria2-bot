@@ -11,7 +11,7 @@ import aiohttp
 from bot.config import settings
 from bot.db.repo import TaskRepo
 from bot.video.accounts import PLATFORMS, CredentialVault
-from bot.video.qr_browser import CAPTCHA_SELECTORS, QRLoginError, failure_reason, open_login, visible_locator
+from bot.video.qr_browser import QRLoginError, failure_reason, open_login, verification_required, visible_locator
 
 log = logging.getLogger(__name__)
 TERMINAL = {"success", "expired", "cancelled", "failed", "verification_required"}
@@ -154,8 +154,10 @@ class LoginWorker:
                 qr = None
                 deadline = time.monotonic() + 45
                 while time.monotonic() < deadline and await self.active(row["id"]):
-                    if await visible_locator(page, CAPTCHA_SELECTORS):
-                        await self.repo.video_login_update(row["id"], state="verification_required")
+                    if await verification_required(page):
+                        if await self.active(row["id"]):
+                            log.info("QR verification required for platform %s before QR discovery", row["platform"])
+                            await self.repo.video_login_update(row["id"], state="verification_required")
                         return
                     qr = await visible_locator(page, site["qr"], minimum_size=60)
                     if qr:
@@ -174,8 +176,10 @@ class LoginWorker:
                 await self.repo.video_login_update(row["id"], state="waiting", qr_path=str(path))
                 self.stages[row["id"]] = "waiting"
                 while await self.active(row["id"]):
-                    if await visible_locator(page, CAPTCHA_SELECTORS):
-                        await self.repo.video_login_update(row["id"], state="verification_required")
+                    if await verification_required(page):
+                        if await self.active(row["id"]):
+                            log.info("QR verification required for platform %s after QR discovery", row["platform"])
+                            await self.repo.video_login_update(row["id"], state="verification_required")
                         return
                     for selector in site["profile"]:
                         profile = page.locator(selector).first

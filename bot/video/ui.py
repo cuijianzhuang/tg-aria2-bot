@@ -18,7 +18,7 @@ STATES = {
     "success": "登录成功",
     "expired": "二维码已过期",
     "cancelled": "已取消",
-    "verification_required": "平台要求额外验证，请在官方客户端处理后重试",
+    "verification_required": "服务器上的平台登录页要求额外验证，暂时无法继续扫码。请稍后重试，或使用已有 Cookie 配置",
     "failed": "登录失败，请刷新重试",
 }
 
