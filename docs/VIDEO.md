@@ -123,6 +123,11 @@ VIDEO_COOKIE_FILE_YOUTUBE=/app/data/video-cookies/youtube.txt
 导入只提取所选平台域名下的未过期 Cookie，支持 `#HttpOnly_`、UTF-8 BOM 和有效期为 `0` 的会话 Cookie。
 数据库加密保存，附件在 bot 内存中解析，不进入普通下载任务或明文临时文件。
 机器人会尝试删除私聊中的原附件；Telegram 与自建 Bot API 可能保留附件缓存，不能保证平台副本被彻底删除。
+Bot API 本地模式返回绝对文件路径，bot 直接限量读取缓存；相对路径通过 Bot API 的 HTTP 接口下载。
+systemd 部署需让 bot 运行用户能读取 Bot API 缓存目录。Docker 的 bot 服务将 `botapi-data` 以只读方式挂载到
+`/var/lib/telegram-bot-api`，与 API 返回路径保持一致；旧部署更新后需重建 bot 容器才能应用新增挂载。
+附件读取失败时会区分获取信息失败、缺少路径、本地缓存不可读、HTTP 下载失败和超时；
+日志仅包含固定阶段代码及异常类型，不输出可能含 Token 的缓存路径或原始异常。
 导入成功表示格式检查和保存完成，不表示已经验证平台账号身份、Cookie 当前有效或内容可下载。
 
 ### 配置 Cookie 文件（四个平台通用）

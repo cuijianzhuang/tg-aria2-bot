@@ -53,6 +53,8 @@ services:
     volumes:
       - ${HOST_DOWNLOAD_DIR:-./downloads}:/downloads
       - ./data:/app/data
+      # Bot API --local returns absolute cache paths; Cookie imports read them.
+      - botapi-data:/var/lib/telegram-bot-api:ro
       # settings edited at runtime (gofile toggles) are written back to .env;
       # mount the host file so those writes survive restarts and are visible
       # to the web container too (env_file alone only injects at start)

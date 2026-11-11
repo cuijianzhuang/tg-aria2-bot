@@ -1,6 +1,8 @@
 """Private, reply-scoped personal Cookie uploads; never create download tasks."""
 
+import asyncio
 import io
+import logging
 import time
 from pathlib import Path
 
@@ -10,15 +12,31 @@ from aiogram.filters import Command
 from aiogram.types import ForceReply, Message
 
 from bot.config import settings
+from bot.core.telegram_files import to_local_path
 from bot.video.account_views import PLATFORM_LABELS, platform_view
 from bot.video.accounts import MAX_COOKIE_BYTES, CredentialVault, parse_cookie_upload
 
 router = Router(name="video_cookies")
 PROMPT_PREFIX = "📄 个人 Cookie 导入 · "
+log = logging.getLogger(__name__)
+READ_ERRORS = {
+    "metadata": "无法从 Bot API 获取附件信息，请检查服务连接后重试",
+    "missing_path": "Bot API 未返回附件路径，请重新发送文件",
+    "local_read": "Bot API 本地附件不可读取，请管理员检查共享目录和文件权限",
+    "http_download": "通过 Bot API 下载附件失败，请检查服务连接后重试",
+    "timeout": "读取 Cookie 附件超时，请稍后重试",
+}
 
 
 class CookieUploadTooLarge(ValueError):
     pass
+
+
+class CookieAttachmentError(Exception):
+    def __init__(self, reason, error_type=""):
+        self.reason = reason
+        self.error_type = error_type
+        super().__init__(READ_ERRORS[reason])
 
 
 class CookieBuffer(io.BytesIO):
@@ -26,6 +44,36 @@ class CookieBuffer(io.BytesIO):
         if self.tell() + len(data) > MAX_COOKIE_BYTES:
             raise CookieUploadTooLarge("Cookie 文件不能超过 1 MiB")
         return super().write(data)
+
+
+def read_local_attachment(path):
+    with open(path, "rb") as stream:
+        return stream.read(MAX_COOKIE_BYTES + 1)
+
+
+async def read_attachment(bot, document, buffer):
+    try:
+        file = await bot.get_file(document.file_id, request_timeout=30)
+    except TimeoutError as exc:
+        raise CookieAttachmentError("timeout", type(exc).__name__) from None
+    except Exception as exc:
+        raise CookieAttachmentError("metadata", type(exc).__name__) from None
+    if not file.file_path:
+        raise CookieAttachmentError("missing_path")
+    local = to_local_path(file.file_path)
+    stage = "local_read" if local is not None else "http_download"
+    try:
+        if local is not None:
+            data = await asyncio.wait_for(asyncio.to_thread(read_local_attachment, local), 30)
+            buffer.write(data)
+        else:
+            await bot.download_file(file.file_path, destination=buffer, timeout=30)
+    except CookieUploadTooLarge:
+        raise
+    except TimeoutError as exc:
+        raise CookieAttachmentError("timeout", type(exc).__name__) from None
+    except Exception as exc:
+        raise CookieAttachmentError(stage, type(exc).__name__) from None
 
 
 async def start_import(query, repo, platform):
@@ -77,11 +125,16 @@ async def import_document(message: Message, repo):
             return
         with CookieBuffer() as buffer:
             try:
-                await message.bot.download(message.document, destination=buffer, timeout=30)
+                await read_attachment(message.bot, message.document, buffer)
             except CookieUploadTooLarge:
                 await message.answer("Cookie 文件不能超过 1 MiB，请重新回复本消息发送文件")
                 return
-            except Exception:
+            except CookieAttachmentError as exc:
+                log.warning("Cookie attachment read failed: %s (%s)", exc.reason, exc.error_type)
+                await message.answer(str(exc) + "；可重新回复本消息发送文件")
+                return
+            except Exception as exc:
+                log.warning("Cookie attachment read failed: unexpected (%s)", type(exc).__name__)
                 await message.answer("读取 Cookie 附件失败，请重新回复本消息发送文件")
                 return
             try:
