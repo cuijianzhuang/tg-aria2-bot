@@ -261,6 +261,19 @@ class VideoRepoMixin:
         await self._conn.execute("UPDATE tasks SET file_size=? WHERE id=?", (size, task_id))
         await self._conn.commit()
 
+    async def video_complete_file(self, task_id, output, size):
+        """Persist the validated artifact before notifications or other hooks."""
+        await self._conn.execute(
+            "UPDATE tasks SET status='COMPLETED',error=NULL,save_path=?,file_size=?,"
+            "finished_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=? AND backend='video'",
+            (output, size, task_id),
+        )
+        await self._conn.execute(
+            "UPDATE video_jobs SET phase='已完成',output=?,completed=?,total=? WHERE task_id=?",
+            (output, size, size, task_id),
+        )
+        await self._conn.commit()
+
     async def video_prune(self):
         now = time.time()
         await self._conn.execute("DELETE FROM video_web_grants WHERE expires<?", (now - 600,))

@@ -61,6 +61,7 @@ jobs:
             tests/test_video.py
             tests/test_video_web.py
             tests/test_video_worker.py
+            tests/test_video_completion.py
             tests/test_video_accounts.py
             tests/test_qr_recovery.py
             tests/test_storage_recovery.py
