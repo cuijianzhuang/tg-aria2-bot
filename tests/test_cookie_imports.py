@@ -8,7 +8,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from aiogram import Bot
+from aiogram.client.session.base import BaseSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.dispatcher.event.bases import SkipHandler
+from aiogram.types import File
 
 from bot.config import settings
 from bot.db.repo import TaskRepo
@@ -20,6 +24,26 @@ from bot.video.ui import preview_keyboard
 
 def contents(domain="youtube.com", value="personal-secret", expires="0"):
     return (f"# Netscape HTTP Cookie File\n#HttpOnly_.{domain}\tTRUE\t/\tTRUE\t{expires}\tsession\t{value}\n").encode()
+
+
+class AttachmentSession(BaseSession):
+    """Exercise real Bot.get_file/download_file without Telegram network access."""
+
+    def __init__(self, file_path, data=None):
+        super().__init__(api=TelegramAPIServer.from_base("http://bot-api.test:8081"))
+        self.file_path, self.data, self.http_urls = file_path, data, []
+
+    async def make_request(self, bot, method, timeout=None):
+        return File(file_id=method.file_id, file_unique_id="unique", file_path=self.file_path)
+
+    async def stream_content(self, url, **kwargs):
+        self.http_urls.append(url)
+        if self.data is None:
+            raise RuntimeError("absolute Bot API cache paths are not HTTP downloads")
+        yield self.data
+
+    async def close(self):
+        pass
 
 
 class TestCookieImports(unittest.IsolatedAsyncioTestCase):
@@ -41,7 +65,7 @@ class TestCookieImports(unittest.IsolatedAsyncioTestCase):
     def message(self, data=None, user=11, prompt=88):
         data = contents() if data is None else data
 
-        async def download(document, *, destination, timeout):
+        async def download(file_path, *, destination, timeout):
             destination.write(data)
 
         return SimpleNamespace(
@@ -50,8 +74,12 @@ class TestCookieImports(unittest.IsolatedAsyncioTestCase):
             reply_to_message=SimpleNamespace(
                 message_id=prompt, from_user=SimpleNamespace(id=123), text=PROMPT_PREFIX + "YouTube"
             ),
-            document=SimpleNamespace(file_size=len(data)),
-            bot=SimpleNamespace(id=123, download=AsyncMock(side_effect=download)),
+            document=SimpleNamespace(file_id="cookie-file-id", file_size=len(data)),
+            bot=SimpleNamespace(
+                id=123,
+                get_file=AsyncMock(return_value=SimpleNamespace(file_path="documents/cookies.txt")),
+                download_file=AsyncMock(side_effect=download),
+            ),
             answer=AsyncMock(),
             delete=AsyncMock(),
         )
@@ -119,7 +147,7 @@ class TestCookieImports(unittest.IsolatedAsyncioTestCase):
         message = self.message()
         message.document.file_size = MAX_COOKIE_BYTES + 1
         await import_document(message, self.repo)
-        message.bot.download.assert_not_awaited()
+        message.bot.download_file.assert_not_awaited()
         self.assertIsNone(await self.repo.video_account("youtube", 11))
 
     async def test_actual_stream_size_is_bounded_when_size_is_unknown(self):
@@ -134,7 +162,7 @@ class TestCookieImports(unittest.IsolatedAsyncioTestCase):
             if message.from_user.id == 11:
                 message.chat.type = "group"
             await import_document(message, self.repo)
-            message.bot.download.assert_not_awaited()
+            message.bot.download_file.assert_not_awaited()
         self.assertIsNone(await self.repo.video_account("youtube", 11))
 
     async def test_expired_cancelled_and_consumed_replies_do_not_fall_through(self):
@@ -142,22 +170,22 @@ class TestCookieImports(unittest.IsolatedAsyncioTestCase):
         await self.repo._conn.commit()
         expired = self.message()
         await import_document(expired, self.repo)
-        expired.bot.download.assert_not_awaited()
+        expired.bot.download_file.assert_not_awaited()
         await self.repo.video_cookie_import_start(11, "youtube", 11, 99)
         await cancel_import(self.message(), self.repo)
         cancelled = self.message(prompt=99)
         await import_document(cancelled, self.repo)
-        cancelled.bot.download.assert_not_awaited()
+        cancelled.bot.download_file.assert_not_awaited()
         await self.repo.video_cookie_import_start(11, "youtube", 11, 100)
         await import_document(self.message(prompt=100), self.repo)
         consumed = self.message(prompt=100)
         await import_document(consumed, self.repo)
-        consumed.bot.download.assert_not_awaited()
+        consumed.bot.download_file.assert_not_awaited()
 
     async def test_unrecorded_cookie_prompt_is_rejected_and_ordinary_reply_passes(self):
         message = self.message(prompt=999)
         await import_document(message, self.repo)
-        message.bot.download.assert_not_awaited()
+        message.bot.download_file.assert_not_awaited()
         message.delete.assert_awaited_once()
         ordinary = self.message(prompt=999)
         ordinary.reply_to_message.text = "An ordinary message"
@@ -167,11 +195,11 @@ class TestCookieImports(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_during_upload_prevents_save(self):
         message = self.message()
 
-        async def download(document, *, destination, timeout):
+        async def download(file_path, *, destination, timeout):
             destination.write(contents())
             await self.repo.video_cookie_import_cancel(11)
 
-        message.bot.download.side_effect = download
+        message.bot.download_file.side_effect = download
         await import_document(message, self.repo)
         self.assertIsNone(await self.repo.video_account("youtube", 11))
 
@@ -179,11 +207,11 @@ class TestCookieImports(unittest.IsolatedAsyncioTestCase):
         message = self.message()
         await self.repo.video_put_account("youtube", 11, "old-account", b"old-encrypted")
 
-        async def download(document, *, destination, timeout):
+        async def download(file_path, *, destination, timeout):
             destination.write(contents())
             await self.repo.video_remove_account("youtube", 11)
 
-        message.bot.download.side_effect = download
+        message.bot.download_file.side_effect = download
         await import_document(message, self.repo)
         self.assertIsNone(await self.repo.video_account("youtube", 11))
 
@@ -216,7 +244,7 @@ class TestCookieImports(unittest.IsolatedAsyncioTestCase):
         message = self.message()
         message.document = None
         await import_document(message, self.repo)
-        message.bot.download.assert_not_awaited()
+        message.bot.download_file.assert_not_awaited()
         self.assertIn("文件附件", message.answer.call_args.args[0])
         self.assertIsNone(await self.repo.video_account("youtube", 11))
 
@@ -237,11 +265,80 @@ class TestCookieImports(unittest.IsolatedAsyncioTestCase):
 
     async def test_download_error_is_safe_and_chat_delete_failure_is_tolerated(self):
         message = self.message()
-        message.bot.download.side_effect = RuntimeError("proxy://private-secret")
+        message.bot.download_file.side_effect = RuntimeError("proxy://private-secret")
         message.delete.side_effect = RuntimeError("no permission")
         await import_document(message, self.repo)
         self.assertNotIn("private-secret", str(message.answer.call_args_list))
         self.assertIsNone(await self.repo.video_account("youtube", 11))
+
+    async def test_real_aiogram_reads_local_bot_api_path_without_http(self):
+        path = self.root / "bot-api-cache" / "cookies.txt"
+        path.parent.mkdir()
+        path.write_bytes(contents())
+        session = AttachmentSession(str(path))
+        self.assertFalse(session.api.is_local)  # Same API setup as bot.main.
+        message = self.message()
+        message.bot = Bot("123456:TEST_TOKEN", session=session)
+        await import_document(message, self.repo)
+        self.assertEqual(session.http_urls, [])
+        row = await self.repo.video_account("youtube", 11)
+        self.assertIsNotNone(row)
+        self.assertEqual(self.vault.decrypt(row["cookies"])[0]["value"], "personal-secret")
+        self.assertEqual(path.read_bytes(), contents())
+
+    async def test_real_aiogram_downloads_relative_file_path_over_http(self):
+        session = AttachmentSession("documents/cookies.txt", contents())
+        message = self.message()
+        message.bot = Bot("123456:TEST_TOKEN", session=session)
+        await import_document(message, self.repo)
+        self.assertIsNotNone(await self.repo.video_account("youtube", 11))
+        self.assertEqual(
+            session.http_urls, ["http://bot-api.test:8081/file/bot123456:TEST_TOKEN/documents/cookies.txt"]
+        )
+
+    async def test_local_read_enforces_actual_size_limit(self):
+        path = self.root / "oversize.txt"
+        path.write_bytes(b"x" * (MAX_COOKIE_BYTES + 1))
+        message = self.message()
+        message.document.file_size = None
+        message.bot.get_file.return_value.file_path = str(path)
+        await import_document(message, self.repo)
+        self.assertIn("1 MiB", message.answer.call_args.args[0])
+        message.bot.download_file.assert_not_awaited()
+        self.assertIsNone(await self.repo.video_account("youtube", 11))
+
+    async def test_unreadable_local_path_has_specific_safe_error_and_can_retry(self):
+        message = self.message()
+        message.bot.get_file.return_value.file_path = str(self.root / "private-bot-token" / "cookies.txt")
+        with self.assertLogs("bot.handlers.video_cookies", level="WARNING") as logs:
+            await import_document(message, self.repo)
+        self.assertIn("本地附件不可读取", message.answer.call_args.args[0])
+        self.assertIn("local_read", str(logs.output))
+        self.assertNotIn("private-bot-token", str(logs.output) + str(message.answer.call_args_list))
+        self.assertEqual((await self.repo.video_cookie_import(11, 88))["state"], "pending")
+        path = self.root / "readable.txt"
+        path.write_bytes(contents())
+        message.bot.get_file.return_value.file_path = str(path)
+        await import_document(message, self.repo)
+        self.assertIsNotNone(await self.repo.video_account("youtube", 11))
+
+    async def test_metadata_failure_and_missing_path_do_not_expose_credentials(self):
+        for failure in (RuntimeError("https://bot-api/botPRIVATE_TOKEN/getFile"), None):
+            message = self.message()
+            message.bot.get_file.side_effect = failure
+            message.bot.get_file.return_value.file_path = None
+            with self.assertLogs("bot.handlers.video_cookies", level="WARNING") as logs:
+                await import_document(message, self.repo)
+            self.assertNotIn("PRIVATE_TOKEN", str(logs.output) + str(message.answer.call_args_list))
+            message.bot.download_file.assert_not_awaited()
+            self.assertIsNone(await self.repo.video_account("youtube", 11))
+
+    async def test_read_timeout_has_specific_safe_error(self):
+        message = self.message()
+        message.bot.download_file.side_effect = TimeoutError("private-timeout-token")
+        await import_document(message, self.repo)
+        self.assertIn("超时", message.answer.call_args.args[0])
+        self.assertNotIn("private-timeout-token", str(message.answer.call_args_list))
 
     def test_uploaded_bom_httponly_and_session_zero_are_supported(self):
         cookie = parse_cookie_upload(b"\xef\xbb\xbf" + contents(), "youtube")[0]
