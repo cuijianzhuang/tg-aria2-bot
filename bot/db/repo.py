@@ -26,6 +26,20 @@ class TaskRepo(VideoRepoMixin):
         await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.executescript(SCHEMA)
         await self._conn.executescript(VIDEO_SCHEMA)
+        # Keep the index name for compatibility with older CREATE IF NOT EXISTS
+        # schemas, but remove uniqueness: explicit repeats need separate history.
+        indexes = await (await self._conn.execute("PRAGMA index_list(tasks)")).fetchall()
+        if any(row["name"] == "idx_dedup_source" and row["unique"] for row in indexes):
+            await self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                await self._conn.execute("DROP INDEX idx_dedup_source")
+                await self._conn.execute(
+                    "CREATE INDEX idx_dedup_source ON tasks(source_type,source_ref) WHERE status='COMPLETED'"
+                )
+                await self._conn.commit()
+            except Exception:
+                await self._conn.rollback()
+                raise
         for migration in MIGRATIONS:
             try:
                 await self._conn.execute(migration)
@@ -97,7 +111,7 @@ class TaskRepo(VideoRepoMixin):
 
     async def get_completed_by_source(self, source_type: str, source_ref: str) -> aiosqlite.Row | None:
         cur = await self._conn.execute(
-            "SELECT * FROM tasks WHERE source_type = ? AND source_ref = ? AND status = 'COMPLETED'",
+            "SELECT * FROM tasks WHERE source_type = ? AND source_ref = ? AND status = 'COMPLETED' ORDER BY id DESC LIMIT 1",
             (source_type, source_ref),
         )
         return await cur.fetchone()

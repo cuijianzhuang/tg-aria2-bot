@@ -76,10 +76,11 @@ def video_task_keyboard(gid, status, back=None, link=None):
 
 def video_card(row, job):
     total = job["total"]
+    phase = "完成处理失败，可重试恢复" if row["status"] == "FAILED" and job["phase"] == "已完成" else job["phase"]
     progress = f"{min(100, job['completed'] / total * 100):.1f}%" if total else "进度待定"
     lines = [
         f"🎬 <b>{escape(row['file_name'] or '视频')}</b>",
-        f"{escape(row['status'])} · {escape(job['phase'])}",
+        f"{escape(row['status'])} · {escape(phase)}",
         f"📦 {fmt_bytes(job['completed'])} · {progress}",
         f"🧩 {escape(job['parser'])} · 🎞 {escape(job['quality'])} · 👤 {MODES[job['account_mode']]}",
     ]

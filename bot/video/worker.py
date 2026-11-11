@@ -13,7 +13,7 @@ from bot.core.aria2_client import Download, File
 from bot.core.expiry import safe_target
 from bot.video.accounts import CredentialVault, account_cookies
 from bot.video.backends import download_args, progress_event
-from bot.video.errors import download_error_hint
+from bot.video.errors import download_error_hint, execution_error
 from bot.video.process import capture, signal_group, spawn, terminate
 from bot.video.services import get_resolver
 
@@ -93,6 +93,8 @@ class VideoWorker:
                     await asyncio.to_thread(remove_path, target)
         elif action == "retry":
             if row["status"] not in ("PENDING", "ACTIVE", "PAUSED"):
+                if await self.restore_completed_file(row):
+                    return
                 refusal = await quota.admission_error(
                     self.repo, row["user_id"], None, pending_usage=self.task_manager.pending_usage(row["user_id"])
                 )
@@ -163,6 +165,7 @@ class VideoWorker:
         gid = row["gid"]
         directory = Path(settings.download_dir) / "video" / gid
         process = None
+        stage = "准备"
         try:
             space_error = storage.download_space_error(settings.download_dir, row["file_size"] or 0)
             if space_error:
@@ -170,6 +173,7 @@ class VideoWorker:
             directory.mkdir(parents=True, exist_ok=True)
             await self.repo.video_update(row["id"], work_dir=str(directory), phase="解析中")
             await self.repo.update_status(gid, "ACTIVE")
+            stage = "解析"
             cookies = await account_cookies(self.repo, self.vault, row["user_id"], row["payload"], row["account_mode"])
             with self.vault.snapshot(cookies) as cookie_file:
                 info = await self.resolver.probe(
@@ -200,6 +204,7 @@ class VideoWorker:
                     return
                 await self.repo.update_file_name(gid, info.title)
                 await self.repo.video_update(row["id"], phase="等待视频源连接", total=info.size or 0)
+                stage = "下载"
                 process = await spawn(
                     download_args(
                         row["parser"], row["payload"], directory, row["quality"], cookie_file, settings.proxy_url
@@ -232,6 +237,7 @@ class VideoWorker:
                             error_hint = download_error_hint(line) or error_hint
                             if "[Merger]" in line or "Merging" in line or "Merging video" in line:
                                 merging = True
+                                stage = "合并"
                                 await self.repo.video_update(row["id"], phase="合并中")
                             if line.startswith("__VIDEO_OUTPUT__"):
                                 output = line.removeprefix("__VIDEO_OUTPUT__").strip()
@@ -294,6 +300,7 @@ class VideoWorker:
                     return
                 if process.returncode:
                     raise ValueError(error_hint or "下载或合并失败；可重试或重新扫码登录")
+                stage = "输出检查"
                 if output:
                     candidate = Path(output)
                 else:
@@ -317,28 +324,12 @@ class VideoWorker:
 
                     await asyncio.to_thread(remove_path, str(directory))
                     raise ValueError("合并后的视频超过单任务上限，已清理文件")
-                verification = json.loads(
-                    await capture(
-                        [
-                            "ffprobe",
-                            "-v",
-                            "error",
-                            "-select_streams",
-                            "v:0",
-                            "-show_entries",
-                            "stream=codec_type",
-                            "-of",
-                            "json",
-                            str(candidate),
-                        ],
-                        timeout=30,
-                    )
-                )
-                if not verification.get("streams"):
-                    raise ValueError("下载结果没有有效视频流")
-                await self.repo.video_update(
-                    row["id"], phase="已完成", output=str(candidate), total=candidate.stat().st_size
-                )
+                stage = "校验"
+                await self.repo.video_update(row["id"], phase="校验中")
+                await self.verify_file(candidate)
+                stage = "完成处理"
+                size = candidate.stat().st_size
+                await self.repo.video_complete_file(row["id"], str(candidate), size)
                 download = Download(
                     gid,
                     "complete",
@@ -351,17 +342,25 @@ class VideoWorker:
                     directory,
                     [File(1, candidate, candidate.stat().st_size, candidate.stat().st_size, True)],
                 )
-                await self.repo.video_set_size(row["id"], candidate.stat().st_size)
                 await self.task_manager.complete_local_video(row, download)
         except asyncio.CancelledError:
             if process:
                 await terminate(process)
             if self.stopping:
-                await self.repo.update_status(gid, "PAUSED")
+                latest = await self.repo.get_by_gid(gid)
+                if latest and latest["status"] in ("PENDING", "ACTIVE", "PAUSED"):
+                    await self.repo.update_status(gid, "PAUSED")
             raise
         except Exception as exc:
-            message = str(exc) if isinstance(exc, ValueError) else "视频组件执行失败，请检查依赖和权限"
+            log.warning("video task %s failed during %s (%s)", row["id"], stage, type(exc).__name__)
+            latest = await self.repo.get_by_gid(gid)
+            if latest and latest["status"] == "COMPLETED":
+                # The file is committed; rendering or delivery cannot undo it.
+                await self.report(latest, force=True)
+                return
+            message = execution_error(exc, stage)
             await self.repo.update_status(gid, "FAILED", error=message)
+            await self.repo.video_update(row["id"], phase=stage + "失败")
             latest = await self.repo.get_by_gid(gid)
             if latest:
                 await self.report(latest, force=True)
@@ -369,3 +368,45 @@ class VideoWorker:
             if process:
                 await terminate(process)
             self.running.pop(gid, None)
+
+    async def verify_file(self, candidate):
+        verification = json.loads(
+            await capture(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=codec_type",
+                    "-of",
+                    "json",
+                    str(candidate),
+                ],
+                timeout=30,
+            )
+        )
+        if not isinstance(verification, dict) or not verification.get("streams"):
+            raise ValueError("下载结果没有有效视频流")
+
+    async def restore_completed_file(self, row):
+        if not row["output"] or not row["work_dir"]:
+            return False
+        candidate = Path(row["output"])
+        if (
+            candidate.is_symlink()
+            or not safe_target(str(candidate), row["work_dir"])
+            or not candidate.is_file()
+            or not candidate.stat().st_size
+        ):
+            return False
+        try:
+            await self.verify_file(candidate)
+        except (ValueError, OSError):
+            return False
+        await self.repo.video_complete_file(row["id"], str(candidate), candidate.stat().st_size)
+        latest = await self.repo.get_by_gid(row["gid"])
+        if latest:
+            await self.report(latest, force=True)
+        return True
