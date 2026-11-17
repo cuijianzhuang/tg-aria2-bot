@@ -51,6 +51,13 @@ def common_args(parser: str, cookies: str | None = None, proxy: str | None = Non
             result += ["--js-runtimes", f"deno:{local_deno}"]
         elif not shutil.which("deno") and shutil.which("node"):
             result += ["--js-runtimes", "node"]
+        # Enable browser impersonation for Cloudflare-protected sites (X/Twitter)
+        try:
+            import curl_cffi  # noqa: F401
+
+            result += ["--extractor-args", "generic:impersonate=chrome"]
+        except ImportError:
+            pass
     if cookies:
         result += ["--cookies", cookies]
     if proxy:

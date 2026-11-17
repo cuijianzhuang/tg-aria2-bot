@@ -34,7 +34,7 @@ you-get 使用其原生合并流程。
 
 ## Docker
 
-普通 bot 镜像内置固定摘要的 FFmpeg/FFprobe、Deno，以及锁定版本的两个解析器。
+普通 bot 镜像内置固定摘要的 FFmpeg/FFprobe、Deno，以及锁定版本的两个解析器和 curl-cffi（用于绕过 Cloudflare 保护）。
 扫码 Chromium 独立放在 login 镜像中，没有浏览器调试或登录服务公网端口。
 
 ```dotenv
