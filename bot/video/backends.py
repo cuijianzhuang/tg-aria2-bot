@@ -107,7 +107,12 @@ class VideoResolver:
         quality: str = "best",
     ) -> MediaInfo:
         validate_url(url)
-        parsers = PARSERS if parser == "auto" else (parser,)
+        # Force yt-dlp for Chinese platforms: you-get support is outdated or missing
+        platform = platform_for(url)
+        if parser == "auto" and platform in ("bilibili", "douyin", "xhs"):
+            parsers = ("yt-dlp", "you-get")
+        else:
+            parsers = PARSERS if parser == "auto" else (parser,)
         async with self.slots:
             error = None
             for name in parsers:
