@@ -41,7 +41,7 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
         run: echo "repository=${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@v6
         id: meta
         with:
           images: ghcr.io/${{ steps.names.outputs.repository }}/${{ matrix.image }}
