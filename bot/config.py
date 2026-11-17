@@ -30,9 +30,9 @@ class Settings(BaseSettings):
     access_request_cooldown_hours: int = 12
     # 普通用户（非管理员）的默认额度，0 = 不限制。每个人可以用 /setquota 单独调整；
     # 管理员始终不受限制。每日额度按服务器时区的自然日统计。
-    user_max_active_tasks: int = 0       # 同时进行的任务数
-    user_max_task_size_gb: float = 0     # 单个任务大小上限
-    user_daily_quota_gb: float = 0       # 每天下载总量
+    user_max_active_tasks: int = 0  # 同时进行的任务数
+    user_max_task_size_gb: float = 0  # 单个任务大小上限
+    user_daily_quota_gb: float = 0  # 每天下载总量
     download_dir: str = "/downloads"
     # 逗号分隔的备选下载目录，配合设置菜单里的"下载目录"切换使用；当前 download_dir
     # 始终排在选项第一位，这里只补充其它可选目录
@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     video_cookie_file_xhs: str = ""
     video_cookie_file_youtube: str = ""
     video_cookie_file_twitter: str = ""
+    video_output_format: str = "mp4"
     proxy_url: str | None = None
 
     db_path: str = "/app/data/tasks.db"

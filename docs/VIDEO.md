@@ -8,7 +8,9 @@
 
 解析默认优先 yt-dlp，失败后尝试 you-get；开始下载后不自动换后端。
 确认卡可切换后端、画质和账号，默认最佳画质。切换后重新解析，确认时展示实际选择。
-yt-dlp 的分离音视频由 FFmpeg 合并为 MKV（不重新编码），you-get 使用其原生合并流程。
+yt-dlp 的分离音视频由 FFmpeg 合并，默认输出 MP4（`VIDEO_OUTPUT_FORMAT=mp4`，兼容性最好）；
+可改为 `mkv`（支持更多编解码器组合，无需转码）或 `auto`（让 yt-dlp 根据流格式自动选择）。
+you-get 使用其原生合并流程。
 仅支持单视频；解析结果标记为播放列表或直播时会拒绝，不提供直播录制能力。不同站点的实际能力取决于解析器版本，
 扫码成功不等于当前解析器一定支持该内容，账号也不会改变内容本身的访问权限。
 
@@ -42,6 +44,7 @@ VIDEO_CONCURRENCY=2
 VIDEO_PROBE_CONCURRENCY=2
 VIDEO_PROBE_TIMEOUT=45
 VIDEO_STALL_TIMEOUT=180
+VIDEO_OUTPUT_FORMAT=mp4
 VIDEO_PUBLIC_URL=https://你的后台域名
 COMPOSE_PROFILES=web,video-login
 ```

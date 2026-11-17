@@ -8,6 +8,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from bot.config import settings
 from bot.video.accounts import platform_for, validate_url
 from bot.video.process import capture
 
@@ -158,7 +159,7 @@ def download_args(
         # Serialize the entire native progress dict. Interpolating missing
         # fields separately emits yt-dlp's NA sentinel, which is not JSON.
         template = PROGRESS_MARKER + "%(progress)j"
-        return args + [
+        args += [
             "--no-playlist",
             "--no-warnings",
             "--no-colors",
@@ -180,13 +181,19 @@ def download_args(
             "after_move:__VIDEO_OUTPUT__%(filepath)s",
             "-f",
             selector,
-            "--merge-output-format",
-            "mkv",
+        ]
+        # Allow explicit format control: mp4 (best compatibility), mkv (all codecs),
+        # auto (yt-dlp decides based on stream format).
+        output_format = getattr(settings, "video_output_format", "mp4").lower()
+        if output_format in ("mp4", "mkv"):
+            args += ["--merge-output-format", output_format]
+        args += [
             "-o",
             str(Path(directory) / "media.%(ext)s"),
             "--",
             url,
         ]
+        return args
     if quality != "best":
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", quality):
             raise ValueError("无效的格式编号")
