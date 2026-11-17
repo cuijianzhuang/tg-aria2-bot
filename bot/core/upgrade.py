@@ -77,7 +77,7 @@ class UpdateInfo:
     remote_sha: str
     commits: list[Commit] = field(default_factory=list)
     total: int = 0                  # 新提交总数（commits 只列前几个）
-    deps_changed: bool = False      # requirements.txt 有变化
+    deps_changed: bool = False      # 运行或视频组件的依赖文件有变化
     env_changed: bool = False       # .env.example 有新配置项
     diverged: bool = False          # 本地有远端没有的提交，无法快进
     dirty: list[str] = field(default_factory=list)   # 有本地改动的已跟踪文件
@@ -242,7 +242,7 @@ async def check() -> UpdateInfo:
             parts = line.split("\t", 2)
             if len(parts) == 3 and parts[1].isdigit():
                 info.commits.append(Commit(parts[0], parts[2], int(parts[1])))
-        rc, _ = await _git("diff", "--quiet", "HEAD", remote, "--", "requirements.txt")
+        rc, _ = await _git("diff", "--quiet", "HEAD", remote, "--", "requirements.txt", "requirements-video.txt", "requirements-login.txt", "requirements.lock")
         info.deps_changed = rc == 1
         rc, _ = await _git("diff", "--quiet", "HEAD", remote, "--", ".env.example")
         info.env_changed = rc == 1

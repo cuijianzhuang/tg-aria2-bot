@@ -8,11 +8,16 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from bot.video.accounts import validate_url
+from bot.video.accounts import platform_for, validate_url
 from bot.video.process import capture
 
 PARSERS = ("yt-dlp", "you-get")
 PROGRESS_MARKER = "__VIDEO_PROGRESS__"
+GENERIC_PROBE_ERRORS = ("解析失败：", "没有可下载的视频格式", "解析器没有返回有效的视频信息")
+
+
+def useful_probe_error(error: Exception) -> bool:
+    return isinstance(error, ValueError) and not str(error).startswith(GENERIC_PROBE_ERRORS)
 
 
 @dataclass
@@ -116,8 +121,16 @@ class VideoResolver:
                 try:
                     return parse_info(name, await capture(args, self.timeout))
                 except (ValueError, FileNotFoundError) as exc:
-                    error = exc
-            raise ValueError(str(error) if isinstance(error, ValueError) else "解析器未安装，请启用视频组件")
+                    # Preserve a useful yt-dlp failure when the fallback has only a generic error.
+                    if error is None or (not useful_probe_error(error) and useful_probe_error(exc)):
+                        error = exc
+            if isinstance(error, ValueError):
+                if platform_for(url) == "twitter" and str(error) == "解析失败：站点不支持、需登录或服务暂不可用":
+                    raise ValueError(
+                        "X 解析失败：请尝试导入 X Cookie 并选择个人/共享账号，或更新 yt-dlp 后重试"
+                    ) from None
+                raise ValueError(str(error)) from None
+            raise ValueError("解析器未安装，请启用视频组件")
 
 
 def format_selector(quality: str) -> str:

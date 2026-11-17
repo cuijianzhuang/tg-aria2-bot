@@ -11,10 +11,10 @@ def download_error_hint(output: str) -> str | None:
         return "平台请求过于频繁（HTTP 429），请稍后再试"
     if "timed out" in text or "timeout" in text:
         return "视频源连接超时，请检查服务器到视频站点的网络"
+    if any(phrase in text for phrase in ("sign in", "login required", "cookies are no longer valid", "not logged in")):
+        return "平台要求有效登录，请更新平台 Cookie 或重新扫码后重试"
     if "requested format" in text and "not available" in text:
         return "所选画质已不可用，请重新解析或切换画质"
-    if any(phrase in text for phrase in ("sign in", "login required", "cookies are no longer valid", "not logged in")):
-        return "平台要求有效登录，请重新扫码后重试"
     return None
 
 

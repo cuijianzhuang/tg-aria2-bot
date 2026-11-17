@@ -76,13 +76,13 @@ Chromium 的官方依赖安装适用于 Playwright 支持的 Debian/Ubuntu 环�
 
 ## 私聊与 Web 扫码
 
-`/videoaccounts` 或设置里的“视频平台账号”展示 B站、抖音、小红书和 YouTube。
-B站、抖音、小红书可扫码或导入个人 Cookie 文件；YouTube 支持个人导入和管理员共享文件，不提供扫码登录。
+`/videoaccounts` 或设置里的“视频平台账号”展示 B站、抖音、小红书、YouTube 和 X。
+B站、抖音、小红书可扫码或导入个人 Cookie 文件；YouTube 和 X 支持个人导入和管理员共享文件，不提供扫码登录。
 私聊列表展示自己的个人账号、共享账号、最近登录时间与默认身份；可切换默认身份、重新扫码，
 移除前需要二次确认。Web 后台展示共享账号详情与共享开关，不列出其他用户的个人凭据。
 个人账号绑定 Telegram 用户。个人账号缺失时先展示未登录预览；选择个人账号但失效时
 明确报错，不自动切换共享身份。共享账号只有管理员可扫码、移除和开放，重新登录后
-需要重新开放。用户在确认卡主动选择共享账号，选择按平台记忆。
+保持原有开放状态。管理员也可在个人账号页确认后将自己的登录态复制为共享账号；其他用户仍需获得机器人使用权限并主动选择共享身份。用户在确认卡主动选择共享账号，选择按平台记忆。
 
 管理员也可从 Web 后台的“视频平台账号”进入共享账号管理。
 普通用户从私聊获得五分钟一次性 Web 链接，只访问当前扫码会话，不获得后台权限。
@@ -100,6 +100,7 @@ VIDEO_COOKIE_FILE_BILIBILI=/app/data/video-cookies/bilibili.txt
 VIDEO_COOKIE_FILE_DOUYIN=/app/data/video-cookies/douyin.txt
 VIDEO_COOKIE_FILE_XHS=/app/data/video-cookies/xhs.txt
 VIDEO_COOKIE_FILE_YOUTUBE=/app/data/video-cookies/youtube.txt
+VIDEO_COOKIE_FILE_TWITTER=/app/data/video-cookies/twitter.txt
 ```
 
 文件为 Netscape 格式，管理员需先开放共享，再由用户显式选择共享模式；关闭共享同样会禁用配置文件凭据。
@@ -108,7 +109,7 @@ VIDEO_COOKIE_FILE_YOUTUBE=/app/data/video-cookies/youtube.txt
 
 ### 个人 Cookie 导入
 
-四个平台均可在机器人私聊中导入，无需启动扫码 worker：
+五个平台均可在机器人私聊中导入，无需启动扫码 worker：
 
 1. 发送 `/videoaccounts` → 选择平台 → **导入个人 Cookie**。
 2. 五分钟内**回复机器人发出的导入提示消息**，以附件发送 Netscape 格式的 `cookies.txt`，最大 1 MiB。
@@ -130,7 +131,7 @@ systemd 部署需让 bot 运行用户能读取 Bot API 缓存目录。Docker 的
 日志仅包含固定阶段代码及异常类型，不输出可能含 Token 的缓存路径或原始异常。
 导入成功表示格式检查和保存完成，不表示已经验证平台账号身份、Cookie 当前有效或内容可下载。
 
-### 配置 Cookie 文件（四个平台通用）
+### 配置 Cookie 文件（五个平台通用）
 
 1. 从已登录的浏览器导出 Netscape `cookies.txt`（最大 1 MiB），放入项目的 `data/video-cookies/`，文件权限设为 `600`。
 2. 在 `.env` 中填写对应的 `VIDEO_COOKIE_FILE_*`。上述 `/app/data/…` 是 Docker 容器路径，对应宿主机项目的 `data/…`；
