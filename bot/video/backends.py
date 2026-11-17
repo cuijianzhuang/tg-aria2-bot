@@ -8,6 +8,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from bot.config import settings
 from bot.video.accounts import platform_for, validate_url
 from bot.video.process import capture
 
@@ -50,6 +51,13 @@ def common_args(parser: str, cookies: str | None = None, proxy: str | None = Non
             result += ["--js-runtimes", f"deno:{local_deno}"]
         elif not shutil.which("deno") and shutil.which("node"):
             result += ["--js-runtimes", "node"]
+        # Enable browser impersonation for Cloudflare-protected sites (X/Twitter)
+        try:
+            import curl_cffi  # noqa: F401
+
+            result += ["--extractor-args", "generic:impersonate=chrome"]
+        except ImportError:
+            pass
     if cookies:
         result += ["--cookies", cookies]
     if proxy:
@@ -106,7 +114,12 @@ class VideoResolver:
         quality: str = "best",
     ) -> MediaInfo:
         validate_url(url)
-        parsers = PARSERS if parser == "auto" else (parser,)
+        # Force yt-dlp for Chinese platforms: you-get support is outdated or missing
+        platform = platform_for(url)
+        if parser == "auto" and platform in ("bilibili", "douyin", "xhs"):
+            parsers = ("yt-dlp", "you-get")
+        else:
+            parsers = PARSERS if parser == "auto" else (parser,)
         async with self.slots:
             error = None
             for name in parsers:
@@ -158,7 +171,7 @@ def download_args(
         # Serialize the entire native progress dict. Interpolating missing
         # fields separately emits yt-dlp's NA sentinel, which is not JSON.
         template = PROGRESS_MARKER + "%(progress)j"
-        return args + [
+        args += [
             "--no-playlist",
             "--no-warnings",
             "--no-colors",
@@ -180,13 +193,19 @@ def download_args(
             "after_move:__VIDEO_OUTPUT__%(filepath)s",
             "-f",
             selector,
-            "--merge-output-format",
-            "mkv",
+        ]
+        # Allow explicit format control: mp4 (best compatibility), mkv (all codecs),
+        # auto (yt-dlp decides based on stream format).
+        output_format = getattr(settings, "video_output_format", "mp4").lower()
+        if output_format in ("mp4", "mkv"):
+            args += ["--merge-output-format", output_format]
+        args += [
             "-o",
             str(Path(directory) / "media.%(ext)s"),
             "--",
             url,
         ]
+        return args
     if quality != "best":
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", quality):
             raise ValueError("无效的格式编号")
