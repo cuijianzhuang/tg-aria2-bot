@@ -14,6 +14,7 @@ from bot.config import settings
 from bot.db.repo import TaskRepo
 from bot.video.accounts import CredentialVault, account_cookies, is_video_url, platform_for, validate_url
 from bot.video.backends import PROGRESS_MARKER, VideoResolver, download_args, parse_info, progress_event
+from bot.video.errors import download_error_hint
 from bot.video.login_worker import LoginWorker
 from bot.video.process import capture, signal_group, spawn, terminate
 from bot.video.ui import video_task_keyboard
@@ -44,6 +45,24 @@ class TestVideoAdapters(unittest.IsolatedAsyncioTestCase):
             result = await VideoResolver().probe("https://example.com/video")
         self.assertEqual(result.parser, "you-get")
         self.assertEqual(call.await_count, 2)
+
+    async def test_fallback_does_not_hide_original_error(self):
+        errors = [
+            ValueError("平台要求有效登录，请更新平台 Cookie 或重新扫码后重试"),
+            ValueError("解析失败：站点不支持、需登录或服务暂不可用"),
+        ]
+        with patch("bot.video.backends.capture", AsyncMock(side_effect=errors)):
+            with self.assertRaisesRegex(ValueError, "有效登录"):
+                await VideoResolver().probe("https://x.com/user/status/123/video/1")
+        self.assertIn("有效登录", download_error_hint("Login required; Requested format is not available"))
+
+    async def test_x_generic_error_suggests_cookie_import(self):
+        with patch(
+            "bot.video.backends.capture",
+            AsyncMock(side_effect=ValueError("解析失败：站点不支持、需登录或服务暂不可用")),
+        ):
+            with self.assertRaisesRegex(ValueError, "导入 X Cookie"):
+                await VideoResolver().probe("https://x.com/user/status/123/video/1")
 
     async def test_explicit_parser_does_not_fallback(self):
         with patch("bot.video.backends.capture", AsyncMock(side_effect=ValueError("unsupported"))) as call:
@@ -156,6 +175,38 @@ class TestVideoDatabase(unittest.IsolatedAsyncioTestCase):
         await self.repo.video_share("bilibili", False)
         with self.assertRaises(ValueError):
             await account_cookies(self.repo, self.vault, 123, "https://bilibili.com/a", "shared")
+
+    async def test_shared_login_stays_open_when_credentials_are_refreshed(self):
+        await self.repo.video_put_account("bilibili", 0, "old", self.vault.encrypt(COOKIES))
+        await self.repo.video_share("bilibili", True)
+        login = await self.repo.video_new_login("bilibili", 0, 123)
+        await self.repo.video_complete_login(login, "updated", self.vault.encrypt(COOKIES))
+        self.assertTrue((await self.repo.video_account("bilibili", 0))["enabled"])
+        self.assertEqual(
+            await account_cookies(self.repo, self.vault, 456, "https://bilibili.com/video", "shared"), COOKIES
+        )
+
+    async def test_shared_account_rules_apply_to_other_platforms(self):
+        for platform, url in (
+            ("douyin", "https://www.douyin.com/video/123"),
+            ("xhs", "https://www.xiaohongshu.com/explore/123"),
+            ("youtube", "https://www.youtube.com/watch?v=123"),
+            ("twitter", "https://x.com/user/status/123/video/1"),
+        ):
+            with self.subTest(platform=platform):
+                cookies = [
+                    dict(
+                        COOKIES[0], domain="." + {"xhs": "xiaohongshu", "twitter": "x"}.get(platform, platform) + ".com"
+                    )
+                ]
+                await self.repo.video_put_account(platform, 0, "shared", self.vault.encrypt(cookies))
+                await self.repo.video_share(platform, True)
+                self.assertEqual(await account_cookies(self.repo, self.vault, 456, url, "shared"), cookies)
+                with self.assertRaises(ValueError):
+                    await account_cookies(self.repo, self.vault, 456, url, "personal")
+                await self.repo.video_share(platform, False)
+                with self.assertRaises(ValueError):
+                    await account_cookies(self.repo, self.vault, 456, url, "shared")
 
     async def test_configured_cookie_file_respects_shared_switch(self):
         with self.vault.snapshot(COOKIES) as path, patch.object(settings, "video_cookie_file_bilibili", path):

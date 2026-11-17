@@ -125,7 +125,7 @@ class FakeGit:
             "rev-list --count": (0, "2"),
             "merge-base": (0, ""),
             "log -10": (0, "bbbbbbb\t1700000100\t新功能\nccccccc\t1700000050\t修复"),
-            "diff --quiet HEAD origin/master -- requirements.txt": (0, ""),
+            "diff --quiet HEAD origin/master -- requirements.txt requirements-video.txt requirements-login.txt requirements.lock": (0, ""),
             "diff --quiet HEAD origin/master -- .env.example": (0, ""),
             "status": (0, ""),
         }
@@ -163,13 +163,14 @@ class TestCheck(UpgradeTestBase):
         self.assertTrue((await upgrade.check()).up_to_date)
 
     async def test_dependency_and_env_changes_are_detected(self):
-        self._patch(**{
-            "diff --quiet HEAD origin/master -- requirements.txt": (1, ""),
+        git = self._patch(**{
+            "diff --quiet HEAD origin/master -- requirements.txt requirements-video.txt requirements-login.txt requirements.lock": (1, ""),
             "diff --quiet HEAD origin/master -- .env.example": (1, ""),
         })
         i = await upgrade.check()
         self.assertTrue(i.deps_changed)
         self.assertTrue(i.env_changed)
+        self.assertIn(("git", "diff", "--quiet", "HEAD", "origin/master", "--", "requirements.txt", "requirements-video.txt", "requirements-login.txt", "requirements.lock"), git.calls)
 
     async def test_local_changes_are_reported(self):
         self._patch(status=(0, " M install.sh\n M bot/main.py"))

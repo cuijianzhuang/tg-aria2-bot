@@ -168,7 +168,7 @@ class VideoRepoMixin:
     async def video_put_account(self, platform, owner_id, identity, cookies):
         await self._conn.execute(
             """INSERT INTO video_accounts VALUES (?,?,?,?,0,?) ON CONFLICT(platform,owner_id)
-               DO UPDATE SET identity=excluded.identity,cookies=excluded.cookies,enabled=0,updated=excluded.updated""",
+               DO UPDATE SET identity=excluded.identity,cookies=excluded.cookies,updated=excluded.updated""",
             (platform, owner_id, identity, cookies, time.time()),
         )
         await self._conn.commit()
@@ -227,7 +227,7 @@ class VideoRepoMixin:
             )
             await self._conn.execute(
                 """INSERT INTO video_accounts VALUES (?,?,?,?,0,?) ON CONFLICT(platform,owner_id)
-                   DO UPDATE SET identity=excluded.identity,cookies=excluded.cookies,enabled=0,updated=excluded.updated""",
+                   DO UPDATE SET identity=excluded.identity,cookies=excluded.cookies,updated=excluded.updated""",
                 (platform, user_id, "Cookie 导入（账号身份未验证）", encrypted, time.time()),
             )
             await self._conn.execute(
@@ -236,6 +236,7 @@ class VideoRepoMixin:
         await self._conn.commit()
         return bool(row)
 
+    @_credential_write
     async def video_share(self, platform, enabled):
         await self._conn.execute(
             "INSERT OR REPLACE INTO video_preferences VALUES (0,?,?)", (platform, "shared" if enabled else "anonymous")
@@ -244,6 +245,26 @@ class VideoRepoMixin:
             "UPDATE video_accounts SET enabled=? WHERE platform=? AND owner_id=0", (int(enabled), platform)
         )
         await self._conn.commit()
+
+    @_credential_write
+    async def video_share_personal(self, platform, owner_id):
+        """Copy an administrator's own encrypted login to the shared account."""
+        if owner_id == 0:
+            return False
+        cur = await self._conn.execute(
+            """INSERT INTO video_accounts (platform,owner_id,identity,cookies,enabled,updated)
+               SELECT platform,0,identity,cookies,1,? FROM video_accounts
+               WHERE platform=? AND owner_id=?
+               ON CONFLICT(platform,owner_id) DO UPDATE SET
+               identity=excluded.identity,cookies=excluded.cookies,enabled=1,updated=excluded.updated
+               RETURNING owner_id""",
+            (time.time(), platform, owner_id),
+        )
+        copied = await cur.fetchone()
+        if copied:
+            await self._conn.execute("INSERT OR REPLACE INTO video_preferences VALUES (0,?,'shared')", (platform,))
+        await self._conn.commit()
+        return bool(copied)
 
     async def video_preference(self, user_id, platform, mode=None):
         if mode is not None:
@@ -373,7 +394,7 @@ class VideoRepoMixin:
         if row:
             await self._conn.execute(
                 """INSERT INTO video_accounts VALUES (?,?,?,?,0,?) ON CONFLICT(platform,owner_id)
-                   DO UPDATE SET identity=excluded.identity,cookies=excluded.cookies,enabled=0,updated=excluded.updated""",
+                   DO UPDATE SET identity=excluded.identity,cookies=excluded.cookies,updated=excluded.updated""",
                 (row["platform"], row["owner_id"], identity, encrypted, time.time()),
             )
         await self._conn.commit()

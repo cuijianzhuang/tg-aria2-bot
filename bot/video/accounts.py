@@ -15,6 +15,7 @@ PLATFORMS = {
     "douyin": ("douyin.com", "iesdouyin.com"),
     "xhs": ("xiaohongshu.com", "xhslink.com"),
     "youtube": ("youtube.com", "youtu.be", "youtube-nocookie.com"),
+    "twitter": ("x.com", "twitter.com"),
 }
 QR_PLATFORMS = frozenset({"bilibili", "douyin", "xhs"})
 MAX_COOKIE_BYTES = 1024 * 1024

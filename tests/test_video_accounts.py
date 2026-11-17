@@ -58,6 +58,25 @@ class TestSavedVideoAccounts(unittest.IsolatedAsyncioTestCase):
         self.assertIn("vacc:share:bilibili", callbacks)
         self.assertNotIn("other-personal", text)
 
+    async def test_admin_can_share_own_login_with_confirmation(self):
+        with patch.object(settings, "admin_user_ids", "11"), patch.object(settings, "allowed_user_ids", "11"):
+            preview = self.query("publish")
+            await account_action(preview, self.repo)
+            self.assertEqual((await self.repo.video_account("bilibili", 0))["identity"], "shared-id")
+            await account_action(self.query("publish-confirmed"), self.repo)
+            shared = await self.repo.video_account("bilibili", 0)
+            self.assertEqual(shared["identity"], "<personal-11>")
+            self.assertEqual(shared["cookies"], b"personal-secret")
+            self.assertTrue(shared["enabled"])
+            self.assertIsNotNone(await self.repo.video_account("bilibili", 11))
+
+    async def test_non_admin_cannot_share_own_login(self):
+        with patch.object(settings, "admin_user_ids", "99"), patch.object(settings, "allowed_user_ids", "99"):
+            query = self.query("publish-confirmed")
+            await account_action(query, self.repo)
+            self.assertTrue(query.answer.await_args.kwargs["show_alert"])
+        self.assertEqual((await self.repo.video_account("bilibili", 0))["identity"], "shared-id")
+
     async def test_remove_requires_confirmation_and_only_removes_own_account(self):
         with patch.object(settings, "admin_user_ids", "99"), patch.object(settings, "allowed_user_ids", "99"):
             query = self.query("remove")

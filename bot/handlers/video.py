@@ -182,7 +182,11 @@ async def account_action(query: CallbackQuery, repo):
         return
     action, platform = parts[1:]
     admin = settings.is_admin(query.from_user.id)
-    if action in ("shared", "share", "unshare", "remove-shared", "remove-shared-confirmed") and not admin:
+    if (
+        action
+        in ("shared", "share", "unshare", "remove-shared", "remove-shared-confirmed", "publish", "publish-confirmed")
+        and not admin
+    ):
         await query.answer("仅管理员可管理共享账号", show_alert=True)
         return
     if action == "import" and not settings.video_enabled:
@@ -227,6 +231,35 @@ async def account_action(query: CallbackQuery, repo):
                     ]
                 ),
             )
+    elif action == "publish":
+        if not await repo.video_account(platform, query.from_user.id):
+            await query.message.answer("⚠️ 请先登录个人账号")
+            return
+        if getattr(settings, "video_cookie_file_" + platform, ""):
+            await query.message.answer("⚠️ 当前平台配置了共享 Cookie 文件，请管理员先移除该配置再共享个人账号")
+            return
+        await edit_menu(
+            query,
+            "⚠️ 确认让其他获准使用机器人的用户以你的账号下载此平台视频？"
+            "平台登录态将作为共享账号保存；关闭共享不会清除已保存的登录态。",
+            InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="👥 确认共享", callback_data=f"vacc:publish-confirmed:{platform}"),
+                        InlineKeyboardButton(text="返回", callback_data=f"vacc:platform:{platform}"),
+                    ]
+                ]
+            ),
+        )
+    elif action == "publish-confirmed":
+        if getattr(settings, "video_cookie_file_" + platform, ""):
+            await query.message.answer("⚠️ 当前平台配置了共享 Cookie 文件，请管理员先移除该配置再共享个人账号")
+            return
+        if not await repo.video_share_personal(platform, query.from_user.id):
+            await query.message.answer("⚠️ 个人账号已移除，请重新登录后再共享")
+            return
+        text, keyboard = await platform_view(repo, query.from_user.id, platform, admin, back_token)
+        await edit_menu(query, text, keyboard)
     elif action in ("remove", "remove-shared"):
         shared = action == "remove-shared"
         confirm = "remove-shared-confirmed" if shared else "remove-confirmed"

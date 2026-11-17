@@ -21,7 +21,7 @@ class Exchange(BaseModel):
 
 
 class PlatformRequest(BaseModel):
-    platform: Literal["bilibili", "douyin", "xhs", "youtube"]
+    platform: Literal["bilibili", "douyin", "xhs", "youtube", "twitter"]
 
 
 class QRPlatformRequest(BaseModel):

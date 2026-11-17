@@ -11,7 +11,7 @@ from bot.config import settings
 from bot.video.accounts import QR_PLATFORMS
 from bot.video.ui import MODES
 
-PLATFORM_LABELS = {"bilibili": "B站", "douyin": "抖音", "xhs": "小红书", "youtube": "YouTube"}
+PLATFORM_LABELS = {"bilibili": "B站", "douyin": "抖音", "xhs": "小红书", "youtube": "YouTube", "twitter": "X"}
 
 
 def metadata(row):
@@ -111,6 +111,8 @@ async def platform_view(repo, user_id, platform, admin, back_token=None):
     if personal:
         rows.append([Button(text="🗑 移除个人登录", callback_data=f"vacc:remove:{platform}")])
     if admin:
+        if personal and shared["source"] != "file":
+            rows.append([Button(text="👥 共享我的个人账号", callback_data=f"vacc:publish:{platform}")])
         if platform in QR_PLATFORMS:
             rows.append(
                 [

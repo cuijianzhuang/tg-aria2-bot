@@ -39,12 +39,18 @@ class TestCookieFiles(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(platform_for(f"https://{host}/video"), "youtube")
         self.assertIsNone(platform_for("https://youtube.com.attacker.example/video"))
 
+    def test_x_and_twitter_hosts_share_one_account(self):
+        for host in ("x.com", "www.x.com", "twitter.com", "mobile.twitter.com"):
+            self.assertEqual(platform_for(f"https://{host}/user/status/123/video/1"), "twitter")
+        self.assertIsNone(platform_for("https://x.com.attacker.example/video"))
+
     async def test_all_platform_files_filter_unrelated_domains(self):
         for platform, domain in (
             ("bilibili", "bilibili.com"),
             ("douyin", "douyin.com"),
             ("xhs", "xiaohongshu.com"),
             ("youtube", "youtube.com"),
+            ("twitter", "x.com"),
         ):
             with self.subTest(platform=platform):
                 path = self.cookie_file(
