@@ -1,2 +1,2 @@
 -r requirements-video.txt
-playwright==1.65.0
+playwright==1.65.2
