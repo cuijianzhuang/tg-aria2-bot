@@ -22,8 +22,8 @@ jobs:
       fail-fast: false
       matrix:
         # 3.11：bare 模式支持的最低版本（pyproject target-version）；
-        # 3.14：docker 镜像（Dockerfile）实际运行的版本
-        python-version: ["3.11", "3.14"]
+        # 3.15：docker 镜像（Dockerfile）实际运行的版本
+        python-version: ["3.11", "3.15"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -31,6 +31,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: pip install -r requirements.txt -r requirements-video.txt
+      - name: requirements.lock consistency
+        run: python scripts/check_requirements_lock.py
       - name: Ruff lint
         uses: astral-sh/ruff-action@v3
         with:

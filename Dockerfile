@@ -36,10 +36,14 @@ CMD ["python", "-m", "bot.main"]
 FROM runtime AS login
 USER root
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+# Playwright 版本的单一来源是 requirements-login.txt（它 -r 引入
+# requirements-video.txt，其余运行时依赖已由 runtime 阶段的 lock 装好）：
+# 升级 playwright 只改 txt 一处，镜像自动跟随，不要在这里再硬编码版本号。
+COPY requirements-login.txt requirements-video.txt ./
 RUN --mount=type=secret,id=proxy_ca \
     if [ -f /run/secrets/proxy_ca ]; then export PIP_CERT=/run/secrets/proxy_ca NODE_EXTRA_CA_CERTS=/run/secrets/proxy_ca; fi; \
     apt-get update && apt-get install -y --no-install-recommends libatomic1 && \
-    pip install --no-cache-dir playwright==1.65.0 && \
+    pip install --no-cache-dir -r requirements-login.txt && \
     python -m playwright install --with-deps chromium --only-shell && chmod -R a+rX /opt/playwright && rm -rf /var/lib/apt/lists/*
 USER app
 CMD ["python", "-m", "bot.video.login_worker"]

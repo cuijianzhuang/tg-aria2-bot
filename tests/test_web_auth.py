@@ -58,5 +58,36 @@ class TestSecretPersistence(unittest.TestCase):
             self.assertFalse(verify_session_token(new, token))
 
 
+class TestCookieSecure(unittest.TestCase):
+    """Session cookie Secure flag follows the video-login cookie's rule."""
+
+    def _request(self, scheme="http", headers=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(url=SimpleNamespace(scheme=scheme), headers=headers or {})
+
+    def test_https_request_is_secure(self):
+        from bot.web.app import _cookie_secure
+
+        self.assertTrue(_cookie_secure(self._request("https")))
+
+    def test_plain_http_is_not_secure(self):
+        from bot.web.app import _cookie_secure
+
+        self.assertFalse(_cookie_secure(self._request("http")))
+
+    def test_forwarded_proto_only_counts_with_trusted_proxy(self):
+        from unittest.mock import patch
+
+        from bot.config import settings
+        from bot.web.app import _cookie_secure
+
+        req = self._request("http", {"x-forwarded-proto": "https"})
+        with patch.object(settings, "trust_proxy_headers", False):
+            self.assertFalse(_cookie_secure(req))
+        with patch.object(settings, "trust_proxy_headers", True):
+            self.assertTrue(_cookie_secure(req))
+
+
 if __name__ == "__main__":
     unittest.main()

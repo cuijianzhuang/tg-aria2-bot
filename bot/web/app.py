@@ -50,6 +50,16 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _cookie_secure(request: Request) -> bool:
+    # Same rule as the video-login cookie (bot/web/video.py): only mark the
+    # session cookie Secure when the request actually arrived over HTTPS
+    # (directly, or via a trusted proxy's X-Forwarded-Proto), so plain-HTTP
+    # local deployments keep working.
+    return request.url.scheme == "https" or (
+        settings.trust_proxy_headers and request.headers.get("x-forwarded-proto") == "https"
+    )
+
+
 def _check_password(supplied: str) -> bool:
     return hmac.compare_digest(supplied.encode(), settings.admin_password.encode())
 
@@ -150,7 +160,9 @@ async def login(body: LoginRequest, request: Request, response: Response):
         raise HTTPException(401, "密码错误")
     _clear_login_failures(ip)
     token = create_session_token(state["session_secret"])
-    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", max_age=7 * 24 * 3600)
+    response.set_cookie(
+        SESSION_COOKIE, token, httponly=True, samesite="lax", secure=_cookie_secure(request), max_age=7 * 24 * 3600
+    )
     return {"ok": True}
 
 
@@ -161,7 +173,7 @@ async def logout(response: Response):
 
 
 @app.post("/api/settings/password", dependencies=[Depends(require_login)])
-async def change_password(body: ChangePasswordRequest, response: Response):
+async def change_password(body: ChangePasswordRequest, request: Request, response: Response):
     if not _check_password(body.current_password):
         raise HTTPException(401, "当前密码错误")
     if len(body.new_password) < 8:
@@ -174,7 +186,9 @@ async def change_password(body: ChangePasswordRequest, response: Response):
     # password change, then reissue a fresh token for this session.
     state["session_secret"] = rotate_secret(_secret_path())
     token = create_session_token(state["session_secret"])
-    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", max_age=7 * 24 * 3600)
+    response.set_cookie(
+        SESSION_COOKIE, token, httponly=True, samesite="lax", secure=_cookie_secure(request), max_age=7 * 24 * 3600
+    )
     return {"ok": True}
 
 
