@@ -84,7 +84,14 @@ class TestParseHubMapping(unittest.TestCase):
 
 class TestParseHubAvailability(unittest.IsolatedAsyncioTestCase):
     async def test_missing_package_disables_backend_with_reason(self):
-        with patch("bot.video.parsehub_backend.importlib.util.find_spec", return_value=None):
+        # unavailable_reason() checks the Python version before the package,
+        # so pin the version as well: this case is about the missing package
+        # and must behave identically on 3.11, where the version check would
+        # otherwise fire first and mask the "not installed" reason.
+        with (
+            patch("bot.video.parsehub_backend.sys.version_info", (3, 12, 0)),
+            patch("bot.video.parsehub_backend.importlib.util.find_spec", return_value=None),
+        ):
             reason = parsehub_backend.unavailable_reason()
             self.assertIn("未安装", reason)
             with self.assertRaises(ValueError) as ctx:
