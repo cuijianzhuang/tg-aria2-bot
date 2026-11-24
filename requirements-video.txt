@@ -1,5 +1,9 @@
-yt-dlp[default]==2026.10.26
+# yt-dlp is pinned to a nightly build in this line only: parsehub requires
+# yt-dlp>=2026.11.4.232659.dev0 (a pre-release), which the stable pin cannot
+# coexist with. requirements.txt (the main line) does not include yt-dlp.
+yt-dlp[default]==2026.11.23.232705.dev0
 you-get==0.4.1743
 cryptography==50.0.2
 qrcode[pil]==8.2
 curl-cffi==0.17.0  # X/Twitter Cloudflare bypass
+parsehub==2.4.4; python_version >= "3.12"  # optional ParseHub backend; lazily imported, auto-disabled below 3.12

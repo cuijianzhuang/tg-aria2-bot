@@ -24,15 +24,25 @@ STATES = {
 }
 
 
+KIND_LABELS = {"image": "🖼 图文", "multi": "🗂 多媒体", "music": "🎵 音乐", "rich": "📄 文章"}
+
+
 def preview_card(preview):
     info = json.loads(preview["info"])
-    return (
-        f"🎬 <b>{escape(info['title'])}</b>\n"
-        f"🧩 {escape(preview['parser'])} · 🎞 {escape(preview['quality'])}\n"
-        f"👤 {MODES[preview['account_mode']]} · 📍 本机\n"
-        f"📦 {fmt_bytes(info['size']) if info.get('size') else '大小未知'}\n"
-        "确认后下载并自动合并；暂停任务保留执行槽位。"
-    )
+    lines = [
+        f"🎬 <b>{escape(info['title'])}</b>",
+        f"🧩 {escape(preview['parser'])} · 🎞 {escape(preview['quality'])}",
+        f"👤 {MODES[preview['account_mode']]} · 📍 本机",
+        f"📦 {fmt_bytes(info['size']) if info.get('size') else '大小未知'}",
+    ]
+    kind = info.get("kind") or "video"
+    if kind in KIND_LABELS:
+        count = len(info.get("items") or [])
+        lines.append(KIND_LABELS[kind] + (f" · {count} 个文件" if count else ""))
+        lines.append("确认后下载全部文件并发送。")
+    else:
+        lines.append("确认后下载并自动合并；暂停任务保留执行槽位。")
+    return "\n".join(lines)
 
 
 def preview_keyboard(preview):
@@ -48,7 +58,7 @@ def preview_keyboard(preview):
     ]
     rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
     rows += [
-        [Button(text=p, callback_data=f"vp:p:{token}:{p}") for p in ("yt-dlp", "you-get")],
+        [Button(text=p, callback_data=f"vp:p:{token}:{p}") for p in ("yt-dlp", "you-get", "parsehub")],
         [
             Button(text=label, callback_data=f"vp:a:{token}:{mode}")
             for mode, label in MODES.items()

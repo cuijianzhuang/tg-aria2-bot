@@ -125,6 +125,10 @@ CREATE TABLE IF NOT EXISTS user_prefs (
 MIGRATIONS = [
     "ALTER TABLE video_logins ADD COLUMN failure_reason TEXT",
     "ALTER TABLE video_jobs ADD COLUMN back TEXT",
+    # ParseHub 结果模型：单文件 output 之外还要记类型、多文件清单与正文
+    "ALTER TABLE video_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'video'",
+    "ALTER TABLE video_jobs ADD COLUMN files TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE video_jobs ADD COLUMN content TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE tasks ADD COLUMN backend TEXT NOT NULL DEFAULT 'aria2'",
     "ALTER TABLE tasks ADD COLUMN gofile_link TEXT",
     "ALTER TABLE tasks ADD COLUMN payload TEXT",
