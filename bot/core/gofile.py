@@ -6,6 +6,10 @@ import aiohttp
 API_HOST = "https://api.gofile.io"
 log = logging.getLogger(__name__)
 
+# 上传时连续无字节进展的容忍上限（秒）：超过即认为连接已死。正常上传哪怕
+# 慢也在持续发数据，不会误伤；只杀真正挂死的连接。
+UPLOAD_SOCK_READ_TIMEOUT_SECONDS = 120
+
 # gofile no longer accepts truly anonymous uploads (verified live: uploadfile
 # without a token now 401s) — a guest account token is required. Cache one in
 # memory per process so we don't mint a fresh throwaway account on every upload.
@@ -83,7 +87,13 @@ async def upload_file(path: str, token: str | None = None) -> dict:
         form.add_field("file", f, filename=os.path.basename(path))
 
         session = _get_session()
-        async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=None)) as resp:
+        # 不设 total 超时（大文件合法地传很久），但 sock_read 兜底：连续
+        # UPLOAD_SOCK_READ_TIMEOUT_SECONDS 收不到任何字节就判定连接已死并
+        # 中断——否则对端挂死时这个上传协程会永久悬挂；建连另给 30s 上限。
+        timeout = aiohttp.ClientTimeout(
+            total=None, sock_read=UPLOAD_SOCK_READ_TIMEOUT_SECONDS, sock_connect=30,
+        )
+        async with session.post(url, data=form, timeout=timeout) as resp:
             data = await resp.json()
 
     if data.get("status") != "ok":

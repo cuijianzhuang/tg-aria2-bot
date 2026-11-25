@@ -271,8 +271,26 @@ class Aria2Client:
             for path in _root_paths(status.files, status.dir):
                 await asyncio.to_thread(remove_path, str(path))
 
+    async def get_active_downloads(self) -> list[Download]:
+        """还在进行中的下载（active + waiting/paused）——常规轮询只需要这部分：
+        未完成任务通常只有个位数，没必要每 2-5 秒再把已停止的历史全量拉一遍。"""
+        active, waiting = await asyncio.gather(
+            self._rpc.call("tellActive"),
+            self._rpc.call("tellWaiting", 0, 1000),
+        )
+        return [Download.from_struct(s) for s in (*active, *waiting)]
+
+    async def get_stopped_downloads(self, limit: int = 100) -> list[Download]:
+        """已停止（complete/error/removed）的近期结果，只给低频对账用：WS 推送
+        覆盖绝大多数完成/出错事件，对账只是兜底捡漏，近 100 条足够覆盖两次
+        对账之间新产生的终态；更早的历史终态任务早已被处理过。"""
+        stopped = await self._rpc.call("tellStopped", 0, limit)
+        return [Download.from_struct(s) for s in stopped]
+
     async def get_all_downloads(self) -> list[Download]:
-        """Every download aria2 knows about (active + waiting + stopped), one RPC batch."""
+        """Every download aria2 knows about (active + waiting + stopped), one RPC batch.
+        只剩启动对账这种一次性场景在用；周期轮询走 get_active_downloads +
+        低频 get_stopped_downloads，不要再把这个接回热路径。"""
         active, waiting, stopped = await asyncio.gather(
             self._rpc.call("tellActive"),
             self._rpc.call("tellWaiting", 0, 1000),
@@ -281,8 +299,9 @@ class Aria2Client:
         return [Download.from_struct(s) for s in (*active, *waiting, *stopped)]
 
     async def get_progress_map(self) -> dict[str, dict]:
-        """gid -> {percent, speed, completed, total} for every download aria2 currently knows about."""
-        downloads = await self.get_all_downloads()
+        """gid -> {percent, speed, completed, total}。只需要进行中任务的进度，
+        所以走 get_active_downloads，不再顺带全量拉已停止的历史。"""
+        downloads = await self.get_active_downloads()
         return {
             d.gid: {
                 "percent": round(d.progress, 1),

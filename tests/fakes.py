@@ -24,6 +24,9 @@ class FakeAria2:
         # (gid, event) 元组列表；listen_events 按顺序 yield 完就正常结束
         # （模拟服务器主动断开），空列表 = 一条事件都不推送
         self.events_to_emit: list[tuple[str, str]] = []
+        # get_active_downloads/get_stopped_downloads 的调用计数（轮询节拍测试用）
+        self.active_calls = 0
+        self.stopped_calls = 0
 
     async def add_uri(self, uri, *, out=None, download_dir=None):
         self.add_uri_calls.append((uri, out, download_dir))
@@ -53,6 +56,15 @@ class FakeAria2:
 
     async def get_all_downloads(self):
         return list(self.statuses.values())
+
+    async def get_active_downloads(self):
+        self.active_calls += 1
+        return [d for d in self.statuses.values() if d.status in ("active", "waiting", "paused")]
+
+    async def get_stopped_downloads(self, limit=100):
+        self.stopped_calls += 1
+        stopped = [d for d in self.statuses.values() if d.status in ("complete", "error", "removed")]
+        return stopped[:limit]
 
     async def remove(self, gid, *, files=False, is_local=True):
         self.removed.append((gid, files, is_local))

@@ -122,6 +122,7 @@ async def main():
         await repo.close()
         await bot.session.close()
         await gofile.close_session()
+        await rss.close_session()
 
 
 if __name__ == "__main__":

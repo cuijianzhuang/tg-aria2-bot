@@ -168,7 +168,7 @@ sudo tg-aria2 update -y    # 更新并检查服务
 sudo tg-aria2 backup       # 备份配置和数据库
 ```
 
-固定镜像部署请使用[对应的升级与回退流程](docs/IMAGE_DEPLOYMENT.md#升级与回退)。启用扫码后，除数据库外还要备份 `data/video-private/key`；缺少原密钥将无法解密旧凭据。
+固定镜像部署请使用[对应的升级与回退流程](docs/IMAGE_DEPLOYMENT.md#升级与回退)。除数据库外还要备份 `data/video-private/key`：视频 Cookie 和额外节点的 RPC 密钥都用这把钥匙加密存在库里，缺少原密钥将无法解密（只能重新扫码、重新添加节点）。备份文件本身含 `.env`（内有 Bot Token 与后台密码），请按密钥材料保管、不要外传。
 
 ## 常见问题
 

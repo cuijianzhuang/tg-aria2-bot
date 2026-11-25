@@ -168,8 +168,11 @@ async def login(body: LoginRequest, request: Request, response: Response):
         raise HTTPException(401, "密码错误")
     _clear_login_failures(ip)
     token = create_session_token(state["session_secret"])
+    # SameSite=Strict: 后台是同源 SPA（登录与所有 API 调用都同源发起），没有
+    # 跨站跳转回来带会话的流程，Strict 不影响正常使用，还能挡住跨站请求
+    # 携带会话 cookie（CSRF 纵深防御）。视频登录 cookie 是另一套，不在此列。
     response.set_cookie(
-        SESSION_COOKIE, token, httponly=True, samesite="lax", secure=_cookie_secure(request), max_age=7 * 24 * 3600
+        SESSION_COOKIE, token, httponly=True, samesite="strict", secure=_cookie_secure(request), max_age=7 * 24 * 3600
     )
     return {"ok": True}
 
@@ -195,7 +198,7 @@ async def change_password(body: ChangePasswordRequest, request: Request, respons
     state["session_secret"] = rotate_secret(_secret_path())
     token = create_session_token(state["session_secret"])
     response.set_cookie(
-        SESSION_COOKIE, token, httponly=True, samesite="lax", secure=_cookie_secure(request), max_age=7 * 24 * 3600
+        SESSION_COOKIE, token, httponly=True, samesite="strict", secure=_cookie_secure(request), max_age=7 * 24 * 3600
     )
     return {"ok": True}
 
@@ -318,8 +321,10 @@ async def remove_user(user_id: int):
     return {"ok": True}
 
 
-@app.get("/api/settings/rclone", dependencies=[Depends(require_login)])
-async def get_rclone_settings():
+def _read_rclone_settings() -> dict:
+    # read_kv/list_rclone_remotes 是同步文件 IO，在 async 端点里经 to_thread
+    # 调用（见下面两个端点），不要直接在事件循环上读盘；conf 路径统一用
+    # bot.core.conf_editor 的实现（本文件不再自备一份）
     on_complete = read_kv(aria2_conf_path(), "on-download-complete") or ""
     return {
         "enabled": on_complete.strip().endswith("upload.sh"),
@@ -329,17 +334,28 @@ async def get_rclone_settings():
     }
 
 
+@app.get("/api/settings/rclone", dependencies=[Depends(require_login)])
+async def get_rclone_settings():
+    return await asyncio.to_thread(_read_rclone_settings)
+
+
+def _write_rclone_settings(drive_name: str | None, drive_dir: str | None, hook_target: str):
+    write_kv(script_conf_path(), "drive-name", drive_name)
+    write_kv(script_conf_path(), "drive-dir", drive_dir)
+    write_kv(aria2_conf_path(), "on-download-complete", hook_target)
+
+
 @app.post("/api/settings/rclone", dependencies=[Depends(require_login)])
 async def set_rclone_settings(body: RcloneSettingsRequest):
     for value in (body.drive_name, body.drive_dir):
         if not is_safe_value(value):
             raise HTTPException(400, "只允许字母、数字、空格、. _ - / 这些字符")
 
-    write_kv(script_conf_path(), "drive-name", body.drive_name or None)
-    write_kv(script_conf_path(), "drive-dir", body.drive_dir or None)
-
     hook_target = settings.aria2_upload_hook if body.enabled else settings.aria2_clean_hook
-    write_kv(aria2_conf_path(), "on-download-complete", hook_target)
+    await asyncio.to_thread(
+        _write_rclone_settings, body.drive_name or None, body.drive_dir or None, hook_target,
+    )
+
 
     return {"ok": True, "restart_required": True}
 
@@ -354,15 +370,22 @@ async def get_gofile_settings():
     }
 
 
+def _write_gofile_settings(enabled: bool, token: str, compress: bool, delete_local: bool):
+    # 同步文件 IO，经 to_thread 调用（见 set_gofile_settings）
+    write_kv(ENV_PATH, "GOFILE_ENABLED", "true" if enabled else "false")
+    write_kv(ENV_PATH, "GOFILE_TOKEN", token)
+    write_kv(ENV_PATH, "GOFILE_COMPRESS", "true" if compress else "false")
+    write_kv(ENV_PATH, "GOFILE_DELETE_LOCAL", "true" if delete_local else "false")
+
+
 @app.post("/api/settings/gofile", dependencies=[Depends(require_login)])
 async def set_gofile_settings(body: GofileSettingsRequest):
     if "\n" in body.token or "\r" in body.token:
         raise HTTPException(400, "token 不能包含换行符")
 
-    write_kv(ENV_PATH, "GOFILE_ENABLED", "true" if body.enabled else "false")
-    write_kv(ENV_PATH, "GOFILE_TOKEN", body.token)
-    write_kv(ENV_PATH, "GOFILE_COMPRESS", "true" if body.compress else "false")
-    write_kv(ENV_PATH, "GOFILE_DELETE_LOCAL", "true" if body.delete_local else "false")
+    await asyncio.to_thread(
+        _write_gofile_settings, body.enabled, body.token, body.compress, body.delete_local,
+    )
 
     # unlike ADMIN_PASSWORD, this doesn't take effect in this process — it's read
     # by the separate bot process (task_manager.py), which only reloads .env at

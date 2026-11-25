@@ -10,13 +10,11 @@
 - XML 来自外部，拒绝带 DOCTYPE/ENTITY 的内容（防实体膨胀），响应体限 2MB。
 """
 import asyncio
-import ipaddress
 import logging
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from html import escape
-from urllib.parse import urlparse
 
 import aiohttp
 
@@ -26,13 +24,35 @@ from bot.core.cards import render_task_card
 from bot.core.download_service import add_source
 from bot.core.keyboards import task_keyboard
 from bot.core.sources import parse_link
+from bot.core.url_safety import UnsafeUrlError, check_url
 
 log = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 2 * 1024 * 1024
 FETCH_TIMEOUT_SECONDS = 20
 MAX_NEW_PER_POLL = 20     # 一个源一轮最多新增这么多任务，其余留到下一轮
+FETCH_CONCURRENCY = 4     # rss_loop 预抓取阶段的并发上限（处理阶段仍逐源串行）
 HTTP_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
+
+# 抓取共用一个进程级 session（同 gofile/aria2_rpc 的范式）：以前每个源每次
+# fetch 都新建 ClientSession，一轮几十个源就是几十次 TCP/TLS 握手。
+_session: aiohttp.ClientSession | None = None
+
+
+def _get_session() -> aiohttp.ClientSession:
+    global _session
+    if _session is None or _session.closed:
+        _session = aiohttp.ClientSession()
+    return _session
+
+
+async def close_session():
+    """进程退出时调用，避免 "Unclosed client session" 警告（main.py 已对
+    gofile 这么做，rss 同样处理）。"""
+    global _session
+    if _session is not None and not _session.closed:
+        await _session.close()
+    _session = None
 
 
 class FeedError(Exception):
@@ -48,19 +68,16 @@ class Item:
 
 def validate_url(url: str) -> str:
     """订阅地址必须是 http(s)，且不能直接指向本机/内网 IP 或 localhost。
-    （主机名解析到内网的情况这里不拦；要拦需要在连接时再检查。）"""
+    校验逻辑已抽到 bot/core/url_safety.py 与主下载路径共用；订阅源本身
+    不受 ALLOW_PRIVATE_DOWNLOAD_URLS 开关影响（开关只放行下载目标）。
+    （主机名解析到内网的情况不拦；要拦需要在连接时再检查。）"""
     url = url.strip()
     if not HTTP_RE.match(url) or len(url) > 1000:
         raise FeedError("订阅地址必须是 http(s):// 开头的链接。")
-    host = (urlparse(url).hostname or "").lower()
-    if host == "localhost" or host.endswith((".local", ".internal")):
-        raise FeedError("不能订阅本机或内网地址。")
     try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return url
-    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified:
-        raise FeedError("不能订阅本机或内网地址。")
+        check_url(url, schemes=("http", "https"), blocked_message="不能订阅本机或内网地址。")
+    except UnsafeUrlError:
+        raise FeedError("不能订阅本机或内网地址。") from None
     return url
 
 
@@ -138,9 +155,10 @@ def matches(title: str, keyword: str, exclude: str) -> bool:
 
 async def fetch(url: str) -> bytes:
     timeout = aiohttp.ClientTimeout(total=FETCH_TIMEOUT_SECONDS)
+    session = _get_session()
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session, \
-                session.get(url, proxy=settings.proxy_url or None, headers={"User-Agent": "tg-aria2-bot"}) as resp:
+        async with session.get(url, proxy=settings.proxy_url or None,
+                               headers={"User-Agent": "tg-aria2-bot"}, timeout=timeout) as resp:
             if resp.status != 200:
                 raise FeedError(f"订阅源返回 HTTP {resp.status}")
             body = await resp.content.read(MAX_BODY_BYTES + 1)
@@ -155,10 +173,12 @@ def _has_space(path: str) -> bool:
     return storage.download_space_error(path, 0) is None
 
 
-async def poll_feed(feed, *, bot, repo, nodes, task_manager=None) -> int:
-    """轮询一个订阅，返回新增任务数。出错只记到订阅上（last_error），不抛。"""
+async def poll_feed(feed, *, bot, repo, nodes, task_manager=None, prefetched: bytes | None = None) -> int:
+    """轮询一个订阅，返回新增任务数。出错只记到订阅上（last_error），不抛。
+    prefetched 是 rss_loop 并发预抓好的响应体（跳过 fetch 阶段）；手动刷新
+    （handlers/rss.py）不传，行为与原来一致。"""
     try:
-        title, items = parse_feed(await fetch(feed["url"]))
+        title, items = parse_feed(prefetched if prefetched is not None else await fetch(feed["url"]))
     except FeedError as e:
         await repo.update_feed_state(feed["id"], error=str(e))
         return 0
@@ -200,6 +220,11 @@ async def poll_feed(feed, *, bot, repo, nodes, task_manager=None) -> int:
             break        # 额度/空间不够：这一条和后面的都留到下一轮
         try:
             gid = await add_source(nodes, node.name, kind, payload, None if kind == "magnet" else it.title)
+        except UnsafeUrlError:
+            # 地址被 SSRF 校验拦下：重试也不会变，直接记账跳过，别每轮刷日志
+            log.info("rss: skipped private/blocked source %r from feed %s", it.title, feed["id"])
+            done.append(it.guid)
+            continue
         except Exception:
             log.warning("rss: could not add %r from feed %s", it.title, feed["id"], exc_info=True)
             continue     # 添加失败不记账，下一轮重试
@@ -228,13 +253,35 @@ async def poll_feed(feed, *, bot, repo, nodes, task_manager=None) -> int:
     return added
 
 
+async def _prefetch_all(feeds) -> list[tuple[object, bytes | FeedError]]:
+    """并发预抓所有源的响应体（Semaphore 限流）。只并发 fetch：poll_feed 的
+    处理阶段有顺序敏感点（额度 admission 按已加任务数实时判断、同一轮内
+    MAX_NEW_PER_POLL 与去重都依赖逐条落库），保持逐源串行处理，语义不变。
+    抓取失败不抛，FeedError 随结果带回，交给处理阶段按原路径记 last_error。"""
+    sem = asyncio.Semaphore(FETCH_CONCURRENCY)
+
+    async def _one(feed):
+        async with sem:
+            try:
+                return feed, await fetch(feed["url"])
+            except FeedError as e:
+                return feed, e
+
+    return list(await asyncio.gather(*(_one(f) for f in feeds)))
+
+
 async def rss_loop(bot, repo, nodes, task_manager=None, *, first_delay: float = 60.0):
     await asyncio.sleep(first_delay)
     while True:
         try:
-            for feed in await repo.list_feeds(enabled_only=True):
+            feeds = await repo.list_feeds(enabled_only=True)
+            for feed, body in await _prefetch_all(feeds):
                 try:
-                    await poll_feed(feed, bot=bot, repo=repo, nodes=nodes, task_manager=task_manager)
+                    if isinstance(body, FeedError):
+                        await repo.update_feed_state(feed["id"], error=str(body))
+                        continue
+                    await poll_feed(feed, bot=bot, repo=repo, nodes=nodes,
+                                    task_manager=task_manager, prefetched=body)
                 except asyncio.CancelledError:
                     raise
                 except Exception:

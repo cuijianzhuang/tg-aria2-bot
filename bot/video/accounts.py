@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from bot.config import settings
+from bot.core.vault import FernetVault
 
 PLATFORMS = {
     "bilibili": ("bilibili.com", "b23.tv"),
@@ -85,33 +86,16 @@ def validate_url(url):
     return url
 
 
-class CredentialVault:
-    def __init__(self, data_dir):
-        self.root = Path(data_dir) / "video-private"
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-
-    def _cipher(self):
-        from cryptography.fernet import Fernet
-
-        path = self.root / "key"
-        if not path.exists():
-            fd, temporary = tempfile.mkstemp(dir=self.root)
-            try:
-                with os.fdopen(fd, "wb") as stream:
-                    stream.write(Fernet.generate_key())
-                try:
-                    os.link(temporary, path)
-                except FileExistsError:
-                    pass
-            finally:
-                Path(temporary).unlink(missing_ok=True)
-        return Fernet(path.read_bytes())
+class CredentialVault(FernetVault):
+    """视频 Cookie 专用封装：加解密原语已下沉到 bot/core/vault.py 的
+    FernetVault（与节点 RPC 密钥共用同一把 key），这里只保留 Cookie 的
+    JSON 序列化与 Netscape 快照行为，接口不变。"""
 
     def encrypt(self, cookies):
-        return self._cipher().encrypt(json.dumps(cookies).encode())
+        return self.encrypt_bytes(json.dumps(cookies).encode())
 
     def decrypt(self, blob):
-        return json.loads(self._cipher().decrypt(blob))
+        return json.loads(self.decrypt_bytes(blob))
 
     @contextlib.contextmanager
     def snapshot(self, cookies):
