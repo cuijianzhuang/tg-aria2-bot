@@ -1,8 +1,12 @@
+import asyncio
+import logging
 from html import escape
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.core.keyboards import STATUS_EMOJI, STATUS_LABEL, list_tab_row, task_open_button
+
+log = logging.getLogger(__name__)
 
 LIST_LIMIT = 8
 LIST_STATUS_MAP = {
@@ -30,12 +34,21 @@ async def _progress_for(nodes, rows) -> dict:
     """页面上 ACTIVE 行的实时进度。多节点时按行归属分别去各节点取，某个节点
     连不上就只缺它那部分进度（显示为无进度），不拖垮整页渲染。"""
     node_names = {r["node"] for r in rows if r["status"] == "ACTIVE" and r["gid"]}
+    if not node_names:
+        return {}
+    # 多节点并发取进度：串行时整页延迟是各节点 RPC 之和，一个慢节点拖住全页；
+    # gather 后只等最慢的那个。复用 TaskManager 轮询快照耦合太深（list_view
+    # 现在只依赖 nodes 接口，web 后台也在共用同一套渲染），本批不做。
+    results = await asyncio.gather(
+        *(nodes.get(name).get_progress_map() for name in node_names),
+        return_exceptions=True,
+    )
     progress: dict = {}
-    for name in node_names:
-        try:
-            progress.update(await nodes.get(name).get_progress_map())
-        except Exception:
-            pass
+    for name, result in zip(node_names, results, strict=True):
+        if isinstance(result, Exception):
+            log.debug("progress fetch failed for node %s", name, exc_info=result)
+            continue
+        progress.update(result)
     return progress
 
 

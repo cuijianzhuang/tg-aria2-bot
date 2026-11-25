@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from html import escape
 
 from bot.config import settings
 from bot.core.keyboards import STATUS_LABEL, text_progress_bar
 from bot.core.storage import disk_usage_summary
+
+log = logging.getLogger(__name__)
 
 DIVIDER = "──────────────"
 
@@ -27,6 +30,7 @@ def _safe_call(obj, name: str, default: str = "-") -> str:
         try:
             return attr()
         except Exception:
+            log.debug("card field %s failed to render, using default", name, exc_info=True)
             return default
     return default
 
@@ -88,12 +92,12 @@ def render_home(counts: dict[str, int] | None = None, stats=None) -> str:
         try:
             lines.append(f"⚡ ↓ {stats.download_speed_string()} · ↑ {stats.upload_speed_string()}")
         except Exception:
-            pass
+            log.debug("home card: aria2 stats line failed to render", exc_info=True)
     try:
         disk = disk_usage_summary(settings.download_dir)
         lines.append(f"💾 剩余 {disk['free']}（已用 {disk['percent_used']}%）")
     except OSError:
-        pass
+        log.debug("home card: disk usage unavailable for %s", settings.download_dir, exc_info=True)
     lines += [
         "",
         "🔗 HTTP(S) · FTP · SFTP（任意文件类型）",
@@ -379,7 +383,7 @@ def render_server_status(info: dict, stats=None) -> str:
                 f" · 活动 {stats.num_active} · 等待 {stats.num_waiting}"
             )
         except Exception:
-            pass
+            log.debug("server status card: aria2 stats line failed to render", exc_info=True)
 
     lines += ["", f"<i>更新于 {datetime.now().strftime('%H:%M:%S')}</i>"]
     return "\n".join(lines)

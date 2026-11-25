@@ -327,8 +327,9 @@ def _rclone_conf_path() -> str:
     return os.path.join(settings.aria2_config_dir, "rclone.conf")
 
 
-@app.get("/api/settings/rclone", dependencies=[Depends(require_login)])
-async def get_rclone_settings():
+def _read_rclone_settings() -> dict:
+    # read_kv/list_rclone_remotes 是同步文件 IO，在 async 端点里经 to_thread
+    # 调用（见下面两个端点），不要直接在事件循环上读盘
     on_complete = read_kv(_aria2_conf_path(), "on-download-complete") or ""
     return {
         "enabled": on_complete.strip().endswith("upload.sh"),
@@ -338,17 +339,27 @@ async def get_rclone_settings():
     }
 
 
+@app.get("/api/settings/rclone", dependencies=[Depends(require_login)])
+async def get_rclone_settings():
+    return await asyncio.to_thread(_read_rclone_settings)
+
+
+def _write_rclone_settings(drive_name: str | None, drive_dir: str | None, hook_target: str):
+    write_kv(_script_conf_path(), "drive-name", drive_name)
+    write_kv(_script_conf_path(), "drive-dir", drive_dir)
+    write_kv(_aria2_conf_path(), "on-download-complete", hook_target)
+
+
 @app.post("/api/settings/rclone", dependencies=[Depends(require_login)])
 async def set_rclone_settings(body: RcloneSettingsRequest):
     for value in (body.drive_name, body.drive_dir):
         if not is_safe_value(value):
             raise HTTPException(400, "只允许字母、数字、空格、. _ - / 这些字符")
 
-    write_kv(_script_conf_path(), "drive-name", body.drive_name or None)
-    write_kv(_script_conf_path(), "drive-dir", body.drive_dir or None)
-
     hook_target = settings.aria2_upload_hook if body.enabled else settings.aria2_clean_hook
-    write_kv(_aria2_conf_path(), "on-download-complete", hook_target)
+    await asyncio.to_thread(
+        _write_rclone_settings, body.drive_name or None, body.drive_dir or None, hook_target,
+    )
 
     return {"ok": True, "restart_required": True}
 
@@ -363,15 +374,22 @@ async def get_gofile_settings():
     }
 
 
+def _write_gofile_settings(enabled: bool, token: str, compress: bool, delete_local: bool):
+    # 同步文件 IO，经 to_thread 调用（见 set_gofile_settings）
+    write_kv(ENV_PATH, "GOFILE_ENABLED", "true" if enabled else "false")
+    write_kv(ENV_PATH, "GOFILE_TOKEN", token)
+    write_kv(ENV_PATH, "GOFILE_COMPRESS", "true" if compress else "false")
+    write_kv(ENV_PATH, "GOFILE_DELETE_LOCAL", "true" if delete_local else "false")
+
+
 @app.post("/api/settings/gofile", dependencies=[Depends(require_login)])
 async def set_gofile_settings(body: GofileSettingsRequest):
     if "\n" in body.token or "\r" in body.token:
         raise HTTPException(400, "token 不能包含换行符")
 
-    write_kv(ENV_PATH, "GOFILE_ENABLED", "true" if body.enabled else "false")
-    write_kv(ENV_PATH, "GOFILE_TOKEN", body.token)
-    write_kv(ENV_PATH, "GOFILE_COMPRESS", "true" if body.compress else "false")
-    write_kv(ENV_PATH, "GOFILE_DELETE_LOCAL", "true" if body.delete_local else "false")
+    await asyncio.to_thread(
+        _write_gofile_settings, body.enabled, body.token, body.compress, body.delete_local,
+    )
 
     # unlike ADMIN_PASSWORD, this doesn't take effect in this process — it's read
     # by the separate bot process (task_manager.py), which only reloads .env at
