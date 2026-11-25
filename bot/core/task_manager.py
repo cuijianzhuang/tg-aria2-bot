@@ -24,6 +24,12 @@ log = logging.getLogger(__name__)
 # 有用户正在看的卡片时降到 2 秒，让进度刷新跟得上
 POLL_INTERVAL_SECONDS = 5
 POLL_FAST_INTERVAL_SECONDS = 2
+# 终态对账节拍：常规轮询只拉 active+waiting（见 aria2_client.get_active_downloads），
+# tellStopped 只在这个间隔到点时拉一次近 100 条，兜底捡 WebSocket 漏掉的
+# 完成/出错事件；"gid 在 aria2 里消失了"（_mark_lost）的判定也只在对账轮做，
+# 否则非对账轮看不见已停止的 gid，会把刚完成的任务误判成丢失。
+RECONCILE_INTERVAL_SECONDS = 60
+STOPPED_RECONCILE_LIMIT = 100
 # 自动清理检查间隔：不需要很频繁，一天查一次即可（用户改天数后手动触发的
 # run_cleanup_once 会立即生效，不必等这个周期）
 CLEANUP_CHECK_INTERVAL_SECONDS = 24 * 3600
@@ -117,6 +123,8 @@ class TaskManager:
         # 处理这个 gid 的终止转换"的标记，check-and-add 之间没有 await，
         # asyncio 单线程协作式调度保证这两步不会被其它协程插入。
         self._terminal_in_flight: set[str] = set()
+        # node name -> 上次终态对账的 monotonic 时间戳（见 RECONCILE_INTERVAL_SECONDS）
+        self._last_reconcile: dict[str, float] = {}
         self._running = False
 
     async def start(self):
@@ -253,12 +261,21 @@ class TaskManager:
     async def _poll_node(self, node):
         # 一个节点断线只跳过它自己，不影响其它节点，更不能把它的任务标
         # FAILED（节点不可达 ≠ 任务丢失）
+        client = self._nodes.get(node.name)
+        now = time.monotonic()
+        # 首轮（没有记录）就对账，保证启动后一分钟内就能捡到停机期间漏掉的终态
+        reconcile = now - self._last_reconcile.get(node.name, float("-inf")) >= RECONCILE_INTERVAL_SECONDS
         try:
-            downloads = {d.gid: d for d in await self._nodes.get(node.name).get_all_downloads()}
+            found = await client.get_active_downloads()
+            if reconcile:
+                found += await client.get_stopped_downloads(limit=STOPPED_RECONCILE_LIMIT)
         except Exception:
             await self._handle_node_health(node, False)
             return
         await self._handle_node_health(node, True)
+        if reconcile:
+            self._last_reconcile[node.name] = now
+        downloads = {d.gid: d for d in found}
 
         rows = await self._repo.get_unfinished(node=node.name)
         for row in rows:
@@ -267,7 +284,10 @@ class TaskManager:
                 continue
             download = downloads.get(gid)
             if download is None:
-                await self._mark_lost(row, gid, is_local=node.is_local)
+                # 非对账轮没拉 tellStopped，"不在列表里"只说明它不在进行中，
+                # 可能是已完成待对账——留给下一轮对账判定，不能在这里判丢失
+                if reconcile:
+                    await self._mark_lost(row, gid, is_local=node.is_local)
                 continue
             await self._handle_download_state(row, download, node_is_local=node.is_local)
 
@@ -711,7 +731,8 @@ class TaskManager:
                 self._chat_backoff[chat_id] = now + e.retry_after
                 log.info("telegram 429 for chat %s, backing off %ss", chat_id, e.retry_after)
             except Exception:
-                pass  # message unchanged or transient error; safe to skip this tick
+                # message unchanged or transient error; safe to skip this tick
+                log.debug("progress edit skipped for gid %s", gid, exc_info=True)
 
     # ---- 谁在看：快速刷新 / 暂停刷新 ----
 
@@ -769,13 +790,21 @@ class TaskManager:
     async def _update_keyboard(self, row, gid: str, status: str):
         if not row["reply_message_id"] or self._is_held(gid):
             return
+        if time.monotonic() < self._chat_backoff.get(row["chat_id"], 0.0):
+            # 跟进度编辑共用 429 退避：状态切换瞬间连着编辑最容易撞限流，
+            # 键盘刷新是纯装饰性的，退避期内直接跳过这一轮
+            log.debug("keyboard update skipped for gid %s: chat %s in 429 backoff", gid, row["chat_id"])
+            return
         try:
             await self._bot.edit_message_reply_markup(
                 chat_id=row["chat_id"], message_id=row["reply_message_id"],
                 reply_markup=task_keyboard(gid, status),
             )
+        except TelegramRetryAfter as e:
+            self._chat_backoff[row["chat_id"]] = time.monotonic() + e.retry_after
+            log.info("telegram 429 for chat %s, backing off %ss", row["chat_id"], e.retry_after)
         except Exception:
-            pass
+            log.debug("keyboard update failed for gid %s", gid, exc_info=True)
 
     async def _notify(
         self,
@@ -793,7 +822,7 @@ class TaskManager:
             from bot.video.ui import video_task_keyboard
             job = await self._repo.video_job(row["id"])
             markup = video_task_keyboard(gid, status, job["back"] if job else None, link=link)
-        if row["reply_message_id"]:
+        if row["reply_message_id"] and time.monotonic() >= self._chat_backoff.get(row["chat_id"], 0.0):
             try:
                 await self._bot.edit_message_text(
                     chat_id=row["chat_id"], message_id=row["reply_message_id"], text=text,
@@ -801,8 +830,13 @@ class TaskManager:
                     parse_mode=parse_mode,
                 )
                 return
+            except TelegramRetryAfter as e:
+                self._chat_backoff[row["chat_id"]] = time.monotonic() + e.retry_after
+                log.info("telegram 429 for chat %s, backing off %ss", row["chat_id"], e.retry_after)
             except Exception:
-                pass
+                log.debug("card edit failed for gid %s, falling back to a new message", gid, exc_info=True)
+        # 退避期内不硬撞编辑（必然再吃一个 429）：跟编辑失败一样落到下面的
+        # 新消息兜底，完成通知不丢，旧卡片保持原样
         # editing the existing card is always fine (edits don't push-notify);
         # only a brand-new message actually notifies, so that's what the
         # 完成通知 toggle gates
