@@ -1,9 +1,10 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.core.cards import render_stats
 from bot.core.keyboards import PERIOD_PRESETS, stats_period_keyboard
+from bot.core.quota import fmt_bytes
 
 DEFAULT_PERIOD = "7"  # /stats 不带参数时默认显示最近 7 天
 # PERIOD_PRESETS 里每项是 (label, value)，这里要的是 value -> label 的反向映射
@@ -28,10 +29,6 @@ BAR_WIDTH = 12
 async def render_daily_view(repo, *, user_id: int | None = None) -> tuple[str, InlineKeyboardMarkup]:
     """最近 14 天每天的实际下载量（来自额度统计的 usage_daily），管理员额外看到
     谁下得最多。user_id=None 是管理员视角（所有人合计）。"""
-    from datetime import date
-
-    from bot.core.quota import fmt_bytes
-
     today = date.today()
     days = [(today - timedelta(days=i)).isoformat() for i in range(DAILY_DAYS - 1, -1, -1)]
     data = dict(await repo.get_usage_since(days[0], user_id=user_id))

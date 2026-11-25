@@ -34,7 +34,7 @@ from bot.core.keyboards import (
     maxsize_chooser_keyboard,
     settings_keyboard,
 )
-from bot.handlers.callbacks import _edit
+from bot.handlers.menu import edit_or_answer
 from bot.middlewares.auth import AdminMiddleware
 
 log = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ async def _settings_data(aria2) -> tuple[str | None, str | None]:
 
 async def _show_settings(query: CallbackQuery, aria2):
     limit_raw, concurrent_raw = await _settings_data(aria2)
-    await _edit(query, render_settings(limit_raw, concurrent_raw), reply_markup=settings_keyboard(), parse_mode="HTML")
+    await edit_or_answer(query, render_settings(limit_raw, concurrent_raw), reply_markup=settings_keyboard(), parse_mode="HTML")
 
 
 def _persist_env(key: str, value: str):
@@ -77,7 +77,7 @@ async def settings_limit(query: CallbackQuery, aria2):
         limit_raw = await aria2.get_global_limit()
     except Exception:
         limit_raw = None
-    await _edit(
+    await edit_or_answer(
         query, render_limit_chooser(limit_raw), reply_markup=limit_chooser_keyboard(limit_raw), parse_mode="HTML",
     )
 
@@ -101,7 +101,7 @@ async def apply_limit(query: CallbackQuery, aria2):
 @router.callback_query(F.data == "settings:concurrent")
 async def settings_concurrent(query: CallbackQuery, aria2):
     _, concurrent_raw = await _settings_data(aria2)
-    await _edit(
+    await edit_or_answer(
         query, render_concurrent_chooser(concurrent_raw),
         reply_markup=concurrent_chooser_keyboard(concurrent_raw), parse_mode="HTML",
     )
@@ -136,7 +136,7 @@ async def toggle_notify(query: CallbackQuery, aria2):
 @router.callback_query(F.data == "settings:maxsize")
 async def settings_maxsize(query: CallbackQuery):
     current_mb = str(settings.max_file_size // (1024 * 1024))
-    await _edit(
+    await edit_or_answer(
         query, render_maxsize_chooser(settings.max_file_size),
         reply_markup=maxsize_chooser_keyboard(current_mb), parse_mode="HTML",
     )
@@ -158,7 +158,7 @@ async def apply_maxsize(query: CallbackQuery, aria2):
 
 @router.callback_query(F.data == "settings:cleanup")
 async def settings_cleanup(query: CallbackQuery):
-    await _edit(
+    await edit_or_answer(
         query, render_cleanup_chooser(),
         reply_markup=cleanup_chooser_keyboard(settings.auto_cleanup_days), parse_mode="HTML",
     )
@@ -183,7 +183,7 @@ async def apply_cleanup(query: CallbackQuery, aria2, task_manager):
 @router.callback_query(F.data == "settings:dir")
 async def settings_dir(query: CallbackQuery):
     options = settings.download_dir_options
-    await _edit(
+    await edit_or_answer(
         query, render_dir_chooser(options),
         reply_markup=dir_chooser_keyboard(options), parse_mode="HTML",
     )

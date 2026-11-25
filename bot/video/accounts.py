@@ -10,6 +10,8 @@ import warnings
 from pathlib import Path
 from urllib.parse import urlparse
 
+from bot.config import settings
+
 PLATFORMS = {
     "bilibili": ("bilibili.com", "b23.tv"),
     "douyin": ("douyin.com", "iesdouyin.com"),
@@ -198,8 +200,6 @@ async def account_cookies(repo, vault, user_id, url, mode):
         raise ValueError("无效的账号选择")
     row = await repo.video_account(platform, user_id if mode == "personal" else 0)
     if mode == "shared":
-        from bot.config import settings
-
         enabled = bool(row["enabled"]) if row else await repo.video_preference(0, platform) == "shared"
         if not enabled:
             raise ValueError("该平台的共享账号尚未开放")

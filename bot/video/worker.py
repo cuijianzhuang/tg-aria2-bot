@@ -10,14 +10,34 @@ from pathlib import Path
 from bot.config import settings
 from bot.core import quota, storage
 from bot.core.aria2_client import Download, File
+from bot.core.compress import remove_path
 from bot.core.expiry import safe_target
 from bot.video.accounts import CredentialVault, account_cookies
 from bot.video.backends import download_args, progress_event
 from bot.video.errors import download_error_hint, execution_error
 from bot.video.process import capture, signal_group, spawn, terminate
 from bot.video.services import get_resolver
+from bot.video.ui import video_card, video_task_keyboard
 
 log = logging.getLogger(__name__)
+
+
+class _CliRun:
+    """_execute 的 CLI 下载路径在 解析/下载/收尾 三段之间传递的可变状态：
+    stage 供统一异常处理汇报失败阶段，process 供 finally/cancel 路径回收，
+    其余是三段之间约定的产物（info/limits/output/accounted/error_hint）。"""
+
+    def __init__(self, row):
+        self.row = row
+        self.gid = row["gid"]
+        self.directory = Path(settings.download_dir) / "video" / self.gid
+        self.stage = "准备"
+        self.process = None
+        self.info = None
+        self.limits = None
+        self.output = None
+        self.accounted = row["completed"]
+        self.error_hint = None
 
 
 class VideoWorker:
@@ -88,8 +108,6 @@ class VideoWorker:
             if action == "purge":
                 target = safe_target(row["work_dir"], settings.download_dir)
                 if target:
-                    from bot.core.compress import remove_path
-
                     await asyncio.to_thread(remove_path, target)
         elif action == "retry":
             if row["status"] not in ("PENDING", "ACTIVE", "PAUSED"):
@@ -145,8 +163,6 @@ class VideoWorker:
         if not force and now - self._last_report.get(row["gid"], 0) < 5:
             return
         self._last_report[row["gid"]] = now
-        from bot.video.ui import video_card, video_task_keyboard
-
         job = await self.repo.video_job(row["id"])
         if not row["reply_message_id"]:
             return
@@ -162,219 +178,233 @@ class VideoWorker:
             pass
 
     async def _execute(self, row):
-        gid = row["gid"]
-        directory = Path(settings.download_dir) / "video" / gid
-        process = None
-        stage = "准备"
+        run = _CliRun(row)
+        gid = run.gid
         try:
             space_error = storage.download_space_error(settings.download_dir, row["file_size"] or 0)
             if space_error:
                 raise ValueError(space_error)
-            directory.mkdir(parents=True, exist_ok=True)
-            await self.repo.video_update(row["id"], work_dir=str(directory), phase="解析中")
+            run.directory.mkdir(parents=True, exist_ok=True)
+            await self.repo.video_update(row["id"], work_dir=str(run.directory), phase="解析中")
             await self.repo.update_status(gid, "ACTIVE")
-            stage = "解析"
+            run.stage = "解析"
             cookies = await account_cookies(self.repo, self.vault, row["user_id"], row["payload"], row["account_mode"])
             with self.vault.snapshot(cookies) as cookie_file:
-                info = await self.resolver.probe(
-                    row["payload"],
-                    parser=row["parser"],
-                    cookies=cookie_file,
-                    proxy=settings.proxy_url,
-                    quality=row["quality"],
-                    account_mode=row["account_mode"],
-                )
-                if row["quality"] not in info.qualities:
-                    raise ValueError("原画质已不可用，请重新发送链接选择画质")
-                limits = await quota.limits_for(self.repo, row["user_id"])
-                if limits.max_task_bytes and info.size and info.size > limits.max_task_bytes:
-                    raise ValueError("视频预计大小超过单任务上限")
-                refusal = await quota.admission_error(
-                    self.repo,
-                    row["user_id"],
-                    info.size,
-                    pending_usage=self.task_manager.pending_usage(row["user_id"]),
-                    check_active=False,
-                )
-                if refusal:
-                    await self.repo.update_status(gid, "PAUSED")
-                    await self.repo.video_update(row["id"], phase=refusal)
+                info = await self._resolve_cli(run, cookie_file)
+                if info is None:
                     return
-                latest = await self.repo.get_by_gid(gid)
-                if latest is None or latest["status"] in ("PAUSED", "CANCELLED"):
-                    return
-                await self.repo.update_file_name(gid, info.title)
-                await self.repo.video_update(row["id"], phase="等待视频源连接", total=info.size or 0)
                 if row["parser"] == "parsehub":
                     # In-process backend: no child process to spawn, signal
                     # or stall-watch; ParseHub downloads with its own
                     # progress callback (see _execute_parsehub).
-                    await self._execute_parsehub(row, directory, info, cookies)
+                    await self._execute_parsehub(row, run.directory, info, cookies)
                     return
-                stage = "下载"
-                process = await spawn(
-                    download_args(
-                        row["parser"], row["payload"], directory, row["quality"], cookie_file, settings.proxy_url
-                    )
-                )
-                self.running[gid] = process
-                output = None
-                streams = json.loads(row.get("progress_data") or "{}")
-                accounted = row["completed"]
-                buffer = ""
-                merging = False
-                last_progress = time.monotonic()
-                last_completed = accounted
-                error_hint = None
-                stream_totals = {}
-                while True:
-                    try:
-                        chunk = await asyncio.wait_for(process.stdout.read(8192), 1)
-                    except TimeoutError:
-                        chunk = None
-                    if chunk == b"":
-                        break
-                    if chunk:
-                        buffer += chunk.decode("utf-8", errors="replace").replace("\r", "\n")
-                        if len(buffer) > 262144:
-                            raise ValueError("下载器输出异常")
-                        lines = buffer.split("\n")
-                        buffer = lines.pop()
-                        for line in lines:
-                            error_hint = download_error_hint(line) or error_hint
-                            if "[Merger]" in line or "Merging" in line or "Merging video" in line:
-                                merging = True
-                                stage = "合并"
-                                await self.repo.video_update(row["id"], phase="合并中")
-                            if line.startswith("__VIDEO_OUTPUT__"):
-                                output = line.removeprefix("__VIDEO_OUTPUT__").strip()
-                            event = progress_event(line)
-                            if event:
-                                key = str(event.get("filename", "stream"))
-                                streams[key] = max(streams.get(key, 0), int(event["downloaded"]))
-                                total = event.get("total") or event.get("estimate")
-                                if isinstance(total, (int, float)) and 0 < total < 2**63:
-                                    stream_totals[key] = int(total)
-                                    await self.repo.video_update(
-                                        row["id"], total=max(info.size or 0, sum(stream_totals.values()))
-                                    )
-                                if event["downloaded"] > 0 and not merging:
-                                    await self.repo.video_update(row["id"], phase="下载中")
-                    if row["parser"] == "you-get" and not merging:
-                        measured = sum(
-                            p.stat().st_size for p in directory.rglob("*") if p.is_file() and not p.is_symlink()
-                        )
-                        streams["files"] = max(streams.get("files", 0), measured)
-                    completed = sum(streams.values())
-                    delta = max(0, completed - accounted)
-                    if delta:
-                        await self.repo.add_usage(row["user_id"], quota.today(), delta)
-                        accounted = completed
-                        await self.repo.video_update(row["id"], completed=completed, progress_data=json.dumps(streams))
-                    latest = await self.repo.get_by_gid(gid)
-                    if latest is None or latest["status"] == "CANCELLED":
-                        await terminate(process)
-                        return
-                    now = time.monotonic()
-                    if latest["status"] == "PAUSED" or completed > last_completed:
-                        last_progress = now
-                    last_completed = completed
-                    if (
-                        not merging
-                        and latest["status"] == "ACTIVE"
-                        and now - last_progress >= max(1, settings.video_stall_timeout)
-                    ):
-                        await terminate(process)
-                        raise ValueError(
-                            error_hint or "视频源连续无下载进度，已停止任务；请检查服务器网络后重试或切换解析器"
-                        )
-                    if limits.max_task_bytes and completed > limits.max_task_bytes:
-                        await terminate(process)
-                        from bot.core.compress import remove_path
-
-                        await asyncio.to_thread(remove_path, str(directory))
-                        raise ValueError("视频超过单任务上限，已清理部分文件")
-                    used = await self.task_manager.usage_today(row["user_id"])
-                    if limits.daily_bytes and used >= limits.daily_bytes and latest["status"] == "ACTIVE":
-                        signal_group(process, signal.SIGSTOP)
-                        await self.repo.update_status(gid, "PAUSED")
-                        await self.repo.video_update(row["id"], phase="每日额度已用完；次日可继续")
-                    await self.report(latest)
-                error_hint = download_error_hint(buffer) or error_hint
-                await process.wait()
-                latest = await self.repo.get_by_gid(gid)
-                if not latest or latest["status"] == "CANCELLED" or self.stopping:
-                    return
-                if process.returncode:
-                    raise ValueError(error_hint or "下载或合并失败；可重试或重新扫码登录")
-                stage = "输出检查"
-                if output:
-                    candidate = Path(output)
-                else:
-                    candidates = [
-                        p
-                        for p in directory.glob("media.*")
-                        if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".flv", ".mov", ".m4a", ".mp3", ".ts")
-                    ]
-                    candidate = max(candidates, key=lambda p: p.stat().st_size) if candidates else None
-                if (
-                    candidate is None
-                    or not candidate.is_file()
-                    or not candidate.stat().st_size
-                    or not safe_target(str(candidate), str(directory))
-                ):
-                    raise ValueError("没有找到合并完成的视频文件")
-                if candidate.is_symlink():
-                    raise ValueError("视频输出不能是符号链接")
-                if limits.max_task_bytes and candidate.stat().st_size > limits.max_task_bytes:
-                    from bot.core.compress import remove_path
-
-                    await asyncio.to_thread(remove_path, str(directory))
-                    raise ValueError("合并后的视频超过单任务上限，已清理文件")
-                stage = "校验"
-                await self.repo.video_update(row["id"], phase="校验中")
-                await self.verify_file(candidate)
-                stage = "完成处理"
-                size = candidate.stat().st_size
-                await self.repo.video_complete_file(row["id"], str(candidate), size)
-                download = Download(
-                    gid,
-                    "complete",
-                    candidate.stat().st_size,
-                    accounted,
-                    0,
-                    0,
-                    0,
-                    None,
-                    directory,
-                    [File(1, candidate, candidate.stat().st_size, candidate.stat().st_size, True)],
-                )
-                await self.task_manager.complete_local_video(row, download)
+                if await self._download_cli(run, cookie_file):
+                    await self._finish_cli(run)
         except asyncio.CancelledError:
-            if process:
-                await terminate(process)
+            if run.process:
+                await terminate(run.process)
             if self.stopping:
                 latest = await self.repo.get_by_gid(gid)
                 if latest and latest["status"] in ("PENDING", "ACTIVE", "PAUSED"):
                     await self.repo.update_status(gid, "PAUSED")
             raise
         except Exception as exc:
-            log.warning("video task %s failed during %s (%s)", row["id"], stage, type(exc).__name__)
+            log.warning("video task %s failed during %s (%s)", row["id"], run.stage, type(exc).__name__)
             latest = await self.repo.get_by_gid(gid)
             if latest and latest["status"] == "COMPLETED":
                 # The file is committed; rendering or delivery cannot undo it.
                 await self.report(latest, force=True)
                 return
-            message = execution_error(exc, stage)
+            message = execution_error(exc, run.stage)
             await self.repo.update_status(gid, "FAILED", error=message)
-            await self.repo.video_update(row["id"], phase=stage + "失败")
+            await self.repo.video_update(row["id"], phase=run.stage + "失败")
             latest = await self.repo.get_by_gid(gid)
             if latest:
                 await self.report(latest, force=True)
         finally:
-            if process:
-                await terminate(process)
+            if run.process:
+                await terminate(run.process)
             self.running.pop(gid, None)
+
+    async def _resolve_cli(self, run: _CliRun, cookie_file):
+        """解析段：probe + 画质/大小/额度校验 + 任务行更新。
+        返回 info；任务已被暂停/取消/额度拒绝（状态已处理好）时返回 None。"""
+        row, gid = run.row, run.gid
+        info = await self.resolver.probe(
+            row["payload"],
+            parser=row["parser"],
+            cookies=cookie_file,
+            proxy=settings.proxy_url,
+            quality=row["quality"],
+            account_mode=row["account_mode"],
+        )
+        run.info = info
+        if row["quality"] not in info.qualities:
+            raise ValueError("原画质已不可用，请重新发送链接选择画质")
+        limits = await quota.limits_for(self.repo, row["user_id"])
+        run.limits = limits
+        if limits.max_task_bytes and info.size and info.size > limits.max_task_bytes:
+            raise ValueError("视频预计大小超过单任务上限")
+        refusal = await quota.admission_error(
+            self.repo,
+            row["user_id"],
+            info.size,
+            pending_usage=self.task_manager.pending_usage(row["user_id"]),
+            check_active=False,
+        )
+        if refusal:
+            await self.repo.update_status(gid, "PAUSED")
+            await self.repo.video_update(row["id"], phase=refusal)
+            return None
+        latest = await self.repo.get_by_gid(gid)
+        if latest is None or latest["status"] in ("PAUSED", "CANCELLED"):
+            return None
+        await self.repo.update_file_name(gid, info.title)
+        await self.repo.video_update(row["id"], phase="等待视频源连接", total=info.size or 0)
+        return info
+
+    async def _download_cli(self, run: _CliRun, cookie_file) -> bool:
+        """下载段：spawn 下载器并消费其 stdout（进度/合并/停滞看门狗/额度）。
+        正常读完输出返回 True；任务被取消（进程已 terminate）返回 False。
+        失败一律抛 ValueError，由 _execute 的统一异常处理按 run.stage 汇报。"""
+        row, gid, directory = run.row, run.gid, run.directory
+        info, limits = run.info, run.limits
+        run.stage = "下载"
+        process = await spawn(
+            download_args(row["parser"], row["payload"], directory, row["quality"], cookie_file, settings.proxy_url)
+        )
+        run.process = process
+        self.running[gid] = process
+        streams = json.loads(row.get("progress_data") or "{}")
+        buffer = ""
+        merging = False
+        last_progress = time.monotonic()
+        last_completed = run.accounted
+        stream_totals = {}
+        while True:
+            try:
+                chunk = await asyncio.wait_for(process.stdout.read(8192), 1)
+            except TimeoutError:
+                chunk = None
+            if chunk == b"":
+                break
+            if chunk:
+                buffer += chunk.decode("utf-8", errors="replace").replace("\r", "\n")
+                if len(buffer) > 262144:
+                    raise ValueError("下载器输出异常")
+                lines = buffer.split("\n")
+                buffer = lines.pop()
+                for line in lines:
+                    run.error_hint = download_error_hint(line) or run.error_hint
+                    if "[Merger]" in line or "Merging" in line or "Merging video" in line:
+                        merging = True
+                        run.stage = "合并"
+                        await self.repo.video_update(row["id"], phase="合并中")
+                    if line.startswith("__VIDEO_OUTPUT__"):
+                        run.output = line.removeprefix("__VIDEO_OUTPUT__").strip()
+                    event = progress_event(line)
+                    if event:
+                        key = str(event.get("filename", "stream"))
+                        streams[key] = max(streams.get(key, 0), int(event["downloaded"]))
+                        total = event.get("total") or event.get("estimate")
+                        if isinstance(total, (int, float)) and 0 < total < 2**63:
+                            stream_totals[key] = int(total)
+                            await self.repo.video_update(
+                                row["id"], total=max(info.size or 0, sum(stream_totals.values()))
+                            )
+                        if event["downloaded"] > 0 and not merging:
+                            await self.repo.video_update(row["id"], phase="下载中")
+            if row["parser"] == "you-get" and not merging:
+                measured = sum(p.stat().st_size for p in directory.rglob("*") if p.is_file() and not p.is_symlink())
+                streams["files"] = max(streams.get("files", 0), measured)
+            completed = sum(streams.values())
+            delta = max(0, completed - run.accounted)
+            if delta:
+                await self.repo.add_usage(row["user_id"], quota.today(), delta)
+                run.accounted = completed
+                await self.repo.video_update(row["id"], completed=completed, progress_data=json.dumps(streams))
+            latest = await self.repo.get_by_gid(gid)
+            if latest is None or latest["status"] == "CANCELLED":
+                await terminate(process)
+                return False
+            now = time.monotonic()
+            if latest["status"] == "PAUSED" or completed > last_completed:
+                last_progress = now
+            last_completed = completed
+            if (
+                not merging
+                and latest["status"] == "ACTIVE"
+                and now - last_progress >= max(1, settings.video_stall_timeout)
+            ):
+                await terminate(process)
+                raise ValueError(
+                    run.error_hint or "视频源连续无下载进度，已停止任务；请检查服务器网络后重试或切换解析器"
+                )
+            if limits.max_task_bytes and completed > limits.max_task_bytes:
+                await terminate(process)
+                await asyncio.to_thread(remove_path, str(directory))
+                raise ValueError("视频超过单任务上限，已清理部分文件")
+            used = await self.task_manager.usage_today(row["user_id"])
+            if limits.daily_bytes and used >= limits.daily_bytes and latest["status"] == "ACTIVE":
+                signal_group(process, signal.SIGSTOP)
+                await self.repo.update_status(gid, "PAUSED")
+                await self.repo.video_update(row["id"], phase="每日额度已用完；次日可继续")
+            await self.report(latest)
+        run.error_hint = download_error_hint(buffer) or run.error_hint
+        return True
+
+    async def _finish_cli(self, run: _CliRun):
+        """收尾段：等进程退出 → 输出检查 → ffprobe 校验 → 落库并投递。"""
+        row, gid, directory = run.row, run.gid, run.directory
+        process, limits = run.process, run.limits
+        await process.wait()
+        latest = await self.repo.get_by_gid(gid)
+        if not latest or latest["status"] == "CANCELLED" or self.stopping:
+            return
+        if process.returncode:
+            raise ValueError(run.error_hint or "下载或合并失败；可重试或重新扫码登录")
+        run.stage = "输出检查"
+        if run.output:
+            candidate = Path(run.output)
+        else:
+            candidates = [
+                p
+                for p in directory.glob("media.*")
+                if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".flv", ".mov", ".m4a", ".mp3", ".ts")
+            ]
+            candidate = max(candidates, key=lambda p: p.stat().st_size) if candidates else None
+        if (
+            candidate is None
+            or not candidate.is_file()
+            or not candidate.stat().st_size
+            or not safe_target(str(candidate), str(directory))
+        ):
+            raise ValueError("没有找到合并完成的视频文件")
+        if candidate.is_symlink():
+            raise ValueError("视频输出不能是符号链接")
+        if limits.max_task_bytes and candidate.stat().st_size > limits.max_task_bytes:
+            await asyncio.to_thread(remove_path, str(directory))
+            raise ValueError("合并后的视频超过单任务上限，已清理文件")
+        run.stage = "校验"
+        await self.repo.video_update(row["id"], phase="校验中")
+        await self.verify_file(candidate)
+        run.stage = "完成处理"
+        size = candidate.stat().st_size
+        await self.repo.video_complete_file(row["id"], str(candidate), size)
+        download = Download(
+            gid,
+            "complete",
+            candidate.stat().st_size,
+            run.accounted,
+            0,
+            0,
+            0,
+            None,
+            directory,
+            [File(1, candidate, candidate.stat().st_size, candidate.stat().st_size, True)],
+        )
+        await self.task_manager.complete_local_video(row, download)
 
     async def _execute_parsehub(self, row, directory, info, cookies):
         """ParseHub branch of _execute: download, verify by kind, deliver.
@@ -430,8 +460,6 @@ class VideoWorker:
             total_size += size
             await self.verify_media_file(path, kind)
         if limits.max_task_bytes and total_size > limits.max_task_bytes:
-            from bot.core.compress import remove_path
-
             await asyncio.to_thread(remove_path, str(directory))
             raise ValueError("下载内容超过单任务上限，已清理文件")
         if total_size > accounted:

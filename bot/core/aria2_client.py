@@ -54,6 +54,16 @@ class File:
         return _fmt_bytes(self.length)
 
 
+def multi_file(download) -> bool | None:
+    """True/False = 确定是/不是多文件任务；None = 还不知道（磁力在抓元数据、
+    或者 aria2 查不到）。只有确定是单文件时才隐藏「选择文件」按钮。
+    callbacks 与 task_manager 共用这一份，勿再各写一份。"""
+    if not download:
+        return None
+    real = [f for f in download.files if not f.is_metadata]
+    return len(real) > 1 if real else None
+
+
 @dataclass
 class Download:
     """一个下载任务（aria2 tellStatus 的返回结构）。"""

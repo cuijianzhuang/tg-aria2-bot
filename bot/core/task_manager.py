@@ -12,10 +12,12 @@ from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo
 
 from bot.config import settings
 from bot.core import gofile, quota
+from bot.core.aria2_client import multi_file
 from bot.core.cards import render_task_card
 from bot.core.compress import compress_path, remove_path
 from bot.core.keyboards import task_keyboard
 from bot.core.node_pool import NodePool
+from bot.db.models import map_aria2_status
 from bot.db.repo import TaskRepo
 
 log = logging.getLogger(__name__)
@@ -63,12 +65,6 @@ DISK_ALERT_COOLDOWN_SECONDS = 6 * 3600
 # 5 秒轮询本身就会偶尔因为网络抖动/aria2 重启瞬间连不上，10 分钟的门槛过滤掉
 # 这类瞬时抖动，只对真正掉线的节点报警。
 NODE_OFFLINE_ALERT_SECONDS = 10 * 60
-
-
-def _multi_file(download) -> bool | None:
-    """跟 callbacks._multi_file 同义：只有确定是单文件时才隐藏「选择文件」按钮。"""
-    real = [f for f in download.files if not f.is_metadata]
-    return len(real) > 1 if real else None
 
 
 class TaskManager:
@@ -359,7 +355,7 @@ class TaskManager:
         if status in ("ACTIVE", "PAUSED", "WAITING"):
             if await self._enforce_limits(row, download, status, node_is_local=node_is_local):
                 return  # 任务已被额度规则取消/暂停，不再往下处理
-            mapped = "ACTIVE" if status == "ACTIVE" else ("PAUSED" if status == "PAUSED" else "PENDING")
+            mapped = map_aria2_status(status)  # 三个分支都在映射表内，必不为 None
             if mapped != row["status"]:
                 await self._repo.update_status(gid, mapped)
                 if mapped != "ACTIVE":  # ACTIVE keyboard refresh piggybacks on the progress edit below
@@ -703,7 +699,7 @@ class TaskManager:
             try:
                 await self._bot.edit_message_text(
                     chat_id=chat_id, message_id=row["reply_message_id"], text=text,
-                    reply_markup=task_keyboard(gid, "ACTIVE", multi_file=_multi_file(download)),
+                    reply_markup=task_keyboard(gid, "ACTIVE", multi_file=multi_file(download)),
                     parse_mode="HTML",
                 )
             except TelegramRetryAfter as e:

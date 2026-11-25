@@ -14,6 +14,8 @@ def script_conf_path() -> str:
 
 
 def rclone_conf_path() -> str:
+    # Matches p3terx/aria2-pro's own RCLONE_CONFIG=/config/rclone.conf default;
+    # /aria2-config here and /config in the aria2 container are the same host dir.
     return os.path.join(settings.aria2_config_dir, "rclone.conf")
 
 

@@ -39,12 +39,26 @@ def url_hash(url: str) -> str:
 MIN_FREE_BYTES = 1 * 1024**3
 
 
+def min_free_bytes() -> int:
+    """实际生效的磁盘保留下限。默认 MIN_FREE_BYTES；环境变量
+    TG_ARIA2_MIN_FREE_BYTES 可覆盖（每次调用现读，方便测试在可用磁盘
+    <1GiB 的环境把阈值调低——那种环境里 1GiB 硬下限会让空间检查误报，
+    不是真没空间）。生产不设这个变量即原行为。"""
+    raw = os.environ.get("TG_ARIA2_MIN_FREE_BYTES")
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return MIN_FREE_BYTES
+
+
 def has_enough_space(download_dir: str, required_bytes: int, safety_factor: float = 1.2) -> bool:
     # The directory can disappear after startup, or a preset can point to a
     # new location. Prepare it before statvfs rather than aborting the callback.
     os.makedirs(download_dir, exist_ok=True)
     usage = shutil.disk_usage(download_dir)
-    return usage.free > max(required_bytes * safety_factor, MIN_FREE_BYTES)
+    return usage.free > max(required_bytes * safety_factor, min_free_bytes())
 
 
 def download_space_error(download_dir: str, required_bytes: int) -> str | None:

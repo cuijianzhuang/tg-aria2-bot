@@ -22,7 +22,9 @@ import aiohttp
 
 from bot.config import settings
 from bot.core import quota, storage
+from bot.core.cards import render_task_card
 from bot.core.download_service import add_source
+from bot.core.keyboards import task_keyboard
 from bot.core.sources import parse_link
 
 log = logging.getLogger(__name__)
@@ -155,9 +157,6 @@ def _has_space(path: str) -> bool:
 
 async def poll_feed(feed, *, bot, repo, nodes, task_manager=None) -> int:
     """轮询一个订阅，返回新增任务数。出错只记到订阅上（last_error），不抛。"""
-    from bot.core.cards import render_task_card
-    from bot.core.keyboards import task_keyboard
-
     try:
         title, items = parse_feed(await fetch(feed["url"]))
     except FeedError as e:

@@ -10,7 +10,15 @@ from pydantic import BaseModel
 
 from bot.config import settings
 from bot.core.aria2_client import Aria2Client
-from bot.core.conf_editor import is_safe_value, list_rclone_remotes, read_kv, write_kv
+from bot.core.conf_editor import (
+    aria2_conf_path,
+    is_safe_value,
+    list_rclone_remotes,
+    rclone_conf_path,
+    read_kv,
+    script_conf_path,
+    write_kv,
+)
 from bot.core.storage import disk_usage_summary
 from bot.db.repo import TaskRepo
 from bot.web.auth import (
@@ -310,28 +318,14 @@ async def remove_user(user_id: int):
     return {"ok": True}
 
 
-def _aria2_conf_path() -> str:
-    return os.path.join(settings.aria2_config_dir, "aria2.conf")
-
-
-def _script_conf_path() -> str:
-    return os.path.join(settings.aria2_config_dir, "script.conf")
-
-
-def _rclone_conf_path() -> str:
-    # Matches p3terx/aria2-pro's own RCLONE_CONFIG=/config/rclone.conf default;
-    # /aria2-config here and /config in the aria2 container are the same host dir.
-    return os.path.join(settings.aria2_config_dir, "rclone.conf")
-
-
 @app.get("/api/settings/rclone", dependencies=[Depends(require_login)])
 async def get_rclone_settings():
-    on_complete = read_kv(_aria2_conf_path(), "on-download-complete") or ""
+    on_complete = read_kv(aria2_conf_path(), "on-download-complete") or ""
     return {
         "enabled": on_complete.strip().endswith("upload.sh"),
-        "drive_name": read_kv(_script_conf_path(), "drive-name") or "",
-        "drive_dir": read_kv(_script_conf_path(), "drive-dir") or "",
-        "remotes": list_rclone_remotes(_rclone_conf_path()),
+        "drive_name": read_kv(script_conf_path(), "drive-name") or "",
+        "drive_dir": read_kv(script_conf_path(), "drive-dir") or "",
+        "remotes": list_rclone_remotes(rclone_conf_path()),
     }
 
 
@@ -341,11 +335,11 @@ async def set_rclone_settings(body: RcloneSettingsRequest):
         if not is_safe_value(value):
             raise HTTPException(400, "只允许字母、数字、空格、. _ - / 这些字符")
 
-    write_kv(_script_conf_path(), "drive-name", body.drive_name or None)
-    write_kv(_script_conf_path(), "drive-dir", body.drive_dir or None)
+    write_kv(script_conf_path(), "drive-name", body.drive_name or None)
+    write_kv(script_conf_path(), "drive-dir", body.drive_dir or None)
 
     hook_target = settings.aria2_upload_hook if body.enabled else settings.aria2_clean_hook
-    write_kv(_aria2_conf_path(), "on-download-complete", hook_target)
+    write_kv(aria2_conf_path(), "on-download-complete", hook_target)
 
     return {"ok": True, "restart_required": True}
 

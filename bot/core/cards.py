@@ -6,6 +6,7 @@ from html import escape
 from bot.config import settings
 from bot.core.keyboards import STATUS_LABEL, text_progress_bar
 from bot.core.storage import disk_usage_summary
+from bot.core.sysinfo import format_uptime
 
 DIVIDER = "──────────────"
 
@@ -347,8 +348,6 @@ def _fmt_speed(bytes_per_sec: float) -> str:
 def render_server_status(info: dict, stats=None) -> str:
     """服务器状态 page: host metrics from sysinfo.collect_system_status plus
     aria2's global stat (None degrades to omitting the aria2 line)."""
-    from bot.core.sysinfo import format_uptime  # local import to avoid a cycle
-
     load1, load5, load15 = info["load_avg"]
     lines = [
         "🖥 <b>服务器状态</b>",

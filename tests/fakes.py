@@ -1,7 +1,13 @@
 """测试共用的假对象：不连真实 aria2 的 NodePool/客户端替身。"""
+import os
 import tempfile
 
 from bot.core.node_pool import Node, NodeUnavailable
+
+# 测试跑在可用磁盘 <1GiB 的环境（如小 tmpfs）时，storage 的 1GiB 硬下限会让
+# 空间检查误报、殃及一批无关用例；套件统一把阈值降到 0（storage 每次调用
+# 现读环境变量，所以在公共入口设置即可）。生产代码不设此变量，行为不变。
+os.environ.setdefault("TG_ARIA2_MIN_FREE_BYTES", "0")
 
 
 class FakeAria2:

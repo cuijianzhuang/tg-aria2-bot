@@ -3,17 +3,12 @@ from html import escape
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.core.keyboards import STATUS_EMOJI, STATUS_LABEL, list_tab_row, task_open_button
+from bot.db.models import STATUSES
 
 LIST_LIMIT = 8
-LIST_STATUS_MAP = {
-    "ALL": None,
-    "ACTIVE": "ACTIVE",
-    "PENDING": "PENDING",
-    "PAUSED": "PAUSED",
-    "COMPLETED": "COMPLETED",
-    "FAILED": "FAILED",
-    "CANCELLED": "CANCELLED",
-}
+# tab 名 → 任务状态过滤值：除 "ALL"（不过滤）外每个 tab 与状态同名，
+# 状态集合以 models.STATUSES 为单一来源，这里只做成员/查表，不单独维护一份。
+LIST_STATUS_MAP = {"ALL": None, **{status: status for status in STATUSES}}
 
 TITLES = {
     "ALL": "📚 全部任务",
