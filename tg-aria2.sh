@@ -475,6 +475,8 @@ install_prepare_env() {
     I_ADMIN_PASSWORD="$(rand_hex 12)"
     I_PASSWORD_GENERATED=1
   fi
+  # --admin-password / 存量 .env 都是非交互来源：太短只警告不阻断
+  warn_short_admin_password "$I_ADMIN_PASSWORD"
 
   mkdir -p "$I_DOWNLOAD_DIR" data aria2-config
   local fresh=0
@@ -1300,6 +1302,17 @@ read_validated() {
   done
 }
 
+# Web 后台密码最低长度，与 Web 改密口径一致（bot/web/app.py 要求至少 8 位）。
+# 交互输入太短就拦下重输（见 config_menu）；--admin-password / 已有 .env 这类
+# 非交互来源太短只警告不阻断，避免破坏自动化部署和存量安装的沿用。
+ADMIN_PASSWORD_MIN_LEN=8
+warn_short_admin_password() {
+  local pw="$1"
+  if [[ -n "$pw" && "${#pw}" -lt "$ADMIN_PASSWORD_MIN_LEN" ]]; then
+    warn "ADMIN_PASSWORD 只有 ${#pw} 位，少于最低 ${ADMIN_PASSWORD_MIN_LEN} 位（与 Web 后台改密口径一致）；本次不阻断，请尽快改长"
+  fi
+}
+
 # 改完配置后让它生效。docker 下 bot/web 直接读挂载的 .env，restart 即可；
 # 端口这类 compose 层面的配置要 up -d 重建容器
 apply_config() {
@@ -1370,7 +1383,14 @@ config_menu() {
          [[ -z "$v" ]] && warn "白名单为空：机器人对所有人开放，且管理功能会被锁定（除非设置了管理员）" ;;
       2) v="$(read_validated "管理员 ID（逗号分隔，留空=沿用白名单）: " '^[0-9, ]*$' "只能是数字和逗号")" || continue
          env_set ADMIN_USER_IDS "${v// /}"; changed=1 ;;
-      3) read -rsp "新密码（留空自动生成随机密码）: " v || continue; echo
+      3) v=""
+         while true; do
+           read -rsp "新密码（至少 ${ADMIN_PASSWORD_MIN_LEN} 位，留空自动生成随机密码）: " v || { v="__cancel__"; break; }
+           echo
+           [[ -z "$v" || "${#v}" -ge "$ADMIN_PASSWORD_MIN_LEN" ]] && break
+           err "密码至少 ${ADMIN_PASSWORD_MIN_LEN} 位，请重新输入"
+         done
+         [[ "$v" == "__cancel__" ]] && continue
          if [[ -z "$v" ]]; then
            v="$(rand_hex 12)"
            printf '新密码：%s%s%s（请记下，只显示这一次）\n' "$C_BOLD" "$v" "$C_RESET"

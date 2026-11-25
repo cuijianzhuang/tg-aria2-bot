@@ -1,8 +1,10 @@
 """Submit download sources to aria2 without Telegram UI or database mutations."""
 
+from bot.config import settings
 from bot.core import storage
 from bot.core.node_pool import NodePool, NodeUnavailable
 from bot.core.telegram_files import to_download_uri
+from bot.core.url_safety import check_url
 
 
 async def add_source(nodes: NodePool, node_name: str, kind: str, payload: str, file_name: str | None) -> str:
@@ -26,6 +28,9 @@ async def add_source(nodes: NodePool, node_name: str, kind: str, payload: str, f
             download_dir=subdir,
         )
     if kind == "url":
+        # 最后一道防线：无论入口（确认卡片/批量/RSS/重试）漏没漏校验，
+        # 真正喂给 aria2 之前都过一遍 SSRF 检查，被拦抛 UnsafeUrlError。
+        check_url(payload, allow_private=settings.allow_private_download_urls)
         subdir = storage.build_subdir(node.download_dir, file_name or payload, create=node.is_local)
         return await client.add_uri(payload, download_dir=subdir)
     if kind == "magnet":

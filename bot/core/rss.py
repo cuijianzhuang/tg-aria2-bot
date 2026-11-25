@@ -10,13 +10,11 @@
 - XML 来自外部，拒绝带 DOCTYPE/ENTITY 的内容（防实体膨胀），响应体限 2MB。
 """
 import asyncio
-import ipaddress
 import logging
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from html import escape
-from urllib.parse import urlparse
 
 import aiohttp
 
@@ -24,6 +22,7 @@ from bot.config import settings
 from bot.core import quota, storage
 from bot.core.download_service import add_source
 from bot.core.sources import parse_link
+from bot.core.url_safety import UnsafeUrlError, check_url
 
 log = logging.getLogger(__name__)
 
@@ -46,19 +45,16 @@ class Item:
 
 def validate_url(url: str) -> str:
     """订阅地址必须是 http(s)，且不能直接指向本机/内网 IP 或 localhost。
-    （主机名解析到内网的情况这里不拦；要拦需要在连接时再检查。）"""
+    校验逻辑已抽到 bot/core/url_safety.py 与主下载路径共用；订阅源本身
+    不受 ALLOW_PRIVATE_DOWNLOAD_URLS 开关影响（开关只放行下载目标）。
+    （主机名解析到内网的情况不拦；要拦需要在连接时再检查。）"""
     url = url.strip()
     if not HTTP_RE.match(url) or len(url) > 1000:
         raise FeedError("订阅地址必须是 http(s):// 开头的链接。")
-    host = (urlparse(url).hostname or "").lower()
-    if host == "localhost" or host.endswith((".local", ".internal")):
-        raise FeedError("不能订阅本机或内网地址。")
     try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return url
-    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified:
-        raise FeedError("不能订阅本机或内网地址。")
+        check_url(url, schemes=("http", "https"), blocked_message="不能订阅本机或内网地址。")
+    except UnsafeUrlError:
+        raise FeedError("不能订阅本机或内网地址。") from None
     return url
 
 
@@ -201,6 +197,11 @@ async def poll_feed(feed, *, bot, repo, nodes, task_manager=None) -> int:
             break        # 额度/空间不够：这一条和后面的都留到下一轮
         try:
             gid = await add_source(nodes, node.name, kind, payload, None if kind == "magnet" else it.title)
+        except UnsafeUrlError:
+            # 地址被 SSRF 校验拦下：重试也不会变，直接记账跳过，别每轮刷日志
+            log.info("rss: skipped private/blocked source %r from feed %s", it.title, feed["id"])
+            done.append(it.guid)
+            continue
         except Exception:
             log.warning("rss: could not add %r from feed %s", it.title, feed["id"], exc_info=True)
             continue     # 添加失败不记账，下一轮重试

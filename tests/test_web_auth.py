@@ -89,5 +89,36 @@ class TestCookieSecure(unittest.TestCase):
             self.assertTrue(_cookie_secure(req))
 
 
+class TestSessionCookieAttributes(unittest.IsolatedAsyncioTestCase):
+    """登录接口发出的会话 cookie 必须是 HttpOnly + SameSite=Strict
+    （Secure 按 _cookie_secure 的规则随 scheme 变）。"""
+
+    async def test_login_cookie_is_strict(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from fastapi import Response
+
+        from bot.config import settings
+        from bot.web import app as web_app
+
+        request = SimpleNamespace(
+            url=SimpleNamespace(scheme="http"),
+            headers={},
+            client=SimpleNamespace(host="127.0.0.1"),
+        )
+        response = Response()
+        with patch.object(settings, "admin_password", "correct-horse"), \
+                patch.dict(web_app.state, {"session_secret": "s" * 64}):
+            result = await web_app.login(
+                web_app.LoginRequest(password="correct-horse"), request, response
+            )
+        self.assertEqual(result, {"ok": True})
+        cookie = response.headers["set-cookie"]
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("SameSite=strict", cookie)
+        self.assertNotIn("Secure", cookie)  # http 请求不置 Secure（与既有规则一致）
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS pending_tasks (
 CREATE TABLE IF NOT EXISTS nodes (
     name          TEXT PRIMARY KEY,
     rpc_url       TEXT NOT NULL,
-    secret        TEXT NOT NULL,
+    secret        TEXT NOT NULL,   -- Fernet 密文（enc:v1: 前缀，见 bot/core/vault.py）；存量明文启动时迁移
     download_dir  TEXT NOT NULL DEFAULT '/downloads',
     is_local      INTEGER NOT NULL DEFAULT 0,   -- bot 是否与该节点同机（决定本地能力开关）
     enabled       INTEGER NOT NULL DEFAULT 1,

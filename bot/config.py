@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     user_max_active_tasks: int = 0  # 同时进行的任务数
     user_max_task_size_gb: float = 0  # 单个任务大小上限
     user_daily_quota_gb: float = 0  # 每天下载总量
+    # SSRF 防护：用户提交的下载地址（普通 URL / RSS 条目 / Metalink 内的地址）
+    # 默认拒绝指向本机/内网/链路本地地址，防止借服务器抓云元数据或内网服务。
+    # 只校验字面主机，不校验 DNS 解析结果。确有下载局域网地址的需求（如自托管
+    # NAS 互传）时设为 true 整体放行，自担风险。见 bot/core/url_safety.py。
+    allow_private_download_urls: bool = False
     download_dir: str = "/downloads"
     # 逗号分隔的备选下载目录，配合设置菜单里的"下载目录"切换使用；当前 download_dir
     # 始终排在选项第一位，这里只补充其它可选目录

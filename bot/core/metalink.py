@@ -2,12 +2,14 @@
 import copy
 import xml.etree.ElementTree as ET
 
+from bot.core.url_safety import UnsafeUrlError, check_url
+
 MAX_METALINK_BYTES = 2 * 1024 * 1024
 MAX_METALINK_FILES = 20
 NAMESPACES = {"http://www.metalinker.org/", "urn:ietf:params:xml:ns:metalink"}
 
 
-def split_metalink(content: bytes) -> list[tuple[str, bytes]]:
+def split_metalink(content: bytes, *, allow_private: bool = False) -> list[tuple[str, bytes]]:
     if len(content) > MAX_METALINK_BYTES:
         raise ValueError("Metalink 清单不能超过 2 MiB。")
     # Reject DTDs in UTF-8 and UTF-16/32 before passing untrusted XML to ET.
@@ -22,6 +24,18 @@ def split_metalink(content: bytes) -> list[tuple[str, bytes]]:
         raise ValueError("仅支持 Metalink v3 / v4 清单。")
     ns = root.tag[1:].split("}", 1)[0]
     tag = f"{{{ns}}}file"
+    # 清单里的 <url> 是 aria2 真正会去抓的地址，跟普通下载链接走同一套
+    # SSRF 校验：任一条指向本机/内网就整份清单拒绝（拆分后逐条放行会让
+    # 用户以为清单被完整接受）。magnet:/torrent 等非 HTTP 类资源不在此列。
+    for el in root.iter():
+        if el.tag.rsplit("}", 1)[-1] == "url" and el.text and el.text.strip():
+            target = el.text.strip()
+            if target.split(":", 1)[0].lower() not in ("http", "https", "ftp", "sftp"):
+                continue
+            try:
+                check_url(target, allow_private=allow_private)
+            except UnsafeUrlError:
+                raise ValueError("Metalink 包含指向本机或内网的下载地址，已拒绝整份清单。") from None
     files = list(root.iter(tag))
     if not 1 <= len(files) <= MAX_METALINK_FILES:
         raise ValueError(f"Metalink 需包含 1–{MAX_METALINK_FILES} 个文件，请分批发送。")

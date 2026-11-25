@@ -14,6 +14,7 @@ from bot.core.keyboards import batch_pending_keyboard, pending_task_keyboard, re
 from bot.core.metalink import MAX_METALINK_BYTES, split_metalink
 from bot.core.sources import INFOHASH_RE, URL_RE, extract_links, extract_magnets, url_display_name
 from bot.core.telegram_files import to_local_path
+from bot.core.url_safety import UnsafeUrlError, check_url
 
 router = Router(name="links")
 
@@ -39,7 +40,9 @@ async def _user_node(message: Message, repo, nodes) -> str:
 
 async def _create_url_pending(message: Message, repo, url: str, *, node: str, batch_id: str | None = None) -> str | None:
     """建一条 url 类型的待确认任务；已经下载过的链接返回 None（不建 pending，
-    调用方决定要不要提示"已下载过"——单条发送时提示，批量场景里静默跳过）。"""
+    调用方决定要不要提示"已下载过"——单条发送时提示，批量场景里静默跳过）。
+    指向本机/内网的地址抛 UnsafeUrlError，由调用方给用户报错。"""
+    check_url(url, allow_private=settings.allow_private_download_urls)
     ref = storage.url_hash(url)
     if await repo.get_completed_by_source("url", ref):
         return None
@@ -88,7 +91,11 @@ async def handle_url(message: Message, repo, nodes):
         return
 
     node = await _user_node(message, repo, nodes)
-    token = await _create_url_pending(message, repo, url, node=node)
+    try:
+        token = await _create_url_pending(message, repo, url, node=node)
+    except UnsafeUrlError as exc:
+        await message.reply(f"⛔ {exc}")
+        return
     await message.reply(
         render_pending_card(
             "url", url_display_name(url),
@@ -153,24 +160,35 @@ async def handle_batch_links(message: Message, repo, nodes):
     batch_id = uuid4().hex[:12]
     names: list[str] = []
     duplicates = 0
+    blocked = 0
     for kind, payload in links:
-        if kind == "magnet":
-            token = await _create_magnet_pending(message, repo, payload, node=node, batch_id=batch_id)
-            name = "磁力链接任务"
-        else:
-            token = await _create_url_pending(message, repo, payload, node=node, batch_id=batch_id)
-            name = url_display_name(payload)
+        try:
+            if kind == "magnet":
+                token = await _create_magnet_pending(message, repo, payload, node=node, batch_id=batch_id)
+                name = "磁力链接任务"
+            else:
+                token = await _create_url_pending(message, repo, payload, node=node, batch_id=batch_id)
+                name = url_display_name(payload)
+        except UnsafeUrlError:
+            blocked += 1
+            continue
         if token is None:
             duplicates += 1
             continue
         names.append(name)
 
     if not names:
-        await message.reply("这些链接都已经下载过了，没有新增任务。")
+        if blocked and not duplicates:
+            await message.reply("⛔ 这些链接都指向本机或内网地址，出于安全原因已全部拒绝。")
+        else:
+            await message.reply("这些链接都已经下载过了，没有新增任务。")
         return
 
+    text = render_batch_pending(names, duplicates, overflow)
+    if blocked:
+        text += f"\n\n⛔ 其中 {blocked} 条链接指向本机或内网地址，已拒绝。"
     await message.reply(
-        render_batch_pending(names, duplicates, overflow),
+        text,
         reply_markup=batch_pending_keyboard(batch_id),
         parse_mode="HTML",
     )
@@ -192,7 +210,7 @@ async def handle_metalink(message: Message, repo, nodes):
         stream = await message.bot.download_file(tg_file.file_path)
         content = stream.getvalue()
     try:
-        entries = split_metalink(content)
+        entries = split_metalink(content, allow_private=settings.allow_private_download_urls)
     except ValueError as exc:
         await message.reply(f"⛔ {exc}")
         return
