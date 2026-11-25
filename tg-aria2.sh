@@ -737,6 +737,23 @@ ensure_venv() {
   fi
 }
 
+# ParseHub 解析后端（requirements-video.txt 里的 parsehub）需要 Python ≥3.12，
+# 但裸装只要求 ≥3.11：venv 是 3.11 时 pip 会按环境标记静默跳过 parsehub，
+# 后端被禁用、用户却看不到任何提示。这里统一检查并醒目警告（不阻断安装/更新：
+# yt-dlp / you-get 等其余视频功能不受影响）。
+warn_if_parsehub_unavailable() {
+  local py="${1:-$REPO_DIR/.venv/bin/python}" ver
+  [[ "$(env_get VIDEO_ENABLED)" == "true" ]] || return 0
+  [[ -x "$py" ]] || return 0
+  "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null && return 0
+  ver="$("$py" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null || echo 未知)"
+  warn "=============================================================="
+  warn "ParseHub 解析后端需要 Python ≥3.12，当前虚拟环境是 Python ${ver}，该后端将被禁用"
+  warn "（pip 按环境标记跳过了 parsehub 包）。yt-dlp / you-get 等其余视频功能不受影响。"
+  warn "补救：安装 Python 3.12+ 后删除 .venv 重建，再重跑 install --with-video。"
+  warn "=============================================================="
+}
+
 install_video_runtime() {
   [[ -x "$REPO_DIR/.venv/bin/deno" ]] && return 0
   local arch archive checksum runtime_dir
@@ -768,6 +785,7 @@ bare_step_bot() {
   "$REPO_DIR/.venv/bin/pip" install -q --disable-pip-version-check -r requirements.txt
   if [[ "$(env_get VIDEO_ENABLED)" == "true" ]]; then
     pkg_install ffmpeg || die "无法安装 ffmpeg，请先在服务器安装后重试"
+    warn_if_parsehub_unavailable "$REPO_DIR/.venv/bin/python"
     "$REPO_DIR/.venv/bin/pip" install -q -r requirements-video.txt
     install_video_runtime
   fi
@@ -1136,6 +1154,7 @@ apply_bare() {
     log "requirements.txt 无变化，跳过依赖安装"
   fi
   if [[ "$(env_get VIDEO_ENABLED)" == "true" ]]; then
+    warn_if_parsehub_unavailable ".venv/bin/python"
     .venv/bin/pip install -q -r requirements-video.txt || return 1
     install_video_runtime || return 1
     if [[ "$(env_get VIDEO_LOGIN_ENABLED)" == "true" ]]; then
