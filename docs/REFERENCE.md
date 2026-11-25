@@ -48,6 +48,7 @@ Telegram 命令菜单和任务操作使用图标，更新后重启机器人即�
 - **用户额度**（仅限普通用户，管理员不受限制）：限制同时进行的任务数、单个任务大小、每天下载总量。默认全部不限，在 `.env` 里设默认值（`USER_MAX_ACTIVE_TASKS` / `USER_MAX_TASK_SIZE_GB` / `USER_DAILY_QUOTA_GB`），再用 `/setquota` 给个别人单独调整。URL/磁力/种子在添加时不知道大小，所以单任务大小在下载中拦截：aria2 报出总大小超限就取消任务并删掉已下载的部分；每日流量按实际下载的字节数累计（跟任务哪天创建无关，隔夜的任务不会绕过额度），用完当天额度后进行中的任务自动暂停、第二天可以继续；用户用 `/quota` 随时查看自己的额度和今日用量
 
 - **RSS 订阅自动下载**：`/rss add 订阅地址 1080p 简体 -720p` 订阅一个 RSS/Atom 源，标题同时含所有关键词、且不含「-」开头的排除词的新条目自动加入下载，并发一张任务卡片给你。添加时源里已有的历史条目只记账、不下载；额度和磁盘空间的检查跟手动添加一样（被拒的条目下一轮再试）。每人最多 `RSS_MAX_FEEDS_PER_USER`（默认 5）个源，约每 `RSS_CHECK_MINUTES`（默认 15）分钟检查一次；`/rss` 里可以暂停、恢复、删除，管理员能看到所有人的订阅。不接受指向本机/内网 IP 的地址
+- **下载地址 SSRF 防护**：普通下载 URL、RSS 条目源、Metalink 清单内的 `<url>` 共用同一套校验（`bot/core/url_safety.py`）：指向 localhost、内网/回环/链路本地 IP（含 `169.254.169.254` 云元数据）的地址默认拒绝并明确报错。只校验字面主机，**不校验 DNS 解析结果**（域名解析/rebinding 到内网不在防护范围内）。确需下载局域网地址时设 `ALLOW_PRIVATE_DOWNLOAD_URLS=true` 整体放行（订阅源地址本身不受此开关影响，始终拒绝内网）
 - **限速时段**（管理员）：`/schedule set 23:00-07:00=0;07:00-23:00=2M` ——夜里不限速、白天限 2MB/s，时段可跨午夜，不在任何时段内时不限速，用服务器本地时间。只在时段切换时改一次 aria2，所以你在时段内手动调的限速会保持到下一次切换。`/schedule off` 关闭；规则存在 `.env` 的 `SPEED_SCHEDULE`
 - **过期文件自动清理**：`FILE_EXPIRY_DAYS=30` 表示已完成的下载文件满 30 天后从磁盘删除（任务记录保留）。删除前 `FILE_EXPIRY_WARN_DAYS`（默认 1）天会私聊提醒文件所有人，消息上有「🔒 保留这个文件」按钮；**提醒满期才删**，所以刚开启时存量的旧文件也是先提醒再删。只删本机节点下载目录内部的东西（路径经过真实路径检查，符号链接只删链接本身），远程节点的文件不管。默认关闭。和 `AUTO_CLEANUP_DAYS`（只删记录、不删文件）互不影响
 - **运维告警**：磁盘剩余空间低于 `DISK_ALERT_THRESHOLD_GB`、节点离线超过 5 分钟、机器人 10 分钟内被启动 3 次以上（说明在反复崩溃重启，`RESTART_ALERT_ENABLED` 可关）都会私聊管理员
@@ -411,7 +412,7 @@ ruff check .
 
 ### 数据库
 
-SQLite（默认 `data/tasks.db`，`aiosqlite` 异步访问）。schema 在 [`bot/db/models.py`](../bot/db/models.py)，新增列走 `MIGRATIONS` 列表（幂等的 `ALTER TABLE`，启动时自动执行，重复跑会跳过）。
+SQLite（默认 `data/tasks.db`，`aiosqlite` 异步访问）。schema 在 [`bot/db/models.py`](../bot/db/models.py)，新增列走 `MIGRATIONS` 列表（幂等的 `ALTER TABLE`，启动时自动执行，重复跑会跳过）。额外节点的 RPC 密钥（`nodes.secret`）以 Fernet 密文落库（`enc:v1:` 前缀，与视频 Cookie 共用 `data/video-private/key`），存量明文行在启动时自动转密文；备份数据库时务必连同该 key 一起备份，丢 key 后节点密钥无法解密、需重新添加节点。
 
 ## 目录结构
 

@@ -1,14 +1,19 @@
 import asyncio
+import logging
 import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
 from time import time
 from uuid import uuid4
 
 import aiosqlite
 
 from bot.core.pending_tasks import TTL_SECONDS, PendingTask
+from bot.core.vault import FernetVault
 from bot.db.models import MIGRATIONS, SCHEMA
 from bot.db.video import VIDEO_SCHEMA, VideoRepoMixin
+
+log = logging.getLogger(__name__)
 
 
 class TaskRepo(VideoRepoMixin):
@@ -16,6 +21,14 @@ class TaskRepo(VideoRepoMixin):
         self._db_path = db_path
         self._conn: aiosqlite.Connection | None = None
         self._video_account_lock = asyncio.Lock()
+        self._vault: FernetVault | None = None
+
+    @property
+    def _secret_vault(self) -> FernetVault:
+        # 与视频 Cookie 共用一把 key（<数据目录>/video-private/key）
+        if self._vault is None:
+            self._vault = FernetVault(Path(self._db_path).parent)
+        return self._vault
 
     async def connect(self):
         self._conn = await aiosqlite.connect(self._db_path)
@@ -49,6 +62,23 @@ class TaskRepo(VideoRepoMixin):
                 if "duplicate column name" not in str(e):
                     raise
         await self._conn.commit()
+        await self._encrypt_legacy_node_secrets()
+
+    async def _encrypt_legacy_node_secrets(self):
+        """存量迁移：nodes.secret 早期是明文，启动时把无 enc: 前缀的行就地
+        转成密文。已加密的行跳过，重复启动无副作用；没有额外节点时不碰
+        vault（不生成 key 文件）。"""
+        cur = await self._conn.execute("SELECT name, secret FROM nodes")
+        rows = await cur.fetchall()
+        legacy = [row for row in rows if row["secret"] and not FernetVault.is_encrypted(row["secret"])]
+        for row in legacy:
+            await self._conn.execute(
+                "UPDATE nodes SET secret = ? WHERE name = ?",
+                (self._secret_vault.encrypt_text(row["secret"]), row["name"]),
+            )
+        if legacy:
+            await self._conn.commit()
+            log.info("encrypted %d legacy plaintext node secret(s)", len(legacy))
 
     async def close(self):
         if self._conn:
@@ -620,9 +650,17 @@ class TaskRepo(VideoRepoMixin):
 
     # ---- nodes: 额外 aria2 节点注册表（default 节点来自 .env，不在这张表里） ----
 
-    async def list_nodes(self) -> list[aiosqlite.Row]:
+    async def list_nodes(self) -> list[dict]:
+        """返回的 secret 已解密（存量明文行原样返回）；其余字段与表里一致。"""
         cur = await self._conn.execute("SELECT * FROM nodes ORDER BY added_at")
-        return await cur.fetchall()
+        rows = await cur.fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            if item["secret"]:
+                item["secret"] = self._secret_vault.decrypt_text(item["secret"])
+            result.append(item)
+        return result
 
     async def add_node(self, *, name: str, rpc_url: str, secret: str, download_dir: str, is_local: bool = False):
         await self._conn.execute(
@@ -630,7 +668,7 @@ class TaskRepo(VideoRepoMixin):
             INSERT INTO nodes (name, rpc_url, secret, download_dir, is_local, enabled)
             VALUES (?, ?, ?, ?, ?, 1)
             """,
-            (name, rpc_url, secret, download_dir, int(is_local)),
+            (name, rpc_url, self._secret_vault.encrypt_text(secret), download_dir, int(is_local)),
         )
         await self._conn.commit()
 

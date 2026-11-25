@@ -35,6 +35,7 @@ from bot.core.keyboards import (
 from bot.core.list_view import LIST_STATUS_MAP, render_task_list
 from bot.core.node_pool import NodeUnavailable
 from bot.core.stats_view import render_daily_view, render_stats_view
+from bot.core.url_safety import UnsafeUrlError
 
 log = logging.getLogger(__name__)
 router = Router(name="callbacks")
@@ -394,6 +395,12 @@ async def handle_pending(query: CallbackQuery, repo, nodes, task_manager=None):
 
     try:
         gid = await add_source(nodes, pending.node, pending.kind, pending.payload, pending.file_name)
+    except UnsafeUrlError as exc:
+        # 地址被 SSRF 校验拦下（多半是存量待确认任务或开关刚关上）：把认领
+        # 放回去并明确报错，用户可取消任务，或管理员放行内网后再重试。
+        await repo.restore_pending(pending)
+        await query.answer(f"⛔ {exc}"[:200], show_alert=True)
+        return
     except ValueError:
         await query.answer("未知任务类型", show_alert=True)
         return
@@ -615,6 +622,9 @@ async def _task_action(query: CallbackQuery, repo, nodes, task_manager, action: 
             return
         try:
             new_gid = await add_source(nodes, row["node"], row["source_type"], payload, row["file_name"])
+        except UnsafeUrlError as exc:
+            await query.answer(f"⛔ {exc}"[:200], show_alert=True)
+            return
         except Exception:
             log.exception("retry failed for task %s", row["id"])
             await query.answer("重试失败，请稍后再试。", show_alert=True)

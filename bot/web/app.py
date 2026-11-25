@@ -160,8 +160,11 @@ async def login(body: LoginRequest, request: Request, response: Response):
         raise HTTPException(401, "密码错误")
     _clear_login_failures(ip)
     token = create_session_token(state["session_secret"])
+    # SameSite=Strict: 后台是同源 SPA（登录与所有 API 调用都同源发起），没有
+    # 跨站跳转回来带会话的流程，Strict 不影响正常使用，还能挡住跨站请求
+    # 携带会话 cookie（CSRF 纵深防御）。视频登录 cookie 是另一套，不在此列。
     response.set_cookie(
-        SESSION_COOKIE, token, httponly=True, samesite="lax", secure=_cookie_secure(request), max_age=7 * 24 * 3600
+        SESSION_COOKIE, token, httponly=True, samesite="strict", secure=_cookie_secure(request), max_age=7 * 24 * 3600
     )
     return {"ok": True}
 
@@ -187,7 +190,7 @@ async def change_password(body: ChangePasswordRequest, request: Request, respons
     state["session_secret"] = rotate_secret(_secret_path())
     token = create_session_token(state["session_secret"])
     response.set_cookie(
-        SESSION_COOKIE, token, httponly=True, samesite="lax", secure=_cookie_secure(request), max_age=7 * 24 * 3600
+        SESSION_COOKIE, token, httponly=True, samesite="strict", secure=_cookie_secure(request), max_age=7 * 24 * 3600
     )
     return {"ok": True}
 
