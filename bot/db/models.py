@@ -155,3 +155,21 @@ MIGRATIONS = [
 
 # Valid status values, kept here as the single source of truth for the state machine.
 STATUSES = ("PENDING", "ACTIVE", "PAUSED", "COMPLETED", "FAILED", "CANCELLED")
+
+# aria2 原生状态（Download.status，见 bot.core.aria2_client）→ 任务状态的唯一
+# 映射表。aria2 的 "removed" 故意不映射：任务被外部移除时机器人这边没有对应
+# 的状态迁移，调用方拿到 None 后自行回退（展示层用 DB 里的旧状态，轮询层忽略）。
+ARIA2_STATUS_MAP = {
+    "COMPLETE": "COMPLETED",
+    "ERROR": "FAILED",
+    "ACTIVE": "ACTIVE",
+    "PAUSED": "PAUSED",
+    "WAITING": "PENDING",
+}
+
+
+def map_aria2_status(status: str | None) -> str | None:
+    """aria2 状态字符串（大小写不限）→ STATUSES 之一；无对应时返回 None。"""
+    if not status:
+        return None
+    return ARIA2_STATUS_MAP.get(status.upper())

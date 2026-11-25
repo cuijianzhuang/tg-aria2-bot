@@ -3,6 +3,26 @@
 from aiogram.exceptions import TelegramBadRequest
 
 
+async def edit_or_answer(query, text, answer_text=None, **kwargs):
+    """编辑回调所在消息；编辑失败（消息类型不符等）时退化为发新消息，
+    最后统一 answer 回调。callbacks 与 settings_menu 共用这一份，
+    不要在 handler 之间互相 import（原先在 callbacks._edit，settings_menu
+    为了用它被迫 import 整个 callbacks）。"""
+    if not query.message:
+        await query.answer(answer_text)
+        return
+    try:
+        await query.message.edit_text(text, **kwargs)
+    except TelegramBadRequest as e:
+        # "message is not modified" = user tapped the same button twice;
+        # a silent toast is correct there, a duplicate message is not
+        if "message is not modified" not in str(e):
+            await query.message.answer(text, **kwargs)
+    except Exception:
+        await query.message.answer(text, **kwargs)
+    await query.answer(answer_text)
+
+
 async def edit_menu(query, text, reply_markup=None):
     message = query.message
     try:

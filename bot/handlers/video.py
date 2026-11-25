@@ -165,6 +165,124 @@ async def account_command(message: Message, repo):
     await message.reply(text, reply_markup=keyboard, parse_mode="HTML")
 
 
+async def _account_qr_login(query: CallbackQuery, repo, action, platform, back_token):
+    """personal / shared：扫码登录（生成二维码 + 可选 Web 扫码页）。"""
+    if platform not in QR_PLATFORMS:
+        await query.answer("该平台使用 Cookie 文件配置，不支持扫码登录", show_alert=True)
+        return
+    if not settings.video_login_enabled:
+        await query.answer("扫码服务未启用，请管理员启动 video-login 服务", show_alert=True)
+        return
+    login_id = await repo.video_new_login(
+        platform, 0 if action == "shared" else query.from_user.id, query.from_user.id, query.message.chat.id
+    )
+    await query.answer("正在准备二维码")
+    controls = [[InlineKeyboardButton(text="⬅️ 返回账号管理", callback_data=f"vacc:platform:{platform}")]]
+    if back_token:
+        controls.append([InlineKeyboardButton(text="⬅️ 返回视频下载确认", callback_data=f"vp:back:{back_token}")])
+    await edit_menu(
+        query,
+        "🔑 正在生成二维码，最长等待五分钟。生成后会在私聊单独发送，返回菜单不会取消登录。",
+        InlineKeyboardMarkup(inline_keyboard=controls),
+    )
+    if settings.video_public_url:
+        token = await repo.video_grant(login_id)
+        # Fragment tokens are not sent in HTTP access logs or Referer.
+        await query.message.answer(
+            "也可打开专属 Web 扫码页（五分钟内使用一次）",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🌐 打开扫码页",
+                            url=settings.video_public_url.rstrip("/") + "/video-login#" + token,
+                        )
+                    ]
+                ]
+            ),
+        )
+
+
+async def _account_publish(query: CallbackQuery, repo, action, platform, admin, back_token):
+    """publish / publish-confirmed：把个人账号共享出去（两步确认）。"""
+    if action == "publish":
+        if not await repo.video_account(platform, query.from_user.id):
+            await query.message.answer("⚠️ 请先登录个人账号")
+            return
+        if getattr(settings, "video_cookie_file_" + platform, ""):
+            await query.message.answer("⚠️ 当前平台配置了共享 Cookie 文件，请管理员先移除该配置再共享个人账号")
+            return
+        await edit_menu(
+            query,
+            "⚠️ 确认让其他获准使用机器人的用户以你的账号下载此平台视频？"
+            "平台登录态将作为共享账号保存；关闭共享不会清除已保存的登录态。",
+            InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="👥 确认共享", callback_data=f"vacc:publish-confirmed:{platform}"),
+                        InlineKeyboardButton(text="返回", callback_data=f"vacc:platform:{platform}"),
+                    ]
+                ]
+            ),
+        )
+        return
+    # publish-confirmed
+    if getattr(settings, "video_cookie_file_" + platform, ""):
+        await query.message.answer("⚠️ 当前平台配置了共享 Cookie 文件，请管理员先移除该配置再共享个人账号")
+        return
+    if not await repo.video_share_personal(platform, query.from_user.id):
+        await query.message.answer("⚠️ 个人账号已移除，请重新登录后再共享")
+        return
+    text, keyboard = await platform_view(repo, query.from_user.id, platform, admin, back_token)
+    await edit_menu(query, text, keyboard)
+
+
+async def _account_remove(query: CallbackQuery, repo, action, platform, admin, back_token):
+    """remove(-shared) 是确认提示，remove(-shared)-confirmed 才真正删除。"""
+    if action in ("remove", "remove-shared"):
+        shared = action == "remove-shared"
+        confirm = "remove-shared-confirmed" if shared else "remove-confirmed"
+        await edit_menu(
+            query,
+            "⚠️ 确认移除本机保存的" + ("共享" if shared else "个人") + "登录状态？正在执行的任务仍使用已有临时快照。",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="🗑 确认移除", callback_data=f"vacc:{confirm}:{platform}"),
+                        InlineKeyboardButton(text="返回", callback_data=f"vacc:platform:{platform}"),
+                    ],
+                    *(
+                        [[InlineKeyboardButton(text="⬅️ 返回视频下载确认", callback_data=f"vp:back:{back_token}")]]
+                        if back_token
+                        else []
+                    ),
+                ]
+            ),
+        )
+        return
+    await repo.video_remove_account(platform, 0 if action == "remove-shared-confirmed" else query.from_user.id)
+    text, keyboard = await platform_view(repo, query.from_user.id, platform, admin, back_token)
+    await edit_menu(query, text, keyboard)
+
+
+async def _account_use_mode(query: CallbackQuery, repo, action, platform, admin, back_token):
+    """use-<mode>：切换该平台默认使用的账号身份。"""
+    mode = action.removeprefix("use-")
+    if mode not in MODES:
+        return
+    if mode == "personal" and not await repo.video_account(platform, query.from_user.id):
+        text, keyboard = await platform_view(repo, query.from_user.id, platform, admin, back_token)
+        await edit_menu(query, "⚠️ 请先登录个人账号\n\n" + text, keyboard)
+        return
+    if mode == "shared" and not (await shared_summary(repo, platform))["shared"]:
+        text, keyboard = await platform_view(repo, query.from_user.id, platform, admin, back_token)
+        await edit_menu(query, "⚠️ 共享账号尚未开放\n\n" + text, keyboard)
+        return
+    await repo.video_preference(query.from_user.id, platform, mode)
+    text, keyboard = await platform_view(repo, query.from_user.id, platform, admin, back_token)
+    await edit_menu(query, text, keyboard)
+
+
 @router.callback_query(F.data.startswith("vacc:"))
 @single_menu_action
 async def account_action(query: CallbackQuery, repo):
@@ -199,112 +317,17 @@ async def account_action(query: CallbackQuery, repo):
     if action == "import":
         await start_import(query, repo, platform)
     elif action in ("personal", "shared"):
-        if platform not in QR_PLATFORMS:
-            await query.answer("该平台使用 Cookie 文件配置，不支持扫码登录", show_alert=True)
-            return
-        if not settings.video_login_enabled:
-            await query.answer("扫码服务未启用，请管理员启动 video-login 服务", show_alert=True)
-            return
-        login_id = await repo.video_new_login(
-            platform, 0 if action == "shared" else query.from_user.id, query.from_user.id, query.message.chat.id
-        )
-        await query.answer("正在准备二维码")
-        controls = [[InlineKeyboardButton(text="⬅️ 返回账号管理", callback_data=f"vacc:platform:{platform}")]]
-        if back_token:
-            controls.append([InlineKeyboardButton(text="⬅️ 返回视频下载确认", callback_data=f"vp:back:{back_token}")])
-        await edit_menu(
-            query,
-            "🔑 正在生成二维码，最长等待五分钟。生成后会在私聊单独发送，返回菜单不会取消登录。",
-            InlineKeyboardMarkup(inline_keyboard=controls),
-        )
-        if settings.video_public_url:
-            token = await repo.video_grant(login_id)
-            # Fragment tokens are not sent in HTTP access logs or Referer.
-            await query.message.answer(
-                "也可打开专属 Web 扫码页（五分钟内使用一次）",
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="🌐 打开扫码页",
-                                url=settings.video_public_url.rstrip("/") + "/video-login#" + token,
-                            )
-                        ]
-                    ]
-                ),
-            )
-    elif action == "publish":
-        if not await repo.video_account(platform, query.from_user.id):
-            await query.message.answer("⚠️ 请先登录个人账号")
-            return
-        if getattr(settings, "video_cookie_file_" + platform, ""):
-            await query.message.answer("⚠️ 当前平台配置了共享 Cookie 文件，请管理员先移除该配置再共享个人账号")
-            return
-        await edit_menu(
-            query,
-            "⚠️ 确认让其他获准使用机器人的用户以你的账号下载此平台视频？"
-            "平台登录态将作为共享账号保存；关闭共享不会清除已保存的登录态。",
-            InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(text="👥 确认共享", callback_data=f"vacc:publish-confirmed:{platform}"),
-                        InlineKeyboardButton(text="返回", callback_data=f"vacc:platform:{platform}"),
-                    ]
-                ]
-            ),
-        )
-    elif action == "publish-confirmed":
-        if getattr(settings, "video_cookie_file_" + platform, ""):
-            await query.message.answer("⚠️ 当前平台配置了共享 Cookie 文件，请管理员先移除该配置再共享个人账号")
-            return
-        if not await repo.video_share_personal(platform, query.from_user.id):
-            await query.message.answer("⚠️ 个人账号已移除，请重新登录后再共享")
-            return
-        text, keyboard = await platform_view(repo, query.from_user.id, platform, admin, back_token)
-        await edit_menu(query, text, keyboard)
-    elif action in ("remove", "remove-shared"):
-        shared = action == "remove-shared"
-        confirm = "remove-shared-confirmed" if shared else "remove-confirmed"
-        await edit_menu(
-            query,
-            "⚠️ 确认移除本机保存的" + ("共享" if shared else "个人") + "登录状态？正在执行的任务仍使用已有临时快照。",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(text="🗑 确认移除", callback_data=f"vacc:{confirm}:{platform}"),
-                        InlineKeyboardButton(text="返回", callback_data=f"vacc:platform:{platform}"),
-                    ],
-                    *(
-                        [[InlineKeyboardButton(text="⬅️ 返回视频下载确认", callback_data=f"vp:back:{back_token}")]]
-                        if back_token
-                        else []
-                    ),
-                ]
-            ),
-        )
-    elif action in ("remove-confirmed", "remove-shared-confirmed"):
-        await repo.video_remove_account(platform, 0 if action == "remove-shared-confirmed" else query.from_user.id)
-        text, keyboard = await platform_view(repo, query.from_user.id, platform, admin, back_token)
-        await edit_menu(query, text, keyboard)
+        await _account_qr_login(query, repo, action, platform, back_token)
+    elif action in ("publish", "publish-confirmed"):
+        await _account_publish(query, repo, action, platform, admin, back_token)
+    elif action in ("remove", "remove-shared", "remove-confirmed", "remove-shared-confirmed"):
+        await _account_remove(query, repo, action, platform, admin, back_token)
     elif action in ("share", "unshare"):
         await repo.video_share(platform, action == "share")
         text, keyboard = await platform_view(repo, query.from_user.id, platform, admin, back_token)
         await edit_menu(query, text, keyboard)
     elif action.startswith("use-"):
-        mode = action.removeprefix("use-")
-        if mode not in MODES:
-            return
-        if mode == "personal" and not await repo.video_account(platform, query.from_user.id):
-            text, keyboard = await platform_view(repo, query.from_user.id, platform, admin, back_token)
-            await edit_menu(query, "⚠️ 请先登录个人账号\n\n" + text, keyboard)
-            return
-        if mode == "shared" and not (await shared_summary(repo, platform))["shared"]:
-            text, keyboard = await platform_view(repo, query.from_user.id, platform, admin, back_token)
-            await edit_menu(query, "⚠️ 共享账号尚未开放\n\n" + text, keyboard)
-            return
-        await repo.video_preference(query.from_user.id, platform, mode)
-        text, keyboard = await platform_view(repo, query.from_user.id, platform, admin, back_token)
-        await edit_menu(query, text, keyboard)
+        await _account_use_mode(query, repo, action, platform, admin, back_token)
     elif action == "platform":
         text, keyboard = await platform_view(repo, query.from_user.id, platform, admin, back_token)
         await edit_menu(query, text, keyboard)

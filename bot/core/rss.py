@@ -20,7 +20,9 @@ import aiohttp
 
 from bot.config import settings
 from bot.core import quota, storage
+from bot.core.cards import render_task_card
 from bot.core.download_service import add_source
+from bot.core.keyboards import task_keyboard
 from bot.core.sources import parse_link
 from bot.core.url_safety import UnsafeUrlError, check_url
 
@@ -175,9 +177,6 @@ async def poll_feed(feed, *, bot, repo, nodes, task_manager=None, prefetched: by
     """轮询一个订阅，返回新增任务数。出错只记到订阅上（last_error），不抛。
     prefetched 是 rss_loop 并发预抓好的响应体（跳过 fetch 阶段）；手动刷新
     （handlers/rss.py）不传，行为与原来一致。"""
-    from bot.core.cards import render_task_card
-    from bot.core.keyboards import task_keyboard
-
     try:
         title, items = parse_feed(prefetched if prefetched is not None else await fetch(feed["url"]))
     except FeedError as e:

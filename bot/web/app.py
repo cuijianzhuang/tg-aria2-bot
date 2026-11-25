@@ -10,7 +10,15 @@ from pydantic import BaseModel
 
 from bot.config import settings
 from bot.core.aria2_client import Aria2Client
-from bot.core.conf_editor import is_safe_value, list_rclone_remotes, read_kv, write_kv
+from bot.core.conf_editor import (
+    aria2_conf_path,
+    is_safe_value,
+    list_rclone_remotes,
+    rclone_conf_path,
+    read_kv,
+    script_conf_path,
+    write_kv,
+)
 from bot.core.storage import disk_usage_summary
 from bot.db.repo import TaskRepo
 from bot.web.auth import (
@@ -313,29 +321,16 @@ async def remove_user(user_id: int):
     return {"ok": True}
 
 
-def _aria2_conf_path() -> str:
-    return os.path.join(settings.aria2_config_dir, "aria2.conf")
-
-
-def _script_conf_path() -> str:
-    return os.path.join(settings.aria2_config_dir, "script.conf")
-
-
-def _rclone_conf_path() -> str:
-    # Matches p3terx/aria2-pro's own RCLONE_CONFIG=/config/rclone.conf default;
-    # /aria2-config here and /config in the aria2 container are the same host dir.
-    return os.path.join(settings.aria2_config_dir, "rclone.conf")
-
-
 def _read_rclone_settings() -> dict:
     # read_kv/list_rclone_remotes 是同步文件 IO，在 async 端点里经 to_thread
-    # 调用（见下面两个端点），不要直接在事件循环上读盘
-    on_complete = read_kv(_aria2_conf_path(), "on-download-complete") or ""
+    # 调用（见下面两个端点），不要直接在事件循环上读盘；conf 路径统一用
+    # bot.core.conf_editor 的实现（本文件不再自备一份）
+    on_complete = read_kv(aria2_conf_path(), "on-download-complete") or ""
     return {
         "enabled": on_complete.strip().endswith("upload.sh"),
-        "drive_name": read_kv(_script_conf_path(), "drive-name") or "",
-        "drive_dir": read_kv(_script_conf_path(), "drive-dir") or "",
-        "remotes": list_rclone_remotes(_rclone_conf_path()),
+        "drive_name": read_kv(script_conf_path(), "drive-name") or "",
+        "drive_dir": read_kv(script_conf_path(), "drive-dir") or "",
+        "remotes": list_rclone_remotes(rclone_conf_path()),
     }
 
 
@@ -345,9 +340,9 @@ async def get_rclone_settings():
 
 
 def _write_rclone_settings(drive_name: str | None, drive_dir: str | None, hook_target: str):
-    write_kv(_script_conf_path(), "drive-name", drive_name)
-    write_kv(_script_conf_path(), "drive-dir", drive_dir)
-    write_kv(_aria2_conf_path(), "on-download-complete", hook_target)
+    write_kv(script_conf_path(), "drive-name", drive_name)
+    write_kv(script_conf_path(), "drive-dir", drive_dir)
+    write_kv(aria2_conf_path(), "on-download-complete", hook_target)
 
 
 @app.post("/api/settings/rclone", dependencies=[Depends(require_login)])
@@ -360,6 +355,7 @@ async def set_rclone_settings(body: RcloneSettingsRequest):
     await asyncio.to_thread(
         _write_rclone_settings, body.drive_name or None, body.drive_dir or None, hook_target,
     )
+
 
     return {"ok": True, "restart_required": True}
 

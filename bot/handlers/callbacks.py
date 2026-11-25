@@ -3,11 +3,11 @@ import logging
 import os
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.config import settings
 from bot.core import quota, storage
+from bot.core.aria2_client import multi_file
 from bot.core.cards import (
     render_file_selection,
     render_home,
@@ -36,6 +36,9 @@ from bot.core.list_view import LIST_STATUS_MAP, render_task_list
 from bot.core.node_pool import NodeUnavailable
 from bot.core.stats_view import render_daily_view, render_stats_view
 from bot.core.url_safety import UnsafeUrlError
+from bot.db.models import map_aria2_status
+from bot.handlers.menu import edit_or_answer
+from bot.handlers.video_tasks import handle_video_task
 
 log = logging.getLogger(__name__)
 router = Router(name="callbacks")
@@ -127,19 +130,10 @@ def _with_back(markup: InlineKeyboardMarkup | None, back: str | None) -> InlineK
     ])
 
 
-def _multi_file(download) -> bool | None:
-    """True/False = 确定是/不是多文件任务；None = 还不知道（磁力在抓元数据、
-    或者 aria2 查不到）。只有确定是单文件时才隐藏「选择文件」按钮。"""
-    if not download:
-        return None
-    real = [f for f in download.files if not f.is_metadata]
-    return len(real) > 1 if real else None
-
-
 def _card_keyboard(row, gid: str, status: str, download, *, is_local: bool, back: str | None):
     return task_keyboard(
         gid, status, back=back, local=is_local,
-        multi_file=_multi_file(download), link=row["gofile_link"],
+        multi_file=multi_file(download), link=row["gofile_link"],
     )
 
 
@@ -171,7 +165,7 @@ async def _leave_task_card(query: CallbackQuery, repo, nodes, back: str | None, 
         except ValueError:
             page_n = 0
         text, markup = await render_task_list(repo, nodes, tab, page_n, user_id=scope)
-        await _edit(query, text, answer_text=toast, reply_markup=markup, parse_mode="HTML")
+        await edit_or_answer(query, text, answer_text=toast, reply_markup=markup, parse_mode="HTML")
         return
     await query.answer(toast)
     if query.message:
@@ -192,7 +186,7 @@ async def nav_start(query: CallbackQuery, repo, nodes):
         stats = await nodes.get("default").global_stat()
     except Exception:
         stats = None
-    await _edit(
+    await edit_or_answer(
         query, render_home(counts, stats),
         reply_markup=_home_keyboard(query, counts, await _current_node_label(query, repo, nodes)),
         parse_mode="HTML",
@@ -204,7 +198,7 @@ async def node_pick(query: CallbackQuery, repo, nodes):
     current = nodes.resolve(await repo.get_current_node(query.from_user.id)).name
     enabled = nodes.enabled_nodes()
     healthy = {n.name: nodes.is_healthy(n.name) for n in enabled}
-    await _edit(
+    await edit_or_answer(
         query, render_node_chooser(current, enabled, healthy),
         reply_markup=node_chooser_keyboard(current, enabled, healthy), parse_mode="HTML",
     )
@@ -227,7 +221,7 @@ async def node_use(query: CallbackQuery, repo, nodes):
         stats = await nodes.get("default").global_stat()
     except Exception:
         stats = None
-    await _edit(
+    await edit_or_answer(
         query, render_home(counts, stats),
         answer_text=f"✅ 已切换到 {node.display_name}",
         reply_markup=_home_keyboard(query, counts, node.display_name),
@@ -257,7 +251,7 @@ async def apply_task_limit(query: CallbackQuery, repo, nodes, task_manager=None)
         return
     name = row["file_name"] or row["source_ref"] or gid
     _attend(task_manager, gid, submenu=True)
-    await _edit(
+    await edit_or_answer(
         query, render_task_limit_chooser(name, value),
         answer_text="✅ 已生效" if value != "0" else "✅ 已取消限速",
         reply_markup=_with_back(task_limit_chooser_keyboard(gid, value), _back_target(query)), parse_mode="HTML",
@@ -277,7 +271,7 @@ async def list_filter(query: CallbackQuery, repo, nodes):
         if not n:
             await query.answer("没有可清理的已完成记录")
             return
-        await _edit(
+        await edit_or_answer(
             query,
             f"🧹 确认清理 <b>{n}</b> 条已完成任务记录？\n\n只删除机器人里的记录，不影响磁盘上的文件。",
             reply_markup=cleanup_confirm_keyboard(),
@@ -290,7 +284,7 @@ async def list_filter(query: CallbackQuery, repo, nodes):
             return
         deleted = await repo.delete_by_status("COMPLETED")
         text, markup = await render_task_list(repo, nodes, "ALL", 0)
-        await _edit(query, text, answer_text=f"已清理 {deleted} 条记录", reply_markup=markup, parse_mode="HTML")
+        await edit_or_answer(query, text, answer_text=f"已清理 {deleted} 条记录", reply_markup=markup, parse_mode="HTML")
         return
     if len(parts) < 3 or parts[1] == "noop":
         await query.answer()
@@ -302,14 +296,14 @@ async def list_filter(query: CallbackQuery, repo, nodes):
         page = 0
     scope = settings.scope_for(query.from_user.id) if query.from_user else None
     text, markup = await render_task_list(repo, nodes, status_key, page, user_id=scope)
-    await _edit(query, text, reply_markup=markup, parse_mode="HTML")
+    await edit_or_answer(query, text, reply_markup=markup, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "stats:daily")
 async def show_daily_stats(query: CallbackQuery, repo):
     scope = settings.scope_for(query.from_user.id) if query.from_user else None
     text, markup = await render_daily_view(repo, user_id=scope)
-    await _edit(query, text, reply_markup=markup, parse_mode="HTML")
+    await edit_or_answer(query, text, reply_markup=markup, parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("stats:"))
@@ -317,7 +311,7 @@ async def show_stats(query: CallbackQuery, repo):
     days = query.data.split(":", 1)[1]
     scope = settings.scope_for(query.from_user.id) if query.from_user else None
     text, markup = await render_stats_view(repo, days, user_id=scope)
-    await _edit(query, text, reply_markup=markup, parse_mode="HTML")
+    await edit_or_answer(query, text, reply_markup=markup, parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("pending:"))
@@ -344,7 +338,7 @@ async def handle_pending(query: CallbackQuery, repo, nodes, task_manager=None):
     if action == "cancel":
         await repo.delete_pending(token)
         scope = settings.scope_for(query.from_user.id) if query.from_user else None
-        await _edit(query, "已取消添加任务。", reply_markup=_home_keyboard(query, await repo.count_by_status(user_id=scope)))
+        await edit_or_answer(query, "已取消添加任务。", reply_markup=_home_keyboard(query, await repo.count_by_status(user_id=scope)))
         return
     if action == "nodes":
         # 确认卡片上的临时切换：只改这一条任务的目标节点
@@ -353,7 +347,7 @@ async def handle_pending(query: CallbackQuery, repo, nodes, task_manager=None):
             return
         enabled = nodes.enabled_nodes()
         healthy = {n.name: nodes.is_healthy(n.name) for n in enabled}
-        await _edit(
+        await edit_or_answer(
             query, "🖥 选择这个任务要下载到的节点：",
             reply_markup=pending_node_chooser_keyboard(token, pending.node, enabled, healthy),
         )
@@ -425,7 +419,7 @@ async def handle_pending(query: CallbackQuery, repo, nodes, task_manager=None):
     )
     row = await repo.get_by_id(task_id)
     _attend(task_manager, gid)  # 刚添加的任务：用户多半在盯着看，先快速刷新一阵
-    await _edit(
+    await edit_or_answer(
         query,
         render_task_card(row, status="PENDING", node_label=nodes.label(pending.node)),
         reply_markup=task_keyboard(gid, "PENDING", local=target_node.is_local),
@@ -450,7 +444,7 @@ async def apply_pending_node(query: CallbackQuery, repo, nodes):
 
     await repo.update_pending_node(token, name)
     await query.answer(f"✅ 目标节点：{node.display_name}")
-    await _edit(
+    await edit_or_answer(
         query,
         render_pending_card(
             pending.kind, pending.file_name or "任务",
@@ -527,7 +521,7 @@ async def _handle_batch_start(query: CallbackQuery, repo, nodes, task_manager, *
         markup.inline_keyboard.insert(0, [
             InlineKeyboardButton(text="🔄 重试未启动任务", callback_data=f"pending:startall:{batch_id}"),
         ])
-    await _edit(query, text, reply_markup=markup)
+    await edit_or_answer(query, text, reply_markup=markup)
 
 
 async def _handle_batch_cancel(query: CallbackQuery, repo, *, batch_id: str):
@@ -537,7 +531,7 @@ async def _handle_batch_cancel(query: CallbackQuery, repo, *, batch_id: str):
         return
     deleted = await repo.delete_pending_batch(batch_id)
     scope = settings.scope_for(query.from_user.id) if query.from_user else None
-    await _edit(
+    await edit_or_answer(
         query, f"已取消批量任务（{deleted} 个）。",
         reply_markup=_home_keyboard(query, await repo.count_by_status(user_id=scope)),
     )
@@ -567,6 +561,197 @@ async def handle_task_action(query: CallbackQuery, repo, nodes, task_manager):
     await _task_action(query, repo, nodes, task_manager, "detail" if action == "open" else action, gid, back=back)
 
 
+class _TaskActionContext:
+    """_task_action 分发给各子处理函数时共用的上下文：回调、任务行与归属
+    节点信息在主函数里统一备齐，子函数只管自己那个 action 的逻辑。"""
+
+    def __init__(self, query, repo, nodes, task_manager, action, gid, *, back, row, aria2, node):
+        self.query = query
+        self.repo = repo
+        self.nodes = nodes
+        self.task_manager = task_manager
+        self.action = action
+        self.gid = gid
+        self.back = back
+        self.row = row
+        self.aria2 = aria2
+        self.node = node
+        self.is_local = node.is_local if node else True
+        self.node_label = nodes.label(row["node"])
+        self.name = row["file_name"] or row["source_ref"] or gid
+
+
+async def _action_detail(ctx: _TaskActionContext):
+    download = await _download_or_none(ctx.aria2, ctx.gid)
+    status = _mapped_status(download, ctx.row["status"])
+    await edit_or_answer(
+        ctx.query,
+        render_task_card(ctx.row, download, status=status, node_label=ctx.node_label),
+        reply_markup=_card_keyboard(ctx.row, ctx.gid, status, download, is_local=ctx.is_local, back=ctx.back),
+        parse_mode="HTML",
+    )
+
+
+async def _action_retry(ctx: _TaskActionContext):
+    row = ctx.row
+    payload = row["payload"]
+    if not payload or (row["source_type"] in ("torrent", "metalink") and not os.path.exists(payload)):
+        await ctx.query.answer("缺少原始下载来源，无法重试。请重新发送链接或文件。", show_alert=True)
+        return
+    refusal = await _quota_refusal(ctx.repo, ctx.task_manager, row["user_id"], row["file_size"])
+    if refusal:
+        await ctx.query.answer(f"⛔ {refusal}"[:200], show_alert=True)
+        return
+    try:
+        new_gid = await add_source(ctx.nodes, row["node"], row["source_type"], payload, row["file_name"])
+    except UnsafeUrlError as exc:
+        await ctx.query.answer(f"⛔ {exc}"[:200], show_alert=True)
+        return
+    except Exception:
+        log.exception("retry failed for task %s", row["id"])
+        await ctx.query.answer("重试失败，请稍后再试。", show_alert=True)
+        return
+    await ctx.repo.retry_task(
+        row["id"], new_gid,
+        reply_message_id=ctx.query.message.message_id if ctx.query.message else None,
+    )
+    row = await ctx.repo.get_by_id(row["id"])
+    _attend(ctx.task_manager, new_gid)
+    await edit_or_answer(
+        ctx.query, render_task_card(row, status="PENDING", node_label=ctx.node_label),
+        answer_text="🔄 已重新加入下载",
+        reply_markup=task_keyboard(new_gid, "PENDING", local=ctx.is_local, back=ctx.back), parse_mode="HTML",
+    )
+
+
+async def _action_cancel(ctx: _TaskActionContext):
+    text = (
+        "⚠️ 确认取消任务？\n\n"
+        f"任务：{ctx.name}\n"
+        f"已下载：{_completed_text(await _download_or_none(ctx.aria2, ctx.gid))}\n\n"
+        "请选择是否同时删除已经下载的数据。"
+    )
+    await edit_or_answer(ctx.query, text, reply_markup=_with_back(task_cancel_confirm_keyboard(ctx.gid), ctx.back))
+
+
+async def _action_confirm_delete_files(ctx: _TaskActionContext):
+    await edit_or_answer(
+        ctx.query, "⚠️ 该操作会永久删除已下载文件。",
+        reply_markup=_with_back(task_cancel_confirm_keyboard(ctx.gid, destructive=True), ctx.back),
+    )
+
+
+async def _action_delete(ctx: _TaskActionContext):
+    target = _purge_target(ctx.row, ctx.node)
+    text = f"🗑 删除任务记录？\n\n任务：{ctx.name}"
+    if target:
+        text += f"\n文件：{target}\n\n可以只删记录（文件保留在磁盘上），也可以连文件一起删除。"
+    else:
+        text += "\n\n只删除机器人里的记录，不影响磁盘上的文件。"
+    await edit_or_answer(
+        ctx.query, text,
+        reply_markup=_with_back(task_delete_confirm_keyboard(ctx.gid, can_delete_files=bool(target)), ctx.back),
+    )
+
+
+async def _action_confirm_purge(ctx: _TaskActionContext):
+    target = _purge_target(ctx.row, ctx.node)
+    if not target:
+        await ctx.query.answer("文件已不存在或不在下载目录内，只能删除记录。", show_alert=True)
+        return
+    await edit_or_answer(
+        ctx.query, f"⚠️ 将永久删除：\n{target}\n\n此操作不可恢复。",
+        reply_markup=_with_back(task_delete_confirm_keyboard(ctx.gid, destructive=True), ctx.back),
+    )
+
+
+async def _action_delete_record(ctx: _TaskActionContext):
+    """delete_record / purge：删 DB 记录；purge 先删文件，删不掉就保留记录。"""
+    toast = "已删除记录"
+    if ctx.action == "purge":
+        target = _purge_target(ctx.row, ctx.node)
+        if target:
+            try:
+                await asyncio.to_thread(remove_path, target)
+                toast = "已删除记录和文件"
+            except OSError:
+                log.exception("failed to delete files for gid %s", ctx.gid)
+                await ctx.query.answer("删除文件失败，记录已保留。", show_alert=True)
+                return
+    if ctx.aria2 is not None and ctx.row["status"] not in ("COMPLETED", "FAILED", "CANCELLED"):
+        # 还在 aria2 里跑的任务（旧消息上的删除按钮）先停掉，不然记录没了下载还在继续
+        try:
+            await ctx.aria2.remove(ctx.gid, files=False, is_local=ctx.is_local)
+        except Exception:
+            pass
+    await ctx.repo.delete_task(ctx.gid)
+    await _leave_task_card(ctx.query, ctx.repo, ctx.nodes, ctx.back, toast)
+
+
+async def _action_files(ctx: _TaskActionContext):
+    row = ctx.row
+    if row["status"] == "COMPLETED":
+        path = row["save_path"] or settings.download_dir
+        link = row["gofile_link"] or "暂无下载链接"
+        await ctx.query.answer(f"保存位置：{path}\n链接：{link}", show_alert=True)
+        return
+
+    download = await _download_or_none(ctx.aria2, ctx.gid)
+    real_files = [f for f in download.files if not f.is_metadata] if download else []
+    if not download or len(real_files) < 2:
+        await ctx.query.answer(
+            "单文件任务或元数据尚未就绪，无法选择文件。" if download else "任务信息暂不可用。",
+            show_alert=True,
+        )
+        return
+    await edit_or_answer(
+        ctx.query, render_file_selection(download),
+        reply_markup=_with_back(file_selection_keyboard(ctx.gid, download), ctx.back), parse_mode="HTML",
+    )
+
+
+async def _action_limit(ctx: _TaskActionContext):
+    try:
+        limit_raw = await ctx.aria2.get_download_limit(ctx.gid)
+    except Exception:
+        limit_raw = None
+    await edit_or_answer(
+        ctx.query, render_task_limit_chooser(ctx.name, limit_raw),
+        reply_markup=_with_back(task_limit_chooser_keyboard(ctx.gid, limit_raw), ctx.back), parse_mode="HTML",
+    )
+
+
+async def _action_sendtg(ctx: _TaskActionContext):
+    if ctx.row["status"] != "COMPLETED":
+        await ctx.query.answer("任务未完成，无法发送。", show_alert=True)
+        return
+    if not ctx.is_local:
+        # 远程任务不渲染这个按钮，走到这说明是旧消息/伪造数据 —— 兜底拦截
+        await ctx.query.answer("文件在远程节点上，无法从这里发送。", show_alert=True)
+        return
+    await ctx.query.answer("正在发送…")
+    ok, msg = await ctx.task_manager.send_file_to_tg(ctx.row, ctx.gid)
+    if not ok:
+        await ctx.query.answer(msg, show_alert=True)
+
+
+# 自成一体的 action 分发到子函数；detail 在节点不可用时也要能展示、settings /
+# link 只是一行 toast、pause/resume/cancel_only/delete_files 走后面的通用
+# _apply_action 尾巴，都留在 _task_action 主流程里不进这张表。
+_TASK_ACTION_HANDLERS = {
+    "retry": _action_retry,
+    "cancel": _action_cancel,
+    "confirm_delete_files": _action_confirm_delete_files,
+    "delete": _action_delete,
+    "confirm_purge": _action_confirm_purge,
+    "delete_record": _action_delete_record,
+    "purge": _action_delete_record,
+    "files": _action_files,
+    "limit": _action_limit,
+    "sendtg": _action_sendtg,
+}
+
+
 async def _task_action(query: CallbackQuery, repo, nodes, task_manager, action: str, gid: str, *, back: str | None):
     row = await repo.get_by_gid(gid)
     if row is None:
@@ -581,7 +766,6 @@ async def _task_action(query: CallbackQuery, repo, nodes, task_manager, action: 
     _attend(task_manager, gid, submenu=action in _SUBMENU_ACTIONS)
 
     if dict(row).get("backend") == "video":
-        from bot.handlers.video_tasks import handle_video_task
         await handle_video_task(query, repo, task_manager, row, action, back)
         return
 
@@ -592,172 +776,30 @@ async def _task_action(query: CallbackQuery, repo, nodes, task_manager, action: 
     except NodeUnavailable:
         aria2 = None
     node = nodes.get_node(row["node"])
-    is_local = node.is_local if node else True
-    node_label = nodes.label(row["node"])
-    name = row["file_name"] or row["source_ref"] or gid
+    ctx = _TaskActionContext(
+        query, repo, nodes, task_manager, action, gid, back=back, row=row, aria2=aria2, node=node,
+    )
 
     if action == "detail":
-        download = await _download_or_none(aria2, gid)
-        status = _mapped_status(download, row["status"])
-        await _edit(
-            query,
-            render_task_card(row, download, status=status, node_label=node_label),
-            reply_markup=_card_keyboard(row, gid, status, download, is_local=is_local, back=back),
-            parse_mode="HTML",
-        )
+        await _action_detail(ctx)
         return
 
     if aria2 is None and action in {"retry", "pause", "resume", "cancel_only", "delete_files", "limit"}:
         await query.answer("⛔ 该任务所在节点已被删除或停用，无法操作。", show_alert=True)
         return
 
-    if action == "retry":
-        payload = row["payload"]
-        if not payload or (row["source_type"] in ("torrent", "metalink") and not os.path.exists(payload)):
-            await query.answer("缺少原始下载来源，无法重试。请重新发送链接或文件。", show_alert=True)
-            return
-        refusal = await _quota_refusal(repo, task_manager, row["user_id"], row["file_size"])
-        if refusal:
-            await query.answer(f"⛔ {refusal}"[:200], show_alert=True)
-            return
-        try:
-            new_gid = await add_source(nodes, row["node"], row["source_type"], payload, row["file_name"])
-        except UnsafeUrlError as exc:
-            await query.answer(f"⛔ {exc}"[:200], show_alert=True)
-            return
-        except Exception:
-            log.exception("retry failed for task %s", row["id"])
-            await query.answer("重试失败，请稍后再试。", show_alert=True)
-            return
-        await repo.retry_task(
-            row["id"], new_gid,
-            reply_message_id=query.message.message_id if query.message else None,
-        )
-        row = await repo.get_by_id(row["id"])
-        _attend(task_manager, new_gid)
-        await _edit(
-            query, render_task_card(row, status="PENDING", node_label=node_label),
-            answer_text="🔄 已重新加入下载",
-            reply_markup=task_keyboard(new_gid, "PENDING", local=is_local, back=back), parse_mode="HTML",
-        )
-        return
-
-    if action == "cancel":
-        text = (
-            "⚠️ 确认取消任务？\n\n"
-            f"任务：{name}\n"
-            f"已下载：{_completed_text(await _download_or_none(aria2, gid))}\n\n"
-            "请选择是否同时删除已经下载的数据。"
-        )
-        await _edit(query, text, reply_markup=_with_back(task_cancel_confirm_keyboard(gid), back))
-        return
-
-    if action == "confirm_delete_files":
-        await _edit(
-            query, "⚠️ 该操作会永久删除已下载文件。",
-            reply_markup=_with_back(task_cancel_confirm_keyboard(gid, destructive=True), back),
-        )
-        return
-
-    if action == "delete":
-        target = _purge_target(row, node)
-        text = f"🗑 删除任务记录？\n\n任务：{name}"
-        if target:
-            text += f"\n文件：{target}\n\n可以只删记录（文件保留在磁盘上），也可以连文件一起删除。"
-        else:
-            text += "\n\n只删除机器人里的记录，不影响磁盘上的文件。"
-        await _edit(
-            query, text,
-            reply_markup=_with_back(task_delete_confirm_keyboard(gid, can_delete_files=bool(target)), back),
-        )
-        return
-
-    if action == "confirm_purge":
-        target = _purge_target(row, node)
-        if not target:
-            await query.answer("文件已不存在或不在下载目录内，只能删除记录。", show_alert=True)
-            return
-        await _edit(
-            query, f"⚠️ 将永久删除：\n{target}\n\n此操作不可恢复。",
-            reply_markup=_with_back(task_delete_confirm_keyboard(gid, destructive=True), back),
-        )
-        return
-
-    if action in {"delete_record", "purge"}:
-        toast = "已删除记录"
-        if action == "purge":
-            target = _purge_target(row, node)
-            if target:
-                try:
-                    await asyncio.to_thread(remove_path, target)
-                    toast = "已删除记录和文件"
-                except OSError:
-                    log.exception("failed to delete files for gid %s", gid)
-                    await query.answer("删除文件失败，记录已保留。", show_alert=True)
-                    return
-        if aria2 is not None and row["status"] not in ("COMPLETED", "FAILED", "CANCELLED"):
-            # 还在 aria2 里跑的任务（旧消息上的删除按钮）先停掉，不然记录没了下载还在继续
-            try:
-                await aria2.remove(gid, files=False, is_local=is_local)
-            except Exception:
-                pass
-        await repo.delete_task(gid)
-        await _leave_task_card(query, repo, nodes, back, toast)
-        return
-
-    if action == "files":
-        if row["status"] == "COMPLETED":
-            path = row["save_path"] or settings.download_dir
-            link = row["gofile_link"] or "暂无下载链接"
-            await query.answer(f"保存位置：{path}\n链接：{link}", show_alert=True)
-            return
-
-        download = await _download_or_none(aria2, gid)
-        real_files = [f for f in download.files if not f.is_metadata] if download else []
-        if not download or len(real_files) < 2:
-            await query.answer(
-                "单文件任务或元数据尚未就绪，无法选择文件。" if download else "任务信息暂不可用。",
-                show_alert=True,
-            )
-            return
-        await _edit(
-            query, render_file_selection(download),
-            reply_markup=_with_back(file_selection_keyboard(gid, download), back), parse_mode="HTML",
-        )
+    handler = _TASK_ACTION_HANDLERS.get(action)
+    if handler is not None:
+        await handler(ctx)
         return
 
     if action == "settings":  # 旧消息上的按钮
         await query.answer("当前任务可直接暂停、继续或取消；限速见「🚀 限速」按钮。", show_alert=True)
         return
 
-    if action == "limit":
-        try:
-            limit_raw = await aria2.get_download_limit(gid)
-        except Exception:
-            limit_raw = None
-        await _edit(
-            query, render_task_limit_chooser(name, limit_raw),
-            reply_markup=_with_back(task_limit_chooser_keyboard(gid, limit_raw), back), parse_mode="HTML",
-        )
-        return
-
     if action == "link":  # 旧消息上的按钮；新卡片直接给 GoFile 的 URL 按钮
         link = row["gofile_link"] or row["save_path"] or "当前没有可用链接。"
         await query.answer(link, show_alert=True)
-        return
-
-    if action == "sendtg":
-        if row["status"] != "COMPLETED":
-            await query.answer("任务未完成，无法发送。", show_alert=True)
-            return
-        if not is_local:
-            # 远程任务不渲染这个按钮，走到这说明是旧消息/伪造数据 —— 兜底拦截
-            await query.answer("文件在远程节点上，无法从这里发送。", show_alert=True)
-            return
-        await query.answer("正在发送…")
-        ok, msg = await task_manager.send_file_to_tg(row, gid)
-        if not ok:
-            await query.answer(msg, show_alert=True)
         return
 
     if action == "resume":
@@ -768,15 +810,15 @@ async def _task_action(query: CallbackQuery, repo, nodes, task_manager, action: 
             await query.answer(f"⛔ {refusal}"[:200], show_alert=True)
             return
 
-    new_status = await _apply_action(query, aria2, repo, action, gid, is_local=is_local)
+    new_status = await _apply_action(query, aria2, repo, action, gid, is_local=ctx.is_local)
     if new_status is None or not query.message:
         return
     try:
         row = await repo.get_by_gid(gid)
         download = await _download_or_none(aria2, gid)
         await query.message.edit_text(
-            render_task_card(row, download, status=new_status, node_label=node_label),
-            reply_markup=_card_keyboard(row, gid, new_status, download, is_local=is_local, back=back),
+            render_task_card(row, download, status=new_status, node_label=ctx.node_label),
+            reply_markup=_card_keyboard(row, gid, new_status, download, is_local=ctx.is_local, back=back),
             parse_mode="HTML",
         )
     except Exception:
@@ -828,7 +870,7 @@ async def toggle_file_selection(query: CallbackQuery, repo, nodes, task_manager=
 
     download = await _download_or_none(aria2, gid)
     _attend(task_manager, gid, submenu=True)
-    await _edit(
+    await edit_or_answer(
         query, render_file_selection(download),
         reply_markup=_with_back(file_selection_keyboard(gid, download), _back_target(query)), parse_mode="HTML",
     )
@@ -867,7 +909,7 @@ async def bulk_action(query: CallbackQuery, repo, nodes, task_manager=None):
     text, markup = await render_task_list(
         repo, nodes, "ACTIVE" if action == "pause" else "PAUSED", 0, user_id=scope
     )
-    await _edit(query, text, answer_text=f"已处理 {changed} 个任务", reply_markup=markup, parse_mode="HTML")
+    await edit_or_answer(query, text, answer_text=f"已处理 {changed} 个任务", reply_markup=markup, parse_mode="HTML")
 
 
 async def _apply_action(query: CallbackQuery, aria2, repo, action: str, gid: str, *, is_local: bool = True) -> str | None:
@@ -908,20 +950,11 @@ async def _download_or_none(aria2, gid: str):
 
 
 def _mapped_status(download, fallback: str) -> str:
+    """展示用状态：aria2 状态经 models.map_aria2_status 统一映射，
+    映射不到（如 removed）或查不到任务时回退到 DB 里的状态。"""
     if not download:
         return fallback
-    status = download.status.upper()
-    if status == "COMPLETE":
-        return "COMPLETED"
-    if status == "ERROR":
-        return "FAILED"
-    if status == "PAUSED":
-        return "PAUSED"
-    if status == "WAITING":
-        return "PENDING"
-    if status == "ACTIVE":
-        return "ACTIVE"
-    return fallback
+    return map_aria2_status(download.status) or fallback
 
 
 def _completed_text(download) -> str:
@@ -931,19 +964,3 @@ def _completed_text(download) -> str:
         return download.completed_length_string()
     except Exception:
         return "未知"
-
-
-async def _edit(query: CallbackQuery, text: str, answer_text: str | None = None, **kwargs):
-    if not query.message:
-        await query.answer(answer_text)
-        return
-    try:
-        await query.message.edit_text(text, **kwargs)
-    except TelegramBadRequest as e:
-        # "message is not modified" = user tapped the same button twice;
-        # a silent toast is correct there, a duplicate message is not
-        if "message is not modified" not in str(e):
-            await query.message.answer(text, **kwargs)
-    except Exception:
-        await query.message.answer(text, **kwargs)
-    await query.answer(answer_text)
