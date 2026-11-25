@@ -4,10 +4,11 @@ import os
 import shutil
 import time
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo
 
 from bot.config import settings
 from bot.core import gofile, quota
@@ -529,6 +530,51 @@ class TaskManager:
         """Apply the same completion pipelines to a verified local video file."""
         current = await self._repo.get_by_gid(row["gid"])
         await self._handle_complete(current or row, download, node_is_local=True)
+
+    async def complete_local_media(self, row, download, caption: str = ""):
+        """Completion path for ParseHub image/multi/rich results.
+
+        Unlike _handle_complete this does not run the single-file gofile /
+        auto-send pipelines (they are defined around one artifact); the
+        validated files stay in the task directory, the completion card is
+        posted as usual, and the media itself goes out as a media group.
+        """
+        current = await self._repo.get_by_gid(row["gid"])
+        row = current or row
+        gid = row["gid"]
+        self._forget_progress(gid)
+        await self._repo.update_status(gid, "COMPLETED", save_path=str(download.dir))
+        await self._notify(
+            row, self._render_card(row, download, status="COMPLETED"),
+            gid=gid, status="COMPLETED", parse_mode="HTML", local=True,
+        )
+        self._spawn(self._send_media_group(row, download, caption))
+
+    async def _send_media_group(self, row, download, caption: str = ""):
+        """Send a multi-file result: media group, or text for rich articles."""
+        chat_id = row["chat_id"]
+        paths = [str(f.path) for f in download.files if os.path.isfile(str(f.path))]
+        if not paths:
+            return
+        try:
+            if all(p.lower().endswith(".txt") for p in paths):
+                text = caption or "\n\n".join(Path(p).read_text(encoding="utf-8") for p in paths)
+                for start in range(0, max(len(text), 1), 4096):
+                    await self._bot.send_message(chat_id=chat_id, text=text[start : start + 4096])
+                return
+            media = []
+            for index, path in enumerate(paths):
+                item_caption = (caption[:1024] or None) if index == 0 else None
+                if path.lower().endswith((".mp4", ".mkv", ".webm", ".mov")):
+                    media.append(InputMediaVideo(media=FSInputFile(path), caption=item_caption))
+                else:
+                    media.append(InputMediaPhoto(media=FSInputFile(path), caption=item_caption))
+            for start in range(0, len(media), 10):  # Telegram media groups cap at 10 items
+                await self._bot.send_media_group(chat_id=chat_id, media=media[start : start + 10])
+        except Exception:
+            # The download is already committed COMPLETED; delivery trouble
+            # must not flip it back (same rule as _notify).
+            log.warning("media group delivery failed for task %s", row["gid"], exc_info=True)
 
     async def _handle_complete(self, row, download, *, node_is_local: bool):
         gid = row["gid"]

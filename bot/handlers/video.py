@@ -21,7 +21,7 @@ from bot.video.accounts import (
     platform_for,
     validate_url,
 )
-from bot.video.backends import PARSERS
+from bot.video.backends import ALL_PARSERS
 from bot.video.services import get_resolver
 from bot.video.ui import MODES, preview_card, preview_keyboard, video_card, video_task_keyboard
 
@@ -44,7 +44,9 @@ async def make_preview(repo, user_id, chat_id, url, parser="auto", quality="best
     vault = CredentialVault(Path(settings.db_path).parent)
     cookies = await account_cookies(repo, vault, user_id, url, mode)
     with vault.snapshot(cookies) as path:
-        info = await get_resolver().probe(url, parser=parser, cookies=path, proxy=settings.proxy_url, quality=quality)
+        info = await get_resolver().probe(
+            url, parser=parser, cookies=path, proxy=settings.proxy_url, quality=quality, account_mode=mode
+        )
     if quality not in info.qualities:
         quality = "best"
     token = await repo.video_save_preview(
@@ -127,7 +129,7 @@ async def video_preview_action(query: CallbackQuery, repo, task_manager):
         return
     parser, quality, mode = preview["parser"], preview["quality"], preview["account_mode"]
     value = parts[3] if len(parts) > 3 else ""
-    if action == "p" and value in PARSERS:
+    if action == "p" and value in ALL_PARSERS:
         if value != parser:
             parser, quality = value, "best"
     elif action == "q" and value.isdigit():

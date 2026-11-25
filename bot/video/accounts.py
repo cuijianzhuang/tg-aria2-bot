@@ -31,6 +31,28 @@ VIDEO_DOMAINS = (
     "facebook.com",
     "dailymotion.com",
 )
+# Platforms only ParseHub can parse (domains taken from each parser's
+# __match__ pattern in parsehub 2.4.4). These have no yt-dlp/you-get route
+# worth trying first, and several are not video at all (图文/文章), so they
+# are recognised here purely to route them into the video pipeline.
+PARSEHUB_PLATFORMS = {
+    "weibo": ("weibo.com", "weibo.cn", "mapp.api.weibo.cn"),
+    "zhihu": ("zhihu.com",),
+    "tieba": ("tieba.baidu.com",),
+    "weixin": ("mp.weixin.qq.com",),
+    "wxchannels": ("weixin.qq.com", "channels.weixin.qq.com"),
+    "kuaishou": ("kuaishou.com", "chenzhongtech.com"),
+    "toutiao": ("toutiao.com",),
+    "douban": ("douban.com", "douc.cc"),
+    "coolapk": ("coolapk.com",),
+    "threads": ("threads.com",),
+    "xiaoheihe": ("xiaoheihe.cn",),
+    "pipix": ("pipix.com",),
+    "jandan": ("jandan.net",),
+    "bangumi": ("bgm.tv", "bangumi.tv", "chii.in"),
+    "medium": ("medium.com",),
+    "zuiyou": ("izuiyou.com", "xiaochuankeji.cn"),
+}
 
 
 def matches_host(host, domain):
@@ -42,9 +64,16 @@ def platform_for(url):
     return next((p for p, domains in PLATFORMS.items() if any(matches_host(host, d) for d in domains)), None)
 
 
+def parsehub_platform_for(url):
+    host = (urlparse(url).hostname or "").lower()
+    return next((p for p, domains in PARSEHUB_PLATFORMS.items() if any(matches_host(host, d) for d in domains)), None)
+
+
 def is_video_url(url):
     host = (urlparse(url).hostname or "").lower()
-    return bool(platform_for(url)) or any(matches_host(host, d) for d in VIDEO_DOMAINS)
+    return (
+        bool(platform_for(url)) or bool(parsehub_platform_for(url)) or any(matches_host(host, d) for d in VIDEO_DOMAINS)
+    )
 
 
 def validate_url(url):

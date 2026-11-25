@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS video_jobs (
  task_id INTEGER PRIMARY KEY, parser TEXT NOT NULL, quality TEXT NOT NULL,
  account_mode TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'queued',
  completed INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0,
- command TEXT, work_dir TEXT, output TEXT, progress_data TEXT NOT NULL DEFAULT '{}', back TEXT
+ command TEXT, work_dir TEXT, output TEXT, progress_data TEXT NOT NULL DEFAULT '{}', back TEXT,
+ kind TEXT NOT NULL DEFAULT 'video', files TEXT NOT NULL DEFAULT '[]', content TEXT NOT NULL DEFAULT ''
 );
 CREATE TRIGGER IF NOT EXISTS video_job_cleanup AFTER DELETE ON tasks BEGIN
  DELETE FROM video_jobs WHERE task_id=OLD.id;
@@ -121,8 +122,15 @@ class VideoRepoMixin:
         )
         task_id = cur.lastrowid
         await self._conn.execute(
-            "INSERT INTO video_jobs (task_id,parser,quality,account_mode) VALUES (?,?,?,?)",
-            (task_id, preview["parser"], preview["quality"], preview["account_mode"]),
+            "INSERT INTO video_jobs (task_id,parser,quality,account_mode,kind,content) VALUES (?,?,?,?,?,?)",
+            (
+                task_id,
+                preview["parser"],
+                preview["quality"],
+                preview["account_mode"],
+                info.get("kind") or "video",
+                info.get("content") or "",
+            ),
         )
         await self._conn.commit()
         return await self.get_by_id(task_id)
@@ -134,13 +142,27 @@ class VideoRepoMixin:
     async def video_jobs(self):
         cur = await self._conn.execute(
             """SELECT t.*,v.parser,v.quality,v.account_mode,v.phase,v.completed,v.total,
-               v.command,v.work_dir,v.output,v.progress_data FROM tasks t JOIN video_jobs v ON t.id=v.task_id
+               v.command,v.work_dir,v.output,v.progress_data,v.kind,v.files,v.content
+               FROM tasks t JOIN video_jobs v ON t.id=v.task_id
                WHERE t.status IN ('PENDING','ACTIVE','PAUSED') OR v.command IS NOT NULL"""
         )
         return await cur.fetchall()
 
     async def video_update(self, task_id, **fields):
-        allowed = {"phase", "completed", "total", "command", "work_dir", "output", "parser", "progress_data", "back"}
+        allowed = {
+            "phase",
+            "completed",
+            "total",
+            "command",
+            "work_dir",
+            "output",
+            "parser",
+            "progress_data",
+            "back",
+            "kind",
+            "files",
+            "content",
+        }
         if not fields or not fields.keys() <= allowed:
             raise ValueError("invalid video job fields")
         await self._conn.execute(
@@ -364,15 +386,30 @@ class VideoRepoMixin:
 
     async def video_complete_file(self, task_id, output, size):
         """Persist the validated artifact before notifications or other hooks."""
+        await self.video_complete_files(task_id, [output], size)
+
+    async def video_complete_files(self, task_id, files, size, kind=None):
+        """Multi-file variant: tasks.save_path keeps the first artifact
+        (single-file legacy readers keep working), video_jobs.files holds
+        the full validated file list, and kind the result type."""
+        if not files:
+            raise ValueError("no completed files")
+        output = files[0]
         await self._conn.execute(
             "UPDATE tasks SET status='COMPLETED',error=NULL,save_path=?,file_size=?,"
             "finished_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=? AND backend='video'",
             (output, size, task_id),
         )
-        await self._conn.execute(
-            "UPDATE video_jobs SET phase='已完成',output=?,completed=?,total=? WHERE task_id=?",
-            (output, size, size, task_id),
-        )
+        if kind is None:
+            await self._conn.execute(
+                "UPDATE video_jobs SET phase='已完成',output=?,completed=?,total=?,files=? WHERE task_id=?",
+                (output, size, size, json.dumps(files), task_id),
+            )
+        else:
+            await self._conn.execute(
+                "UPDATE video_jobs SET phase='已完成',output=?,completed=?,total=?,files=?,kind=? WHERE task_id=?",
+                (output, size, size, json.dumps(files), kind, task_id),
+            )
         await self._conn.commit()
 
     async def video_prune(self):

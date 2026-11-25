@@ -182,6 +182,7 @@ class VideoWorker:
                     cookies=cookie_file,
                     proxy=settings.proxy_url,
                     quality=row["quality"],
+                    account_mode=row["account_mode"],
                 )
                 if row["quality"] not in info.qualities:
                     raise ValueError("原画质已不可用，请重新发送链接选择画质")
@@ -204,6 +205,12 @@ class VideoWorker:
                     return
                 await self.repo.update_file_name(gid, info.title)
                 await self.repo.video_update(row["id"], phase="等待视频源连接", total=info.size or 0)
+                if row["parser"] == "parsehub":
+                    # In-process backend: no child process to spawn, signal
+                    # or stall-watch; ParseHub downloads with its own
+                    # progress callback (see _execute_parsehub).
+                    await self._execute_parsehub(row, directory, info, cookies)
+                    return
                 stage = "下载"
                 process = await spawn(
                     download_args(
@@ -369,7 +376,109 @@ class VideoWorker:
                 await terminate(process)
             self.running.pop(gid, None)
 
-    async def verify_file(self, candidate):
+    async def _execute_parsehub(self, row, directory, info, cookies):
+        """ParseHub branch of _execute: download, verify by kind, deliver.
+
+        Runs inside _execute's try/except, so raising ValueError here gets
+        the standard failure reporting; returning means the job completed.
+        """
+        gid = row["gid"]
+        kind = info.kind or row.get("kind") or "video"
+        await self.repo.video_update(row["id"], phase="下载中", kind=kind, content=info.content or "")
+        accounted = row["completed"]
+
+        async def progress(current, total, unit, *args, **kwargs):
+            nonlocal accounted
+            if unit == "bytes":
+                delta = max(0, int(current) - accounted)
+                if delta:
+                    await self.repo.add_usage(row["user_id"], quota.today(), delta)
+                    accounted = int(current)
+                await self.repo.video_update(row["id"], completed=int(current), total=int(total) or info.size or 0)
+            else:  # "count": whole files finished out of the item total
+                await self.repo.video_update(row["id"], phase=f"下载中（{int(current)}/{int(total)} 个文件）")
+
+        paths = await self.resolver.download_parsehub(
+            row["payload"],
+            directory,
+            cookies=cookies,
+            proxy=settings.proxy_url,
+            quality=row["quality"],
+            account_mode=row["account_mode"],
+            callback=progress,
+        )
+        latest = await self.repo.get_by_gid(gid)
+        if latest is None or latest["status"] == "CANCELLED" or self.stopping:
+            return
+        limits = await quota.limits_for(self.repo, row["user_id"])
+        if kind == "rich" and not paths:
+            # Pure article: the text itself is the artifact for this phase.
+            article = directory / "article.txt"
+            text = info.title + ("\n\n" + info.content if info.content else "")
+            article.write_text(text, encoding="utf-8")
+            paths = [article]
+        if not paths:
+            raise ValueError("ParseHub 没有产出任何文件")
+        await self.repo.video_update(row["id"], phase="校验中")
+        total_size = 0
+        for path in paths:
+            if path.is_symlink() or not safe_target(str(path), str(directory)) or not path.is_file():
+                raise ValueError("ParseHub 产出文件不在任务目录内")
+            size = path.stat().st_size
+            if not size:
+                raise ValueError("ParseHub 产出文件为空")
+            total_size += size
+            await self.verify_media_file(path, kind)
+        if limits.max_task_bytes and total_size > limits.max_task_bytes:
+            from bot.core.compress import remove_path
+
+            await asyncio.to_thread(remove_path, str(directory))
+            raise ValueError("下载内容超过单任务上限，已清理文件")
+        if total_size > accounted:
+            await self.repo.add_usage(row["user_id"], quota.today(), total_size - accounted)
+        files = [File(i + 1, p, p.stat().st_size, p.stat().st_size, True) for i, p in enumerate(paths)]
+        download = Download(gid, "complete", total_size, total_size, 0, 0, 0, None, directory, files)
+        if kind in ("video", "music") and len(paths) == 1:
+            await self.repo.video_complete_file(row["id"], str(paths[0]), total_size)
+            await self.task_manager.complete_local_video(row, download)
+            return
+        await self.repo.video_complete_files(row["id"], [str(p) for p in paths], total_size, kind)
+        caption = info.title + ("\n\n" + info.content if info.content else "")
+        deliver = getattr(self.task_manager, "complete_local_media", None)
+        if deliver is None:  # older/fake managers in tests and embeds
+            deliver = self.task_manager.complete_local_video
+            await deliver(row, download)
+        else:
+            await deliver(row, download, caption)
+
+    async def verify_media_file(self, path, kind):
+        """Per-kind artifact validation for the ParseHub branch."""
+        suffix = path.suffix.lower()
+        if suffix in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"):
+            await asyncio.to_thread(self.verify_image_file, path)
+        elif kind == "music" or suffix in (".mp3", ".m4a", ".flac", ".ogg", ".opus"):
+            await self.verify_file(path, stream="a:0", message="下载结果没有有效音频流")
+        elif suffix == ".txt":
+            return  # the rich-text artifact; non-empty was checked by caller
+        else:
+            await self.verify_file(path)
+
+    @staticmethod
+    def verify_image_file(path):
+        from PIL import Image
+
+        try:
+            with Image.open(path) as image:
+                image.verify()
+            with Image.open(path) as image:
+                if image.format not in ("JPEG", "PNG", "WEBP", "GIF", "BMP") or image.width < 1 or image.height < 1:
+                    raise ValueError("下载结果不是有效图片")
+        except ValueError:
+            raise
+        except Exception:
+            raise ValueError("下载结果不是有效图片") from None
+
+    async def verify_file(self, candidate, stream="v:0", message="下载结果没有有效视频流"):
         verification = json.loads(
             await capture(
                 [
@@ -377,7 +486,7 @@ class VideoWorker:
                     "-v",
                     "error",
                     "-select_streams",
-                    "v:0",
+                    stream,
                     "-show_entries",
                     "stream=codec_type",
                     "-of",
@@ -388,7 +497,7 @@ class VideoWorker:
             )
         )
         if not isinstance(verification, dict) or not verification.get("streams"):
-            raise ValueError("下载结果没有有效视频流")
+            raise ValueError(message)
 
     async def restore_completed_file(self, row):
         if not row["output"] or not row["work_dir"]:

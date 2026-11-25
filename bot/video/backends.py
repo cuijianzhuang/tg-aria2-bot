@@ -1,18 +1,26 @@
 """CLI adapters with normalized metadata; no Telegram or persistence imports."""
 
 import asyncio
+import copy
 import json
+import logging
 import re
 import shutil
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from bot.config import settings
-from bot.video.accounts import platform_for, validate_url
+from bot.video.accounts import parsehub_platform_for, platform_for, validate_url
 from bot.video.process import capture
 
+log = logging.getLogger(__name__)
+
 PARSERS = ("yt-dlp", "you-get")
+# CLI parsers plus the in-process ParseHub backend. Handlers validate the
+# user-facing parser choice against ALL_PARSERS; command() only knows CLI.
+ALL_PARSERS = (*PARSERS, "parsehub")
 PROGRESS_MARKER = "__VIDEO_PROGRESS__"
 GENERIC_PROBE_ERRORS = ("解析失败：", "没有可下载的视频格式", "解析器没有返回有效的视频信息")
 
@@ -22,11 +30,28 @@ def useful_probe_error(error: Exception) -> bool:
 
 
 @dataclass
+class MediaItem:
+    """One downloadable media entry of a (possibly multi-file) result."""
+
+    url: str
+    kind: str  # video / image / music
+    ext: str | None = None
+    width: int = 0
+    height: int = 0
+    duration: int = 0
+
+
+@dataclass
 class MediaInfo:
     title: str
     parser: str
     qualities: list[str] = field(default_factory=lambda: ["best"])
     size: int | None = None
+    # ParseHub-era extension; CLI parsers leave the defaults untouched, so
+    # every existing video result is kind="video" with no items/content.
+    kind: str = "video"  # video / image / multi / music / rich
+    content: str = ""
+    items: list[MediaItem] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -99,10 +124,63 @@ def parse_info(parser: str, output: str) -> MediaInfo:
     return MediaInfo(title, parser, ["best", *list(streams)[:10]], None)
 
 
+PROBE_CACHE_TTL = 300  # seconds; mirrors parse_hub_bot's parse_cache
+PROBE_CACHE_MAXSIZE = 1000
+
+
 class VideoResolver:
     def __init__(self, concurrency: int = 2, timeout: int = 45) -> None:
         self.slots = asyncio.Semaphore(max(1, concurrency))
         self.timeout = max(5, timeout)
+        # Short-TTL probe cache: re-sending the same link (or re-opening
+        # its confirmation card) must not re-run a 45s probe subprocess.
+        # Keyed by url + parser + quality + account mode; failures are
+        # never cached. ParseHub raw results ride along for download().
+        self._cache: dict[tuple, tuple[float, MediaInfo]] = {}
+        self._result_cache: dict[tuple, object] = {}
+        self._parsehub = None
+
+    def _cache_key(self, url: str, parser: str, quality: str, account_mode: str) -> tuple:
+        return (url, parser, quality, account_mode or "")
+
+    def _cache_get(self, key: tuple) -> MediaInfo | None:
+        entry = self._cache.get(key)
+        if entry is None:
+            return None
+        stored_at, info = entry
+        if time.monotonic() - stored_at > PROBE_CACHE_TTL:
+            self._cache.pop(key, None)
+            self._result_cache.pop(key, None)
+            return None
+        return copy.deepcopy(info)
+
+    def _cache_put(self, key: tuple, info: MediaInfo, result: object = None) -> None:
+        if len(self._cache) >= PROBE_CACHE_MAXSIZE:
+            oldest = min(self._cache, key=lambda k: self._cache[k][0])
+            self._cache.pop(oldest, None)
+            self._result_cache.pop(oldest, None)
+        self._cache[key] = (time.monotonic(), copy.deepcopy(info))
+        if result is not None:
+            self._result_cache[key] = result
+
+    def _parsehub_backend(self) -> object:
+        if self._parsehub is None:
+            from bot.video.parsehub_backend import ParseHubBackend
+
+            self._parsehub = ParseHubBackend(self.timeout)
+        return self._parsehub
+
+    @staticmethod
+    def _parser_order(url: str, parser: str) -> tuple[str, ...]:
+        if parser != "auto":
+            return (parser,)
+        # ParseHub-only platforms (图文/文章/视频号…) go to ParseHub first:
+        # the CLI parsers cannot handle them and would only burn a probe
+        # timeout before failing generically. Everywhere else the proven
+        # CLI order stays and ParseHub is the last-resort extension.
+        if parsehub_platform_for(url):
+            return ("parsehub", *PARSERS)
+        return (*PARSERS, "parsehub")
 
     async def probe(
         self,
@@ -112,17 +190,47 @@ class VideoResolver:
         cookies: str | None = None,
         proxy: str | None = None,
         quality: str = "best",
+        account_mode: str = "",
     ) -> MediaInfo:
         validate_url(url)
-        # Force yt-dlp for Chinese platforms: you-get support is outdated or missing
-        platform = platform_for(url)
-        if parser == "auto" and platform in ("bilibili", "douyin", "xhs"):
-            parsers = ("yt-dlp", "you-get")
-        else:
-            parsers = PARSERS if parser == "auto" else (parser,)
+        key = self._cache_key(url, parser, quality, account_mode)
+        cached = self._cache_get(key)
+        if cached is not None:
+            return cached
+        info = await self._probe_uncached(url, parser=parser, cookies=cookies, proxy=proxy, quality=quality, key=key)
+        self._cache_put(key, info, self._result_cache.get(key))
+        return info
+
+    async def _probe_uncached(
+        self,
+        url: str,
+        *,
+        parser: str = "auto",
+        cookies: str | None = None,
+        proxy: str | None = None,
+        quality: str = "best",
+        key: tuple | None = None,
+    ) -> MediaInfo:
+        parsers = self._parser_order(url, parser)
         async with self.slots:
             error = None
             for name in parsers:
+                if name == "parsehub":
+                    try:
+                        info, result = await self._probe_parsehub(url, cookies=cookies, proxy=proxy)
+                    except ValueError as exc:
+                        # In auto mode on CLI-covered platforms an
+                        # unavailable ParseHub must stay invisible; only
+                        # surface it when nothing else can serve the URL.
+                        if parser == "auto" and parsers[0] != "parsehub" and "已自动禁用" in str(exc):
+                            log.debug("parsehub skipped for %s: %s", url, exc)
+                            continue
+                        if error is None or (not useful_probe_error(error) and useful_probe_error(exc)):
+                            error = exc
+                        continue
+                    if key is not None:
+                        self._result_cache[key] = result
+                    return info
                 args = common_args(name, cookies, proxy)
                 if name == "yt-dlp":
                     args += ["-f", format_selector(quality)]
@@ -144,6 +252,41 @@ class VideoResolver:
                     ) from None
                 raise ValueError(str(error)) from None
             raise ValueError("解析器未安装，请启用视频组件")
+
+    async def _probe_parsehub(
+        self, url: str, *, cookies: str | None = None, proxy: str | None = None
+    ) -> tuple[MediaInfo, object]:
+        from bot.video.parsehub_backend import cookies_file_to_dict
+
+        return await self._parsehub_backend().parse(url, cookie=cookies_file_to_dict(cookies), proxy=proxy)
+
+    async def download_parsehub(
+        self,
+        url: str,
+        directory: str | Path,
+        *,
+        cookies: list | dict | None = None,
+        proxy: str | None = None,
+        quality: str = "best",
+        account_mode: str = "",
+        callback: object = None,
+    ) -> list[Path]:
+        """Download via the ParseHub result cached by probe() when possible.
+
+        ``cookies`` is the account system's cookie list (or dict); it is
+        only needed on a cache miss, where the URL is parsed again.
+        """
+        from bot.video.parsehub_backend import cookies_to_dict
+
+        key = self._cache_key(url, "parsehub", quality, account_mode)
+        result = self._result_cache.get(key)
+        if result is None:
+            # The worker probes with parser=<job parser>; also accept the
+            # "auto" cache entry before paying for a second parse.
+            result = self._result_cache.get(self._cache_key(url, "auto", quality, account_mode))
+        if result is None:
+            _, result = await self._parsehub_backend().parse(url, cookie=cookies_to_dict(cookies), proxy=proxy)
+        return await self._parsehub_backend().download(result, directory, proxy=proxy, callback=callback)
 
 
 def format_selector(quality: str) -> str:
